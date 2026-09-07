@@ -7,11 +7,15 @@ import { loadRuntimeConfig } from './src/config.mjs'
 import { resolveCredentialReference } from './src/credentials.mjs'
 import { inventoryLegacyResources, planLegacyCleanup, applyLegacyCleanup, observeLegacyResidue, backupValidDevData, writeLegacyArtifact } from './src/legacy-reconcile.mjs'
 import { environmentForOwner, reopenManifest } from './src/manifest.mjs'
+import { resolveEndpoint } from './src/manifest.mjs'
 import { reconcileRuntime, startRuntime, withRuntime } from './src/orchestrator.mjs'
 import { planRuntime } from './src/planner.mjs'
 import { runChecked } from './src/process.mjs'
 import { startDevelopmentProcesses, stopDevelopmentProcesses } from './src/process-runtime.mjs'
 import { backupDevelopmentState, restoreDevelopmentState } from './src/development-backup.mjs'
+import { activateStagedState, inventoryStateLayout, planStateLayoutMigration, recoverStateLayout, rollbackCommittedState, stageStateLayoutMigration } from './src/state-migration.mjs'
+import { planOperatorReconciliation, reopenOperatorAuthority, writeOperatorStatus } from './src/operator-status.mjs'
+import { sha256, writeAtomic } from './src/canonical.mjs'
 
 const root = path.resolve(import.meta.dirname, '../..')
 
@@ -142,7 +146,59 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (subcommand === 'status') {
     const manifest = reopenManifest(path.resolve(options.manifest || ''))
-    emit({ status: manifest.lifecycle, profile: manifest.profile, taskKey: manifest.taskKey, runId: manifest.runId, devStackId: manifest.devStackId, manifestFingerprint: manifest.manifestFingerprint, providers: manifest.endpoints.map((endpoint) => ({ provider: endpoint.provider, authority: endpoint.authority, ready: endpoint.ready })) })
+    emit({ status: manifest.lifecycle, profile: manifest.profile, stackKey: manifest.stackKey, taskKey: manifest.taskKey, runId: manifest.runId, devStackId: manifest.devStackId, manifestFingerprint: manifest.manifestFingerprint, providers: manifest.endpoints.map((binding) => { const endpoint = resolveEndpoint(manifest, binding.provider); return { provider: endpoint.provider, source: binding.source, authority: endpoint.authority, ready: endpoint.ready } }) })
+    return
+  }
+  if (subcommand === 'state-inventory') {
+    const dockerObjects = options['docker-observations'] ? JSON.parse(fs.readFileSync(path.resolve(options['docker-observations']), 'utf8')) : []
+    const value = inventoryStateLayout({ stateRoot: path.resolve(options['state-root']), dockerObjects })
+    if (options.output) writeAtomic(path.resolve(options.output), value)
+    emit(value)
+    return
+  }
+  if (subcommand === 'state-plan') {
+    const inventory = JSON.parse(fs.readFileSync(path.resolve(options.inventory), 'utf8'))
+    const providerSnapshots = options['provider-snapshots'] ? JSON.parse(fs.readFileSync(path.resolve(options['provider-snapshots']), 'utf8')) : []
+    const providerPools = options['provider-pools'] ? JSON.parse(fs.readFileSync(path.resolve(options['provider-pools']), 'utf8')) : {}
+    let devBackupReference = null
+    if (options['dev-backup-record']) {
+      const backupPath = path.resolve(options['dev-backup-record'])
+      const bytes = fs.readFileSync(backupPath)
+      const backup = JSON.parse(bytes.toString('utf8'))
+      devBackupReference = { type: 'OES_DEV_STATE_BACKUP', path: backupPath, sha256: sha256(bytes), fingerprint: backup.backupFingerprint }
+    }
+    const value = planStateLayoutMigration(inventory, { devStackId: options['dev-stack-id'], providerSnapshots, providerPools, devBackupReference })
+    if (options.output) writeAtomic(path.resolve(options.output), value)
+    emit(value)
+    return
+  }
+  if (subcommand === 'state-stage') {
+    const plan = JSON.parse(fs.readFileSync(path.resolve(options.plan), 'utf8'))
+    const inventory = JSON.parse(fs.readFileSync(path.resolve(options.inventory), 'utf8'))
+    emit(await stageStateLayoutMigration(plan, inventory))
+    return
+  }
+  if (subcommand === 'state-activate') {
+    const confirmation = JSON.parse(fs.readFileSync(path.resolve(options.confirmation), 'utf8'))
+    emit(activateStagedState({ journalPath: path.resolve(options.journal), confirmation }))
+    return
+  }
+  if (subcommand === 'state-recover') {
+    emit(recoverStateLayout({ journalPath: path.resolve(options.journal) }))
+    return
+  }
+  if (subcommand === 'state-rollback') {
+    const confirmation = JSON.parse(fs.readFileSync(path.resolve(options.confirmation), 'utf8'))
+    emit(rollbackCommittedState({ journalPath: path.resolve(options.journal), confirmation }))
+    return
+  }
+  if (subcommand === 'operator-status') {
+    const observations = JSON.parse(fs.readFileSync(path.resolve(options.observations), 'utf8'))
+    const references = JSON.parse(fs.readFileSync(path.resolve(options.authority), 'utf8'))
+    const authority = reopenOperatorAuthority(references)
+    const output = path.resolve(options.output)
+    const status = writeOperatorStatus(output, observations, authority)
+    emit({ ...status, reconciliationPlan: planOperatorReconciliation(observations, authority), output })
     return
   }
   if (subcommand === 'dev-backup') {
@@ -199,7 +255,7 @@ export async function main(argv = process.argv.slice(2)) {
   }
   emit({
     launcher: 'OES local runtime v2',
-    commands: ['dev', 'plan', 'start', 'run', 'migrate', 'foundation-seed', 'fixture', 'status', 'reconcile', 'dev-backup', 'dev-restore', 'legacy-inventory', 'legacy-plan', 'legacy-backup', 'legacy-apply', 'legacy-residue'],
+    commands: ['dev', 'plan', 'start', 'run', 'migrate', 'foundation-seed', 'fixture', 'status', 'reconcile', 'dev-backup', 'dev-restore', 'state-inventory', 'state-plan', 'state-stage', 'state-activate', 'state-recover', 'state-rollback', 'operator-status', 'legacy-inventory', 'legacy-plan', 'legacy-backup', 'legacy-apply', 'legacy-residue'],
     identity: 'Pass --task-key and optionally --run-id; worktree paths never derive ownership.',
     examples: [
       'node scripts/local-runtime/launcher.mjs plan --profile LOCAL_INTEGRATION --test-class integration --owner asset-service --capabilities object-store',

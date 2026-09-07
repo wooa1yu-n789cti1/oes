@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { applyCommittedMigrations } from '../../local-runtime/src/bootstrap.mjs'
 import { resolveCredentialReference } from '../../local-runtime/src/credentials.mjs'
-import { environmentForOwner } from '../../local-runtime/src/manifest.mjs'
+import { environmentForOwner, resolveEndpoint } from '../../local-runtime/src/manifest.mjs'
 import { withRuntime } from '../../local-runtime/src/orchestrator.mjs'
 
 /** Resolves test ownership only from an explicit CI binding or the runner-created fallback. */
@@ -36,7 +36,7 @@ export function selectDeclaredRuntimeOwners(ownerNames, declarations) {
 export function integrationEnvironmentForOwner(manifest, ownerName, resolver = resolveCredentialReference) {
   const environment = environmentForOwner(manifest, ownerName, resolver)
   if (ownerName === 'notification-service') {
-    const nats = manifest.endpoints.find((endpoint) => endpoint.provider === 'nats' && endpoint.owners.includes('collaboration-service'))
+    const nats = resolveEndpoint(manifest, 'nats')
     if (nats?.credentialReference) {
       const publisher = resolver(nats.credentialReference, 'collaboration-service')
       environment.NATS_COLLABORATION_USER = publisher.NATS_COLLABORATION_USER

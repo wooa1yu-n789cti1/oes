@@ -57,7 +57,7 @@ export async function withExclusiveLock(lockDirectory, callback, options = {}) {
 
 /** Acquires one cross-process FIFO slot and returns an idempotent release callback. */
 export async function acquireFifoSlot(stateRoot, limit, identity, { timeoutMs = 300000 } = {}) {
-  const queue = path.join(stateRoot, 'semaphore', 'queue')
+  const queue = path.join(stateRoot, 'semaphores', 'queue')
   fs.mkdirSync(queue, { recursive: true, mode: 0o700 })
   const ticket = `${Date.now().toString().padStart(16, '0')}-${crypto.randomUUID()}.json`
   const ticketPath = path.join(queue, ticket)
@@ -88,7 +88,7 @@ export async function acquireFifoSlot(stateRoot, limit, identity, { timeoutMs = 
 
 /** Releases every exact FIFO ticket for one task/run identity. */
 export function releaseFifoIdentity(stateRoot, taskKey, runId) {
-  const queue = path.join(stateRoot, 'semaphore', 'queue')
+  const queue = path.join(stateRoot, 'semaphores', 'queue')
   if (!fs.existsSync(queue)) return 0
   let removed = 0
   for (const entry of fs.readdirSync(queue).filter((name) => name.endsWith('.json'))) {

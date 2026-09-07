@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { resolveCredentialReference } from './credentials.mjs'
-import { environmentForOwner, reopenManifest } from './manifest.mjs'
+import { environmentForOwner, reopenManifest, resolveResources } from './manifest.mjs'
 
 /** Normalizes one explicit task identity without deriving it from a worktree. */
 export function normalizeTaskKey(value) {
@@ -17,7 +17,7 @@ export function loadRuntimeOwnerContext(owner, environment = process.env) {
   const ownerEnvironment = environmentForOwner(manifest, owner, resolveCredentialReference)
   const databaseUrl = ownerEnvironment.DATABASE_URL
   const database = databaseUrl ? decodeURIComponent(new URL(databaseUrl).pathname.slice(1)) : null
-  const allocations = database ? manifest.resources.filter((resource) => resource.kind === 'database' && resource.database === database) : []
+  const allocations = database ? resolveResources(manifest, { includeStack: true }).filter((resource) => resource.kind === 'database' && resource.database === database) : []
   if (database && allocations.length !== 1) throw new Error(`RUNTIME_DATABASE_ALLOCATION_NOT_EXACT owner=${owner}`)
   return { manifest, manifestPath, taskKey: normalizeTaskKey(manifest.taskKey), environment: ownerEnvironment, databaseUrl, databaseAllocation: allocations[0] || null }
 }

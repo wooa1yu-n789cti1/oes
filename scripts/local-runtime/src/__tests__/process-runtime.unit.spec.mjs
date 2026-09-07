@@ -56,7 +56,7 @@ function manifestFixture(directory, owners = ['auth-service', 'api-gateway', 'pe
     OES_GRPC_TLS_KEY_PATH: path.join(directory, owner, 'key.pem'),
     OES_WORKLOAD_SPIFFE_ID: `spiffe://local.oes.internal/ns/oes/sa/${owner}`
   }])))
-  return { profile: 'DEV', stateRoot: directory, runDirectory: directory, devStackId: 'machine_fixture', taskKey: 'task_fixture', runId: 'run_fixture', owners, endpoints: [{ provider: 'mtls', owners, credentialReference: reference }] }
+  return { profile: 'DEV', stateRoot: directory, stackRoot: directory, runDirectory: directory, devStackId: 'machine_fixture', taskKey: 'task_fixture', runId: 'run_fixture', owners, endpoints: [{ provider: 'mtls', owners, credentialReference: reference }] }
 }
 
 const declarations = { owners: {

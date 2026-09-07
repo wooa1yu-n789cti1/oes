@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fingerprint, randomSecret, sha256, writeAtomic } from './canonical.mjs'
-import { writeCredentialBundle } from './credentials.mjs'
+import { writeCredentialBundle, writeMigratorCredentialBundle } from './credentials.mjs'
 import { withExclusiveLock } from './locks.mjs'
 import { runChecked } from './process.mjs'
 
@@ -33,6 +33,15 @@ export function exactResourceToken(value, size = 24) {
 
 /** Binds every run-owned identity to its accountable task and run pair. */
 export function exactRunIdentity(context) { return `${context.taskKey}:${context.runId}` }
+
+/** Returns the exact Stack-owned provider directory for one pool and provider. */
+function sharedProviderDirectory(context, provider) { return path.join(context.stackRoot, 'providers', context.pool, provider) }
+
+/** Returns the exact Stack-private credential directory for one pool and provider. */
+function sharedCredentialDirectory(context, provider) { return path.join(context.stackRoot, 'credentials', context.pool, provider) }
+
+/** Selects persistent DEV or ephemeral Run credential publication. */
+function runtimeCredentialRoot(context) { return context.profile === 'DEV' ? context.stackRoot : context.runDirectory }
 
 /** Runs Docker without exposing secret-bearing arguments in evidence. */
 function docker(args, options = {}) { return runChecked('docker', args, options) }
@@ -100,11 +109,13 @@ async function waitReady(check, description, timeoutMs = 120000) {
 function labels(context, scope, provider) {
   return {
     'oes.runtime.version': '2',
+    'oes.runtime.stack-key': context.stackKey,
     'oes.runtime.dev-stack-id': context.devStackId,
     'oes.runtime.scope': scope,
+    'oes.runtime.pool': context.pool,
     'oes.runtime.provider': provider,
-    ...(scope === 'SHARED' ? { 'oes.runtime.pool': context.profile === 'DEV' ? 'dev' : 'test' } : {}),
-    ...(scope === 'RUN' ? { 'oes.runtime.task-key': context.taskKey, 'oes.runtime.run-id': context.runId } : {})
+    ...(['RUN', 'CI'].includes(scope) ? { 'oes.runtime.task-key': context.taskKey, 'oes.runtime.run-id': context.runId } : {}),
+    ...(scope === 'CI' ? { 'oes.runtime.ci-job-fingerprint': context.jobFingerprint, 'oes.runtime.ci-job-identity': context.jobIdentity } : {})
   }
 }
 
@@ -138,9 +149,8 @@ export function assertDockerIdentity(resource) {
 
 /** Creates or reopens one shared provider container bound only to devStackId. */
 async function ensureSharedContainer({ context, provider, image, targetPort, targetPorts, command = [], environment = {}, volumeTarget, mounts = [], tmpfs = [], network }) {
-  const pool = context.profile === 'DEV' ? 'dev' : 'test'
-  const name = `oes-v2-${token(context.devStackId)}-${pool}-${provider}`
-  const providerDirectory = path.join(context.stateRoot, 'shared', context.devStackId, provider)
+  const name = `oes-v2-${exactResourceToken(context.devStackId, 32)}-${context.pool}-${provider}`
+  const providerDirectory = sharedProviderDirectory(context, provider)
   const identityPath = path.join(providerDirectory, 'identity.json')
   const ports = targetPorts || [targetPort]
   if (fs.existsSync(identityPath)) {
@@ -192,7 +202,7 @@ async function ensureSharedContainer({ context, provider, image, targetPort, tar
 
 /** Creates or reopens one exact devStack-scoped Docker network. */
 function ensureSharedNetwork(context, provider) {
-  const directory = path.join(context.stateRoot, 'shared', context.devStackId, provider)
+  const directory = sharedProviderDirectory(context, provider)
   const identityPath = path.join(directory, 'network-identity.json')
   if (fs.existsSync(identityPath)) {
     const expected = JSON.parse(fs.readFileSync(identityPath, 'utf8'))
@@ -201,8 +211,7 @@ function ensureSharedNetwork(context, provider) {
     return expected
   }
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
-  const pool = context.profile === 'DEV' ? 'dev' : 'test'
-  const name = `oes-v2-${token(context.devStackId)}-${pool}-${provider}`
+  const name = `oes-v2-${exactResourceToken(context.devStackId, 32)}-${context.pool}-${provider}`
   const resourceLabels = labels(context, 'SHARED', provider)
   docker(['network', 'create', ...labelArgs(resourceLabels), name])
   const resource = { provider, scope: 'SHARED', kind: 'network', name, objectId: docker(['network', 'inspect', '--format', '{{.Id}}', name]).stdout.trim(), labels: resourceLabels, cleanup: 'PRESERVE_SHARED' }
@@ -212,8 +221,11 @@ function ensureSharedNetwork(context, provider) {
 
 /** Creates one run-owned provider container with dynamic endpoint authority. */
 async function createRunContainer({ context, provider, image, targetPort, targetPorts, command = [], environment = {}, volumeTarget, mounts = [], network }) {
-  const name = `oes-v2-${exactResourceToken(exactRunIdentity(context))}-${provider}`
-  const resourceLabels = labels(context, 'RUN', provider)
+  const scope = context.profile === 'CI' ? 'CI' : 'RUN'
+  const name = context.profile === 'CI'
+    ? `oes-v2-ci-${context.jobFingerprint}-${exactResourceToken(exactRunIdentity(context))}-${provider}`
+    : `oes-v2-${exactResourceToken(exactRunIdentity(context))}-${provider}`
+  const resourceLabels = labels(context, scope, provider)
   const volume = volumeTarget ? createManagedVolume(`${name}-data`, resourceLabels) : null
   const ports = targetPorts || [targetPort]
   const args = ['run', '--detach', '--name', name, ...labelArgs(resourceLabels), ...ports.flatMap((port) => ['--publish', `127.0.0.1::${port}`])]
@@ -227,7 +239,7 @@ async function createRunContainer({ context, provider, image, targetPort, target
     throw error
   }
   const observed = inspectContainer(name)
-  return { provider, scope: 'RUN', kind: 'container', name, objectId: observed.Id, labels: resourceLabels, volume, cleanup: 'DELETE_EXACT' }
+  return { provider, scope, kind: 'container', name, objectId: observed.Id, labels: resourceLabels, volume, cleanup: 'DELETE_EXACT' }
 }
 
 /** Returns the exact owners authorized for one provider by the sealed plan. */
@@ -271,7 +283,7 @@ function cleanupPartialProviderDockerObjects(provider, context) {
 /** Starts PostgreSQL and creates per-owner migrator/runtime roles and databases. */
 async function provisionPostgres(context, shared) {
   const rootUser = 'oes_provisioner'
-  const credentialPath = path.join(context.stateRoot, 'shared', context.devStackId, 'postgres', 'bootstrap.json')
+  const credentialPath = path.join(sharedCredentialDirectory(context, 'postgres'), 'bootstrap.json')
   let rootPassword
   let container
   if (shared && fs.existsSync(credentialPath)) {
@@ -302,6 +314,7 @@ async function provisionPostgres(context, shared) {
   const rootCredentialReference = { path: rootCredentialPath, sha256: sha256(fs.readFileSync(rootCredentialPath)) }
   const port = publishedPort(container.name, 5432)
   const ownerEnvironments = {}
+  const migratorEnvironments = {}
   const allocations = []
   for (const owner of ownersFor(context, 'postgres')) {
     const persistent = context.profile === 'DEV'
@@ -310,7 +323,7 @@ async function provisionPostgres(context, shared) {
     const database = `oes_${suffix}_${token(owner, 20).replaceAll('-', '_')}`
     const migrator = `m_${suffix}`
     const runtime = `r_${suffix}`
-    const ownerCredentialPath = persistent ? path.join(context.stateRoot, 'shared', context.devStackId, 'postgres', 'owners', `${owner}.json`) : null
+    const ownerCredentialPath = persistent ? path.join(sharedCredentialDirectory(context, 'postgres'), 'owners', `${owner}.json`) : null
     const persisted = ownerCredentialPath && fs.existsSync(ownerCredentialPath) ? JSON.parse(fs.readFileSync(ownerCredentialPath, 'utf8')) : null
     const migratorPassword = persisted?.migratorPassword || randomSecret()
     const runtimePassword = persisted?.runtimePassword || randomSecret()
@@ -327,10 +340,12 @@ async function provisionPostgres(context, shared) {
     execSql(`GRANT CONNECT ON DATABASE ${database} TO ${migrator}, ${runtime}`)
     const migratorUrl = `postgresql://${migrator}:${encodeURIComponent(migratorPassword)}@127.0.0.1:${port}/${database}?schema=public`
     const runtimeUrl = `postgresql://${runtime}:${encodeURIComponent(runtimePassword)}@127.0.0.1:${port}/${database}?schema=public`
-    ownerEnvironments[owner] = { DATABASE_URL: runtimeUrl, OES_MIGRATOR_DATABASE_URL: migratorUrl }
-    allocations.push({ provider: 'postgres', kind: 'database', scope: persistent ? 'SHARED' : 'RUN', database, migrator, runtime, containerName: container.name, containerObjectId: container.objectId, containerScope: container.scope, rootCredentialReference, cleanup: persistent ? 'PRESERVE_SHARED' : 'DROP_EXACT' })
+    ownerEnvironments[owner] = { DATABASE_URL: runtimeUrl }
+    migratorEnvironments[owner] = { DATABASE_URL: migratorUrl }
+    allocations.push({ provider: 'postgres', kind: 'database', scope: persistent ? 'SHARED' : context.profile === 'CI' ? 'CI' : 'RUN', database, migrator, runtime, containerName: container.name, containerObjectId: container.objectId, containerScope: container.scope, rootCredentialReference, cleanup: persistent ? 'PRESERVE_SHARED' : 'DROP_EXACT' })
   }
-  const reference = writeCredentialBundle(context.runDirectory, 'postgres', ownerEnvironments)
+  const reference = writeCredentialBundle(runtimeCredentialRoot(context), 'postgres', ownerEnvironments)
+  writeMigratorCredentialBundle(context, migratorEnvironments)
   return {
     resources: [container, ...allocations],
     endpoints: [{ provider: 'postgres', authority: `docker:${container.objectId}:5432/tcp`, host: '127.0.0.1', port, ready: true, owners: ownersFor(context, 'postgres'), environment: { OES_POSTGRES_HOST: '127.0.0.1', OES_POSTGRES_PORT: String(port) }, credentialReference: reference }]
@@ -340,7 +355,7 @@ async function provisionPostgres(context, shared) {
 /** Starts shared or job-private MinIO and creates one policy-scoped bucket/user per Asset owner. */
 async function provisionMinio(context, shared) {
   const rootUser = 'oes_root'
-  const credentialPath = path.join(context.stateRoot, 'shared', context.devStackId, 'minio', 'bootstrap.json')
+  const credentialPath = path.join(sharedCredentialDirectory(context, 'minio'), 'bootstrap.json')
   let rootPassword
   let container
   if (shared && fs.existsSync(credentialPath)) {
@@ -371,7 +386,7 @@ async function provisionMinio(context, shared) {
     const suffix = sha256(`${identity}:${owner}`).slice(0, 12)
     const bucket = `oes-${suffix}`
     const accessKey = `a${suffix}`
-    const ownerCredentialPath = persistent ? path.join(context.stateRoot, 'shared', context.devStackId, 'minio', 'owners', `${owner}.json`) : null
+    const ownerCredentialPath = persistent ? path.join(sharedCredentialDirectory(context, 'minio'), 'owners', `${owner}.json`) : null
     const persisted = ownerCredentialPath && fs.existsSync(ownerCredentialPath) ? JSON.parse(fs.readFileSync(ownerCredentialPath, 'utf8')) : null
     const secretKey = persisted?.secretKey || randomSecret()
     if (ownerCredentialPath && !persisted) writeAtomic(ownerCredentialPath, { bucket, accessKey, secretKey }, 0o600)
@@ -381,15 +396,15 @@ async function provisionMinio(context, shared) {
     const script = `mc alias set -- local http://127.0.0.1:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null && mc mb --ignore-existing local/${bucket} >/dev/null && mc admin user add -- local ${accessKey} "$MINIO_USER_SECRET" >/dev/null && (mc admin policy info local ${policy} >/dev/null 2>&1 || mc admin policy create local ${policy} /policy.json >/dev/null) && mc admin policy attach local ${policy} --user ${accessKey} >/dev/null`
     docker(['run', '--rm', '--network', `container:${container.name}`, '--env', `MINIO_ROOT_USER=${rootUser}`, '--env', `MINIO_ROOT_PASSWORD=${rootPassword}`, '--env', `MINIO_USER_SECRET=${secretKey}`, '--volume', `${policyPath}:/policy.json:ro`, '--entrypoint', 'sh', IMAGES.minioClient, '-ec', script], { timeout: 120000 })
     ownerEnvironments[owner] = { ASSET_S3_ENDPOINT: endpoint, ASSET_S3_ACCESS_KEY_ID: accessKey, ASSET_S3_SECRET_ACCESS_KEY: secretKey, ASSET_S3_BUCKET: bucket, ASSET_S3_FORCE_PATH_STYLE: 'true' }
-    allocations.push({ provider: 'minio', kind: 'bucket', scope: persistent ? 'SHARED' : 'RUN', bucket, accessKey, policy, containerName: container.name, containerObjectId: container.objectId, containerScope: container.scope, adminCredentialReference, cleanup: persistent ? 'PRESERVE_SHARED' : 'DELETE_LOGICAL_EXACT' })
+    allocations.push({ provider: 'minio', kind: 'bucket', scope: persistent ? 'SHARED' : context.profile === 'CI' ? 'CI' : 'RUN', bucket, accessKey, policy, containerName: container.name, containerObjectId: container.objectId, containerScope: container.scope, adminCredentialReference, cleanup: persistent ? 'PRESERVE_SHARED' : 'DELETE_LOGICAL_EXACT' })
   }
-  const reference = writeCredentialBundle(context.runDirectory, 'minio', ownerEnvironments)
+  const reference = writeCredentialBundle(runtimeCredentialRoot(context), 'minio', ownerEnvironments)
   return { resources: [container, ...allocations], endpoints: [{ provider: 'minio', authority: `docker:${container.objectId}:9000/tcp`, host: '127.0.0.1', port, ready: true, owners: Object.keys(ownerEnvironments), environment: { ASSET_S3_ENDPOINT: endpoint }, credentialReference: reference }] }
 }
 
 /** Starts shared DEV or run-private Redis with per-owner ACL users and namespaces. */
 async function provisionRedis(context, shared) {
-  const bootstrapPath = path.join(context.stateRoot, 'shared', context.devStackId, 'redis', 'bootstrap.json')
+  const bootstrapPath = path.join(sharedCredentialDirectory(context, 'redis'), 'bootstrap.json')
   const persistedBootstrap = shared && fs.existsSync(bootstrapPath) ? JSON.parse(fs.readFileSync(bootstrapPath, 'utf8')) : null
   const adminPassword = persistedBootstrap?.adminPassword || randomSecret()
   if (shared && !persistedBootstrap) writeAtomic(bootstrapPath, { adminPassword }, 0o600)
@@ -403,7 +418,7 @@ async function provisionRedis(context, shared) {
     const suffix = sha256(`${identity}:${owner}`).slice(0, 12)
     const eventScope = sha256(identity).slice(0, 12)
     const user = `u_${suffix}`
-    const ownerCredentialPath = shared ? path.join(context.stateRoot, 'shared', context.devStackId, 'redis', 'owners', `${owner}.json`) : null
+    const ownerCredentialPath = shared ? path.join(sharedCredentialDirectory(context, 'redis'), 'owners', `${owner}.json`) : null
     const persisted = ownerCredentialPath && fs.existsSync(ownerCredentialPath) ? JSON.parse(fs.readFileSync(ownerCredentialPath, 'utf8')) : null
     const password = persisted?.password || randomSecret()
     const namespace = `oes:${suffix}`
@@ -411,9 +426,9 @@ async function provisionRedis(context, shared) {
     if (ownerCredentialPath && !persisted) writeAtomic(ownerCredentialPath, { user, password, namespace }, 0o600)
     docker(['exec', container.name, 'redis-cli', '-a', adminPassword, 'ACL', 'SETUSER', user, 'resetkeys', 'resetchannels', 'on', `>${password}`, `~${namespace}:*`, `&${terminalDeviceUnavailableChannel}`, '+@read', '+@write', '+ping', '+publish', '+subscribe', '+unsubscribe', '-@admin', '-@dangerous'])
     ownerEnvironments[owner] = { REDIS_HOST: '127.0.0.1', REDIS_PORT: String(port), REDIS_USERNAME: user, REDIS_PASSWORD: password, OES_REDIS_NAMESPACE: namespace, TERMINAL_DEVICE_UNAVAILABLE_REDIS_CHANNEL: terminalDeviceUnavailableChannel }
-    allocations.push({ provider: 'redis', kind: 'acl-user', scope: shared ? 'SHARED' : 'RUN', user, namespace, containerName: container.name, containerObjectId: container.objectId, cleanup: shared ? 'PRESERVE_SHARED' : 'DELETED_WITH_OWNED_CONTAINER' })
+    allocations.push({ provider: 'redis', kind: 'acl-user', scope: shared ? 'SHARED' : context.profile === 'CI' ? 'CI' : 'RUN', user, namespace, containerName: container.name, containerObjectId: container.objectId, cleanup: shared ? 'PRESERVE_SHARED' : 'DELETED_WITH_OWNED_CONTAINER' })
   }
-  const reference = writeCredentialBundle(context.runDirectory, 'redis', ownerEnvironments)
+  const reference = writeCredentialBundle(runtimeCredentialRoot(context), 'redis', ownerEnvironments)
   return { resources: [container, ...allocations], endpoints: [{ provider: 'redis', authority: `docker:${container.objectId}:6379/tcp`, host: '127.0.0.1', port, ready: true, owners: ownersFor(context, 'redis'), environment: { REDIS_HOST: '127.0.0.1', REDIS_PORT: String(port) }, credentialReference: reference }] }
 }
 
@@ -421,7 +436,7 @@ async function provisionRedis(context, shared) {
 async function provisionNats(context, shared) {
   const secret = () => `s${randomSecret(24).replace(/[^a-zA-Z0-9]/gu, '')}`
   const identity = shared ? context.devStackId : exactRunIdentity(context)
-  const credentialsPath = shared ? path.join(context.stateRoot, 'shared', context.devStackId, 'nats', 'credentials.json') : null
+  const credentialsPath = shared ? path.join(sharedCredentialDirectory(context, 'nats'), 'credentials.json') : null
   const stored = credentialsPath && fs.existsSync(credentialsPath) ? JSON.parse(fs.readFileSync(credentialsPath, 'utf8')) : null
   const credentials = stored || {
     NATS_COLLABORATION_USER: `collaboration_${sha256(identity).slice(0, 8)}`, NATS_COLLABORATION_PASSWORD: secret(),
@@ -458,7 +473,7 @@ async function provisionNats(context, shared) {
     if (!ownerEnvironments[owner]) throw new Error(`NATS_OWNER_DENIED owner=${owner}`)
     return [owner, ownerEnvironments[owner]]
   }))
-  const configPath = shared ? path.join(context.stateRoot, 'shared', context.devStackId, 'nats', 'nats-server.conf') : path.join(context.runDirectory, 'provider', 'nats-server.conf')
+  const configPath = shared ? path.join(sharedProviderDirectory(context, 'nats'), 'nats-server.conf') : path.join(context.runDirectory, 'provider', 'nats-server.conf')
   fs.mkdirSync(path.dirname(configPath), { recursive: true, mode: 0o700 })
   fs.copyFileSync(path.join(context.root, 'docker/nats/nats-server.conf'), configPath)
   fs.chmodSync(configPath, 0o600)
@@ -468,13 +483,13 @@ async function provisionNats(context, shared) {
   const bootstrapEnvironment = { NATS_URL: 'nats://127.0.0.1:4222', NATS_OPERATOR_USER: credentials.NATS_OPERATOR_USER, NATS_OPERATOR_PASSWORD: credentials.NATS_OPERATOR_PASSWORD }
   docker(['run', '--rm', '--network', `container:${container.name}`, ...Object.entries(bootstrapEnvironment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--volume', `${path.join(context.root, 'docker/nats/bootstrap.sh')}:/etc/nats/bootstrap.sh:ro`, '--volume', `${path.join(context.root, 'docker/nats/topology')}:/etc/nats/topology:ro`, IMAGES.natsBox, 'sh', '/etc/nats/bootstrap.sh'], { timeout: 120000 })
   for (const environment of Object.values(selected)) environment.NATS_URL = `nats://127.0.0.1:${port}`
-  const reference = writeCredentialBundle(context.runDirectory, 'nats', selected)
+  const reference = writeCredentialBundle(runtimeCredentialRoot(context), 'nats', selected)
   return { resources: [container], endpoints: [{ provider: 'nats', authority: `docker:${container.objectId}:4222/tcp`, host: '127.0.0.1', port, ready: true, owners: ownersFor(context, 'nats'), environment: { NATS_URL: `nats://127.0.0.1:${port}` }, credentialReference: reference }] }
 }
 
 /** Creates a stable DEV or per-run CA and SPIFFE URI certificate for each owner. */
 async function provisionMtls(context, shared) {
-  const directory = shared ? path.join(context.stateRoot, 'shared', context.devStackId, 'mtls') : path.join(context.runDirectory, 'provider', 'mtls')
+  const directory = shared ? sharedCredentialDirectory(context, 'mtls') : path.join(context.runDirectory, 'provider', 'mtls')
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
   const caKey = path.join(directory, 'ca.key')
   const ca = path.join(directory, 'ca.pem')
@@ -504,9 +519,9 @@ async function provisionMtls(context, shared) {
     fs.chmodSync(key, 0o600)
     ownerEnvironments[owner] = { OES_GRPC_TLS_ENABLED: 'true', OES_GRPC_TLS_MIN_VERSION: 'TLSv1.2', OES_GRPC_TLS_CA_PATH: ca, OES_GRPC_TLS_CERT_PATH: cert, OES_GRPC_TLS_KEY_PATH: key, OES_WORKLOAD_SPIFFE_ID: spiffe }
     const files = [key, csr, cert, ext].map((file) => ({ path: file, sha256: sha256(fs.readFileSync(file)) }))
-    certificates.push({ provider: 'mtls', kind: 'certificate', scope: shared ? 'SHARED' : 'RUN', owner, ca, cert, key, spiffe, files, cleanup: shared ? 'PRESERVE_SHARED' : 'DELETE_FILES_EXACT' })
+    certificates.push({ provider: 'mtls', kind: 'certificate', scope: shared ? 'SHARED' : context.profile === 'CI' ? 'CI' : 'RUN', owner, ca, cert, key, spiffe, files, cleanup: shared ? 'PRESERVE_SHARED' : 'DELETE_FILES_EXACT' })
   }
-  const reference = writeCredentialBundle(context.runDirectory, 'mtls', ownerEnvironments)
+  const reference = writeCredentialBundle(runtimeCredentialRoot(context), 'mtls', ownerEnvironments)
   return { resources: certificates, endpoints: [{ provider: 'mtls', authority: `filesystem:${sha256(fs.readFileSync(ca))}`, ready: true, owners: ownersFor(context, 'mtls'), environment: { OES_GRPC_TLS_ENABLED: 'true' }, credentialReference: reference }] }
 }
 
@@ -523,7 +538,7 @@ async function provisionOtel(context) {
 
 /** Starts the complete long-lived DEV observability stack on one devStack-scoped network. */
 async function provisionOtelFull(context) {
-  const directory = path.join(context.stateRoot, 'shared', context.devStackId, 'otel-full')
+  const directory = sharedProviderDirectory(context, 'otel-full')
   const configDirectory = path.join(directory, 'config')
   const logDirectory = path.join(directory, 'logs')
   fs.mkdirSync(configDirectory, { recursive: true, mode: 0o700 })
@@ -532,7 +547,7 @@ async function provisionOtelFull(context) {
   const datasourceDirectory = path.join(configDirectory, 'grafana-datasources')
   fs.mkdirSync(datasourceDirectory, { recursive: true, mode: 0o700 })
   fs.copyFileSync(path.join(context.root, 'docker/grafana/provisioning/datasources/datasources.yaml'), path.join(datasourceDirectory, 'datasources.yaml'))
-  const credentialPath = path.join(directory, 'grafana-bootstrap.json')
+  const credentialPath = path.join(sharedCredentialDirectory(context, 'otel-full'), 'grafana-bootstrap.json')
   const stored = fs.existsSync(credentialPath) ? JSON.parse(fs.readFileSync(credentialPath, 'utf8')) : null
   const grafanaCredentials = stored || { user: 'admin', password: randomSecret(24) }
   if (!stored) writeAtomic(credentialPath, grafanaCredentials, 0o600)
@@ -558,8 +573,8 @@ async function provisionOtelFull(context) {
 /** Starts a temporary MySQL-backed Nacos pair and publishes only after both containers are running. */
 async function provisionNacos(context, shared) {
   if (shared) {
-    const providerDirectory = path.join(context.stateRoot, 'shared', context.devStackId, 'nacos')
-    const credentialPath = path.join(providerDirectory, 'bootstrap.json')
+    const providerDirectory = sharedProviderDirectory(context, 'nacos')
+    const credentialPath = path.join(sharedCredentialDirectory(context, 'nacos'), 'bootstrap.json')
     const stored = fs.existsSync(credentialPath) ? JSON.parse(fs.readFileSync(credentialPath, 'utf8')) : null
     const credentials = stored || { rootPassword: randomSecret(), nacosPassword: randomSecret(), username: `runtime_${sha256(context.devStackId).slice(0, 8)}`, password: randomSecret(24), authToken: Buffer.from(randomSecret(48)).toString('base64').slice(0, 64), authIdentityValue: randomSecret() }
     if (!stored) writeAtomic(credentialPath, credentials, 0o600)
@@ -575,11 +590,12 @@ async function provisionNacos(context, shared) {
     const port = publishedPort(nacos.name, 8848)
     await waitReady(async () => { const response = await fetch(`http://127.0.0.1:${port}/nacos/v1/console/health/readiness`, { signal: AbortSignal.timeout(2000) }); return response.ok && /^(?:OK|UP)$/u.test((await response.text()).trim()) }, 'nacos', 180000)
     const ownerEnvironments = Object.fromEntries(ownersFor(context, 'nacos').map((owner) => [owner, { NACOS_SERVER: `127.0.0.1:${port}`, NACOS_USERNAME: credentials.username, NACOS_PASSWORD: credentials.password }]))
-    const reference = writeCredentialBundle(context.runDirectory, 'nacos', ownerEnvironments)
+    const reference = writeCredentialBundle(runtimeCredentialRoot(context), 'nacos', ownerEnvironments)
     return { resources: [network, mysql, nacos], endpoints: [{ provider: 'nacos', authority: `docker:${nacos.objectId}:8848/tcp`, host: '127.0.0.1', port, ready: true, owners: ownersFor(context, 'nacos'), environment: { NACOS_SERVER: `127.0.0.1:${port}` }, credentialReference: reference }] }
   }
-  const network = `oes-v2-${exactResourceToken(exactRunIdentity(context))}-nacos`
-  const networkLabels = labels(context, 'RUN', 'nacos')
+  const runScope = context.profile === 'CI' ? 'CI' : 'RUN'
+  const network = context.profile === 'CI' ? `oes-v2-ci-${context.jobFingerprint}-${exactResourceToken(exactRunIdentity(context))}-nacos` : `oes-v2-${exactResourceToken(exactRunIdentity(context))}-nacos`
+  const networkLabels = labels(context, runScope, 'nacos')
   docker(['network', 'create', ...labelArgs(networkLabels), network])
   const rootPassword = randomSecret()
   const nacosPassword = randomSecret()
@@ -598,7 +614,7 @@ async function provisionNacos(context, shared) {
   }, 'nacos', 180000)
   const ownerEnvironments = Object.fromEntries(ownersFor(context, 'nacos').map((owner) => [owner, { NACOS_SERVER: `127.0.0.1:${port}`, NACOS_USERNAME: username, NACOS_PASSWORD: password }]))
   const reference = writeCredentialBundle(context.runDirectory, 'nacos', ownerEnvironments)
-  return { resources: [{ provider: 'nacos', scope: 'RUN', kind: 'network', name: network, objectId: docker(['network', 'inspect', '--format', '{{.Id}}', network]).stdout.trim(), labels: networkLabels, cleanup: 'DELETE_EXACT' }, mysql, nacos], endpoints: [{ provider: 'nacos', authority: `docker:${nacos.objectId}:8848/tcp`, host: '127.0.0.1', port, ready: true, owners: ownersFor(context, 'nacos'), environment: { NACOS_SERVER: `127.0.0.1:${port}` }, credentialReference: reference }] }
+  return { resources: [{ provider: 'nacos', scope: runScope, kind: 'network', name: network, objectId: docker(['network', 'inspect', '--format', '{{.Id}}', network]).stdout.trim(), labels: networkLabels, cleanup: 'DELETE_EXACT' }, mysql, nacos], endpoints: [{ provider: 'nacos', authority: `docker:${nacos.objectId}:8848/tcp`, host: '127.0.0.1', port, ready: true, owners: ownersFor(context, 'nacos'), environment: { NACOS_SERVER: `127.0.0.1:${port}` }, credentialReference: reference }] }
 }
 
 /** Provisions one declared provider and returns exact resources and ready endpoints. */
@@ -691,7 +707,7 @@ export function cleanupDockerResource(resource, context) {
 /** Observes whether one exact run-owned Docker/logical/file resource remains after reconciliation. */
 export function observeDockerResourceResidue(resource) {
   const key = `${resource.provider}:${resource.kind}:${resource.objectId || resource.database || resource.bucket || resource.user || resource.owner || resource.name}`
-  if (resource.scope !== 'RUN') return { key, applicable: false, present: false, observation: 'SHARED_OUTSIDE_RUN_DELETE_SET' }
+  if (!['RUN', 'CI'].includes(resource.scope)) return { key, applicable: false, present: false, observation: 'SHARED_OUTSIDE_RUN_DELETE_SET' }
   const inspectAbsent = (callback) => {
     try { return { present: true, observed: callback() } } catch (error) {
       if (/no such (?:object|container|volume|network)|not found/iu.test(`${error.stderr || ''}\n${error.stdout || ''}\n${error.message || ''}`)) return { present: false, observed: null }
@@ -712,7 +728,7 @@ export function observeDockerResourceResidue(resource) {
     return { key, applicable: true, present: remaining.length > 0, observation: remaining }
   }
   if (resource.kind === 'database') {
-    if (resource.containerScope === 'RUN') {
+    if (['RUN', 'CI'].includes(resource.containerScope)) {
       const observed = inspectAbsent(() => inspectContainer(resource.containerName))
       return { key, applicable: true, present: observed.present, observation: observed.present ? `container:${observed.observed.Id}` : 'ABSENT_WITH_RUN_CONTAINER' }
     }
@@ -724,7 +740,7 @@ export function observeDockerResourceResidue(resource) {
     return { key, applicable: true, present: count !== 0, observation: { databaseOrRoleCount: count } }
   }
   if (resource.kind === 'bucket') {
-    if (resource.containerScope === 'RUN') {
+    if (['RUN', 'CI'].includes(resource.containerScope)) {
       const observed = inspectAbsent(() => inspectContainer(resource.containerName))
       return { key, applicable: true, present: observed.present, observation: observed.present ? `container:${observed.observed.Id}` : 'ABSENT_WITH_RUN_CONTAINER' }
     }

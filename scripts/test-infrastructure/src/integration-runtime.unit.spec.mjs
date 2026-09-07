@@ -86,6 +86,6 @@ test('integration runtime uses the unified core, minimal owner environments and 
     }
   }), failure)
   assert.equal(migrationManifest.endsWith('/manifest.json'), true)
-  const cleanup = JSON.parse(fs.readFileSync(path.join(stateRoot, 'runs', 'fixture_task', 'run_fixture', 'cleanup.json'), 'utf8'))
+  const cleanup = JSON.parse(fs.readFileSync(path.join(path.dirname(migrationManifest), 'cleanup.json'), 'utf8'))
   assert.equal(cleanup.result, 'RECONCILED')
 })

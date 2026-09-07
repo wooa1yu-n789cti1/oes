@@ -1,8 +1,8 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { resolveCredentialReference } from './credentials.mjs'
-import { reopenManifest } from './manifest.mjs'
+import { resolveCredentialReference, resolveMigratorCredential } from './credentials.mjs'
+import { reopenManifest, resolveEndpoint, resolveResources } from './manifest.mjs'
 import { runChecked } from './process.mjs'
 import { finalizePostgresRuntimePrivileges, queryPostgresDatabase } from './docker-driver.mjs'
 
@@ -111,13 +111,13 @@ export function prepareDevelopmentArtifacts(manifestPath, { root }) {
 /** Applies committed migrations using migrator authority and then grants runtime-only access. */
 export function applyCommittedMigrations(manifestPath, { root }) {
   const manifest = reopenManifest(manifestPath)
-  const postgres = manifest.endpoints.find((endpoint) => endpoint.provider === 'postgres')
+  const postgres = resolveEndpoint(manifest, 'postgres')
   if (!postgres) return []
   const results = []
   for (const service of discoverMigrationOwners(root, manifest.owners)) {
-    const credentials = resolveCredentialReference(postgres.credentialReference, service.owner)
-    const environment = { ...cleanProcessEnvironment(), NODE_ENV: manifest.profile === 'DEV' ? 'development' : 'test', DATABASE_URL: credentials.OES_MIGRATOR_DATABASE_URL, OES_TASK_KEY: manifest.taskKey, OES_RUN_ID: manifest.runId }
-    const allocation = manifest.resources.find((resource) => resource.kind === 'database' && resource.runtime && resource.database && resource.database === new URL(credentials.OES_MIGRATOR_DATABASE_URL).pathname.slice(1))
+    const credentials = resolveMigratorCredential(manifest, service.owner)
+    const environment = { ...cleanProcessEnvironment(), NODE_ENV: manifest.profile === 'DEV' ? 'development' : 'test', DATABASE_URL: credentials.DATABASE_URL, OES_TASK_KEY: manifest.taskKey, OES_RUN_ID: manifest.runId }
+    const allocation = resolveResources(manifest, { includeStack: true }).find((resource) => resource.kind === 'database' && resource.runtime && resource.database && resource.database === new URL(credentials.DATABASE_URL).pathname.slice(1))
     if (!allocation) throw new Error(`MIGRATION_DATABASE_ALLOCATION_MISSING owner=${service.owner}`)
     const baseline = prepareBaselineResolution(service, allocation, environment, root)
     if (baseline) results.push(baseline)
@@ -131,7 +131,7 @@ export function applyCommittedMigrations(manifestPath, { root }) {
 /** Executes versioned Foundation Seed separately from run/test fixtures. */
 export function applyFoundationSeeds(manifestPath, { root }) {
   const manifest = reopenManifest(manifestPath)
-  const postgres = manifest.endpoints.find((endpoint) => endpoint.provider === 'postgres')
+  const postgres = resolveEndpoint(manifest, 'postgres')
   if (!postgres) return []
   const declarations = {
     'permission-service': ['pnpm', ['--filter', 'permission-service', 'seed:apply', '--', '--apply']],
@@ -152,7 +152,7 @@ export function applyFoundationSeeds(manifestPath, { root }) {
 export function reconcileMachineWorkloadSelectors(manifestPath, { root }) {
   const manifest = reopenManifest(manifestPath)
   if (!manifest.owners.includes('identity-service')) return null
-  const postgres = manifest.endpoints.find((endpoint) => endpoint.provider === 'postgres')
+  const postgres = resolveEndpoint(manifest, 'postgres')
   if (!postgres) throw new Error('MACHINE_SELECTOR_POSTGRES_REQUIRED')
   const credentials = resolveCredentialReference(postgres.credentialReference, 'identity-service')
   const output = path.join(manifest.runDirectory, 'bootstrap', 'machine-selectors-v2.json')
@@ -174,7 +174,7 @@ export function reconcileMachineWorkloadSelectors(manifestPath, { root }) {
 /** Builds the explicit multi-database environment for the declared tenant-web test fixture. */
 export function tenantWebFixtureEnvironment(manifestPath) {
   const manifest = reopenManifest(manifestPath)
-  const postgres = manifest.endpoints.find((endpoint) => endpoint.provider === 'postgres')
+  const postgres = resolveEndpoint(manifest, 'postgres')
   if (!postgres) throw new Error('FIXTURE_POSTGRES_REQUIRED')
   const bindings = { AUTH_DATABASE_URL: 'auth-service', IDENTITY_DATABASE_URL: 'identity-service', PERMISSION_DATABASE_URL: 'permission-service', ITEM_MASTER_DATABASE_URL: 'item-master-service', TENANT_ORG_DATABASE_URL: 'tenant-org-service', PARTY_DATABASE_URL: 'party-service', HR_DATABASE_URL: 'hr-service' }
   const environment = { ...cleanProcessEnvironment(), NODE_ENV: 'test', OES_TASK_KEY: manifest.taskKey, OES_RUN_ID: manifest.runId }
