@@ -28,6 +28,23 @@ assert.doesNotMatch(workflow, /test:risk|test:l2|test:design-gap|test-matrix|l2-
 
 const quickSmoke = workflow.match(/^  quick-smoke:\n[\s\S]*?(?=^  baseline:)/m)?.[0]
 assert.ok(quickSmoke, 'authoritative CI must define the main quick-smoke job')
+for (const [workspaceOutput, installCommand] of [
+  ['needs-web-install', 'pnpm --dir app/web install --frozen-lockfile'],
+  ['needs-pda-install', 'pnpm --dir app/pda install --frozen-lockfile']
+]) {
+  assert.match(
+    quickSmoke,
+    new RegExp(
+      `- if: \\$\\{\\{ needs\\.change-plan\\.outputs\\.${workspaceOutput} == 'true' \\}\\}\\n` +
+        `\\s+run: ${installCommand.replaceAll('/', '\\/')}`
+    ),
+    `main quick smoke must conditionally install the ${workspaceOutput} workspace`
+  )
+  assert.ok(
+    quickSmoke.indexOf(installCommand) < quickSmoke.indexOf('pnpm test:run'),
+    `${workspaceOutput} install must precede selected quick-smoke tests`
+  )
+}
 const orderedSmoke = [
   'pnpm generated:all',
   'pnpm common:build',

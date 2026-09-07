@@ -415,6 +415,8 @@ jobs:
         with:
           name: change-plan-${{ github.run_id }}-${{ github.run_attempt }}
           path: .tmp
+      - if: ${{ needs.change-plan.outputs.needs-web-install == 'true' }}
+        run: pnpm --dir app/web install --frozen-lockfile
       - if: ${{ needs.change-plan.outputs.needs-pda-install == 'true' }}
         run: pnpm --dir app/pda install --frozen-lockfile
       - run: pnpm generated:all
