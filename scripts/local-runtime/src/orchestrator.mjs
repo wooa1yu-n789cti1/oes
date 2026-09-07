@@ -6,7 +6,7 @@ import { fingerprint, readJson, redact, sha256, writeAtomic } from './canonical.
 import { loadRuntimeConfig } from './config.mjs'
 import { planRuntime } from './planner.mjs'
 import { artifactReference, publishManifest, publishStackManifest, reopenCurrentStackManifest, reopenManifest, reopenStackManifest, runDirectory } from './manifest.mjs'
-import { resolveRuntimeLayout } from './state-layout.mjs'
+import { acquireRuntimeAdmission, resolveRuntimeLayout } from './state-layout.mjs'
 import { cleanupDockerResource, provisionDockerProvider } from './docker-driver.mjs'
 import { cleanupSimulatedResource, provisionSimulatedProvider } from './simulation-driver.mjs'
 
@@ -127,11 +127,15 @@ export async function startRuntime(intent, adapters = {}) {
   const runId = exactId(intent.runId || `run_${crypto.randomUUID().replaceAll('-', '')}`, 'runId')
   const config = loadRuntimeConfig({ root, profile: intent.profile, explicit: { concurrency: intent.concurrency, logLevel: intent.logLevel }, machineConfigPath: intent.machineConfigPath, stateRoot: intent.stateRoot })
   const plan = planRuntime({ root, profile: intent.profile, testClass: intent.testClass, owners: intent.owners, capabilities: intent.capabilities })
-  const layout = await resolveRuntimeLayout({ stateRoot: config.stateRoot, profile: intent.profile, taskKey, runId, explicitDevStackId: intent.devStackId, identitySeed: intent.identitySeed, ciSeed: intent.ciSeed, hostBinding: intent.hostBinding, ciJobIdentity: intent.ciJobIdentity })
-  const devLock = intent.profile === 'DEV'
-    ? await acquireExclusiveLease(path.join(config.stateRoot, 'locks', 'stacks', `${layout.stackKey}.lock`), { kind: 'DEV_STACK', stackKey: layout.stackKey, devStackId: layout.devStackId, taskKey, runId }, { timeoutMs: intent.devLockTimeoutMs || 30000 })
-    : { lease: null, release: () => {} }
+  const admission = await acquireRuntimeAdmission(config.stateRoot, { taskKey, runId, profile: intent.profile }, { timeoutMs: intent.admissionTimeoutMs || 30000 })
+  let layout
+  let devLock = { lease: null, release: () => {} }
+  let leasePath
   try {
+    layout = await resolveRuntimeLayout({ stateRoot: config.stateRoot, profile: intent.profile, taskKey, runId, explicitDevStackId: intent.devStackId, identitySeed: intent.identitySeed, ciSeed: intent.ciSeed, hostBinding: intent.hostBinding, ciJobIdentity: intent.ciJobIdentity })
+    devLock = intent.profile === 'DEV'
+      ? await acquireExclusiveLease(path.join(config.stateRoot, 'locks', 'stacks', `${layout.stackKey}.lock`), { kind: 'DEV_STACK', stackKey: layout.stackKey, devStackId: layout.devStackId, taskKey, runId }, { timeoutMs: intent.devLockTimeoutMs || 30000 })
+      : devLock
     const directory = layout.runRoot
     if (fs.existsSync(path.join(directory, 'manifest.json'))) throw new Error(`RUNTIME_RUN_ALREADY_REGISTERED taskKey=${taskKey} runId=${runId}`)
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
@@ -140,13 +144,14 @@ export async function startRuntime(intent, adapters = {}) {
     const pool = intent.profile === 'DEV' ? 'dev' : intent.profile === 'CI' ? 'ci' : 'test'
     const context = { root, stateRoot: config.stateRoot, stackRoot: layout.stackRoot, runDirectory: directory, profile: intent.profile, pool, taskKey, runId, stackKey: layout.stackKey, devStackId: layout.devStackId, identityKind: layout.identityKind, jobFingerprint: layout.jobFingerprint, jobIdentity: layout.jobIdentity, owners: plan.owners, capabilities: plan.capabilities, providerOwners: plan.providerOwners }
     const releaseSlot = plan.realInfrastructure ? await acquireFifoSlot(config.stateRoot, config.concurrency, { stackKey: layout.stackKey, taskKey, runId, runDirectory: directory }) : () => {}
-    const leasePath = path.join(layout.leasesRoot, `${taskKey}--${runId}.json`)
+    leasePath = path.join(layout.leasesRoot, `${taskKey}--${runId}.json`)
     const leaseRaw = { schemaVersion: 3, kind: 'OES_RUNTIME_STACK_LEASE', stackKey: layout.stackKey, devStackId: layout.devStackId, taskKey, runId, profile: intent.profile, planFingerprint: plan.planFingerprint, pid: process.pid, createdAt: new Date().toISOString() }
     writeAtomic(leasePath, { ...leaseRaw, leaseFingerprint: fingerprint(leaseRaw) })
     const transaction = { schemaVersion: 3, kind: 'OES_RUNTIME_ALLOCATION_TRANSACTION', lifecycle: 'ALLOCATING', ...context, plan, config: redact(config), devLockLease: devLock.lease, resources: [], endpoints: [] }
     const transactionPath = path.join(directory, 'transaction.json')
     writeAtomic(transactionPath, transaction)
     appendEvent(directory, { event: 'ALLOCATION_STARTED', stackKey: layout.stackKey, taskKey, runId, profile: intent.profile, planFingerprint: plan.planFingerprint })
+    admission.release()
     const provision = adapters.provisionProvider || (intent.driver === 'simulation' ? provisionSimulatedProvider : provisionDockerProvider)
     const cleanup = adapters.cleanupResource || (intent.driver === 'simulation' ? cleanupSimulatedResource : cleanupDockerResource)
     try {
@@ -192,6 +197,8 @@ export async function startRuntime(intent, adapters = {}) {
       throw primary
     }
   } catch (error) {
+    admission.release()
+    if (leasePath) fs.rmSync(leasePath, { force: true })
     devLock.release()
     throw error
   }

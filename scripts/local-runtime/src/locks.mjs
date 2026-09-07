@@ -49,6 +49,43 @@ export function releaseExclusiveLease(lease) {
   return true
 }
 
+/** Acquires an exact filesystem lease synchronously without deleting a live owner-publication gap. */
+export function acquireExclusiveLeaseSync(lockDirectory, identity = {}, { timeoutMs = 30000 } = {}) {
+  fs.mkdirSync(path.dirname(lockDirectory), { recursive: true, mode: 0o700 })
+  const started = Date.now()
+  const owner = { leaseId: crypto.randomUUID(), pid: process.pid, ...identity, createdAt: new Date().toISOString() }
+  for (;;) {
+    try {
+      fs.mkdirSync(lockDirectory, { mode: 0o700 })
+      writeAtomic(path.join(lockDirectory, 'owner.json'), owner)
+      break
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error
+      const ownerPath = path.join(lockDirectory, 'owner.json')
+      if (fs.existsSync(ownerPath)) {
+        try {
+          const observed = readJson(ownerPath)
+          process.kill(observed.pid, 0)
+        } catch (ownerError) {
+          if (ownerError.code === 'ESRCH') { fs.rmSync(lockDirectory, { recursive: true, force: true }); continue }
+        }
+      }
+      if (Date.now() - started > timeoutMs) throw new Error(`RUNTIME_LOCK_TIMEOUT path=${lockDirectory}`)
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20)
+    }
+  }
+  const lease = { lockDirectory, owner }
+  let released = false
+  return {
+    lease,
+    release: () => {
+      if (released) return
+      releaseExclusiveLease(lease)
+      released = true
+    }
+  }
+}
+
 /** Runs one callback under an exact filesystem lock with stale-owner reconciliation. */
 export async function withExclusiveLock(lockDirectory, callback, options = {}) {
   const acquired = await acquireExclusiveLease(lockDirectory, {}, options)

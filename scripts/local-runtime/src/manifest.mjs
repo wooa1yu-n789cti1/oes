@@ -2,21 +2,13 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fingerprint, readJson, sha256, writeAtomic } from './canonical.mjs'
 import { assertNoSymlink, stackPaths } from './state-layout.mjs'
+import { acquireExclusiveLeaseSync } from './locks.mjs'
 
 /** Serializes immutable Stack generation allocation across launcher processes. */
 function withStackPublicationLock(stackRoot, callback) {
   const lock = path.join(path.dirname(path.dirname(stackRoot)), 'locks', `stack-manifest-${path.basename(stackRoot)}.lock`)
-  fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 })
-  const deadline = Date.now() + 30000
-  for (;;) {
-    try { fs.mkdirSync(lock, { mode: 0o700 }); writeAtomic(path.join(lock, 'owner.json'), { pid: process.pid }); break } catch (error) {
-      if (error.code !== 'EEXIST') throw error
-      try { const owner = readJson(path.join(lock, 'owner.json')); process.kill(owner.pid, 0) } catch { fs.rmSync(lock, { recursive: true, force: true }); continue }
-      if (Date.now() >= deadline) throw new Error(`STACK_MANIFEST_LOCK_TIMEOUT path=${lock}`)
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20)
-    }
-  }
-  try { return callback() } finally { fs.rmSync(lock, { recursive: true, force: true }) }
+  const acquired = acquireExclusiveLeaseSync(lock, { kind: 'STACK_MANIFEST_PUBLICATION', stackKey: path.basename(stackRoot) })
+  try { return callback() } finally { acquired.release() }
 }
 
 /** Returns the canonical Run directory below its owning Stack. */

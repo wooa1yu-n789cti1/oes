@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fingerprint, readJson, sha256, writeAtomic } from './canonical.mjs'
-import { withExclusiveLock } from './locks.mjs'
+import { acquireExclusiveLeaseSync, withExclusiveLock } from './locks.mjs'
 
 const PATH_KEY = /^[a-z0-9][a-z0-9_-]{1,79}$/u
 const LOWER_HEX_64 = /^[a-f0-9]{64}$/u
@@ -80,6 +80,76 @@ export function stackPaths(stateRoot, stackKey, taskKey, runId) {
   }
 }
 
+/** Returns the parent-owned paths that serialize allocation admission with root migration. */
+export function migrationControlPaths(stateRoot) {
+  const root = path.resolve(stateRoot)
+  const parent = path.dirname(root)
+  const name = path.basename(root)
+  return {
+    root,
+    admissionMutex: path.join(parent, `.${name}.admission.lock`),
+    admissionsRoot: path.join(parent, `.${name}.allocations`),
+    migrationLock: path.join(parent, `.${name}.migration.lock`)
+  }
+}
+
+/** Reopens live parent-owned allocation admissions and removes only dead pre-lease owners. */
+export function activeRuntimeAdmissions(stateRoot) {
+  const control = migrationControlPaths(stateRoot)
+  if (!fs.existsSync(control.admissionsRoot)) return []
+  const active = []
+  for (const name of fs.readdirSync(control.admissionsRoot).filter((entry) => entry.endsWith('.json')).sort()) {
+    const file = path.join(control.admissionsRoot, name)
+    const value = readJson(file)
+    if (value.kind !== 'OES_RUNTIME_ALLOCATION_ADMISSION' || value.admissionFingerprint !== fingerprint(value, 'admissionFingerprint') || value.stateRoot !== control.root) throw new Error(`RUNTIME_ALLOCATION_ADMISSION_INVALID path=${file}`)
+    try { process.kill(value.pid, 0); active.push({ file, ...value }) } catch (error) {
+      if (error.code !== 'ESRCH') throw error
+      fs.rmSync(file, { force: true })
+    }
+  }
+  return active
+}
+
+/** Admits one allocation before state mutation and retains its parent-owned lease until the Stack lease is durable. */
+export async function acquireRuntimeAdmission(stateRoot, identity, { timeoutMs = 30000 } = {}) {
+  const control = migrationControlPaths(stateRoot)
+  exactPathKey(identity.taskKey, 'taskKey')
+  exactPathKey(identity.runId, 'runId')
+  return withExclusiveLock(control.admissionMutex, () => {
+    if (fs.existsSync(control.migrationLock)) throw new Error('STATE_MIGRATION_LOCK_HELD')
+    activeRuntimeAdmissions(control.root)
+    fs.mkdirSync(control.admissionsRoot, { recursive: true, mode: 0o700 })
+    const admissionId = crypto.randomUUID()
+    const file = path.join(control.admissionsRoot, `${identity.taskKey}--${identity.runId}--${admissionId}.json`)
+    const raw = { schemaVersion: 3, kind: 'OES_RUNTIME_ALLOCATION_ADMISSION', admissionId, pid: process.pid, stateRoot: control.root, taskKey: identity.taskKey, runId: identity.runId, profile: identity.profile, createdAt: new Date().toISOString() }
+    const value = { ...raw, admissionFingerprint: fingerprint(raw) }
+    writeAtomic(file, value)
+    let released = false
+    return {
+      file,
+      value,
+      release: () => {
+        if (released) return
+        const observed = readJson(file)
+        if (observed.admissionId !== admissionId || observed.pid !== process.pid || observed.admissionFingerprint !== value.admissionFingerprint) throw new Error(`RUNTIME_ALLOCATION_ADMISSION_OWNER_MISMATCH path=${file}`)
+        fs.rmSync(file)
+        released = true
+      }
+    }
+  }, { timeoutMs })
+}
+
+/** Acquires the parent migration barrier only after atomically proving zero allocation admissions. */
+export function acquireMigrationBarrier(stateRoot, identity = {}, { timeoutMs = 30000 } = {}) {
+  const control = migrationControlPaths(stateRoot)
+  const mutex = acquireExclusiveLeaseSync(control.admissionMutex, { kind: 'RUNTIME_MIGRATION_ADMISSION_MUTEX' }, { timeoutMs })
+  try {
+    const admissions = activeRuntimeAdmissions(control.root)
+    if (admissions.length) throw new Error(`STATE_MIGRATION_ALLOCATION_ADMISSION_HELD count=${admissions.length}`)
+    return acquireExclusiveLeaseSync(control.migrationLock, { kind: 'RUNTIME_STATE_MIGRATION', stateRoot: control.root, ...identity }, { timeoutMs })
+  } finally { mutex.release() }
+}
+
 /** Creates and reopens the canonical machine/Stack identity before any provider mutation. */
 export async function resolveRuntimeLayout({ stateRoot, profile, taskKey, runId, explicitDevStackId, identitySeed, ciSeed, hostBinding, ciJobIdentity }) {
   const root = path.resolve(stateRoot)
@@ -120,10 +190,16 @@ function resolveMachineLayout({ root, taskKey, runId, explicitDevStackId, seed, 
   if (identity.schemaVersion !== 3 || identity.kind !== 'OES_RUNTIME_MACHINE_IDENTITY' || identity.seedEncoding !== 'lowercase-hex' || identity.fullDigest !== recomputed || identity.machineFingerprint !== recomputed.slice(0, 16)) throw new Error('STATE_MACHINE_IDENTITY_MISMATCH')
   if (identity.hostBindingKind !== binding.kind || identity.hostBindingHash !== bindingHash) throw new Error('STATE_HOST_BINDING_MISMATCH')
   const stackKey = exactPathKey(`oes-local-${identity.machineFingerprint}`, 'stackKey')
-  const devStackId = exactPathKey(explicitDevStackId || `machine_${identity.fullDigest.slice(0, 24)}`, 'devStackId')
   const registryPath = path.join(root, 'stack-registry.json')
-  if (!fs.existsSync(registryPath)) writeAtomic(registryPath, { schemaVersion: 3, kind: 'OES_RUNTIME_STACK_REGISTRY', machineDigest: identity.fullDigest, stacks: [{ stackKey, devStackId }] })
-  const registry = readJson(registryPath)
+  let registry = fs.existsSync(registryPath) ? readJson(registryPath) : null
+  if (registry && (registry.schemaVersion !== 3 || registry.kind !== 'OES_RUNTIME_STACK_REGISTRY' || registry.machineDigest !== identity.fullDigest || registry.stacks?.length !== 1 || registry.stacks[0].stackKey !== stackKey)) throw new Error('STATE_STACK_REGISTRY_MISMATCH')
+  const registeredDevStackId = registry ? exactPathKey(registry.stacks[0].devStackId, 'devStackId') : null
+  if (registeredDevStackId && explicitDevStackId && registeredDevStackId !== explicitDevStackId) throw new Error('STATE_STACK_REGISTRY_MISMATCH')
+  const devStackId = exactPathKey(registeredDevStackId || explicitDevStackId || `machine_${identity.fullDigest.slice(0, 24)}`, 'devStackId')
+  if (!registry) {
+    writeAtomic(registryPath, { schemaVersion: 3, kind: 'OES_RUNTIME_STACK_REGISTRY', machineDigest: identity.fullDigest, stacks: [{ stackKey, devStackId }] })
+    registry = readJson(registryPath)
+  }
   const keys = registry.stacks?.map((entry) => entry.stackKey) || []
   const ids = registry.stacks?.map((entry) => entry.devStackId) || []
   if (registry.schemaVersion !== 3 || registry.kind !== 'OES_RUNTIME_STACK_REGISTRY' || registry.machineDigest !== identity.fullDigest || new Set(keys).size !== keys.length || new Set(ids).size !== ids.length || registry.stacks.length !== 1 || registry.stacks[0].stackKey !== stackKey || registry.stacks[0].devStackId !== devStackId) throw new Error('STATE_STACK_REGISTRY_MISMATCH')

@@ -2,8 +2,9 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fingerprint, readJson, sha256, writeAtomic } from './canonical.mjs'
-import { publishStackManifest, reopenCurrentStackManifest } from './manifest.mjs'
-import { assertNoSymlink, exactPathKey, resolveRuntimeLayout } from './state-layout.mjs'
+import { sharedResourceName } from './docker-driver.mjs'
+import { publishStackManifest, reopenCurrentStackManifest, reopenStackManifest } from './manifest.mjs'
+import { acquireMigrationBarrier, activeRuntimeAdmissions, assertNoSymlink, exactPathKey, resolveRuntimeLayout } from './state-layout.mjs'
 import { runChecked } from './process.mjs'
 
 /** Recursively inventories one state root without following symlinks. */
@@ -32,14 +33,36 @@ export function inventoryStateLayout({ stateRoot, dockerObjects = [] }) {
     const directory = path.dirname(path.join(root, relative))
     return !fs.existsSync(path.join(directory, 'cleanup.json')) && !fs.existsSync(path.join(directory, 'failed-cleanup.json'))
   })
-  const leaseFiles = entries.filter((entry) => entry.type === 'FILE' && /(?:^|\/)leases\/.*\.json$/u.test(entry.path)).map((entry) => entry.path)
+  const runningDevProcessAuthorities = []
+  for (const relative of activeRunFiles.filter((entry) => entry.endsWith('/manifest.json'))) {
+    const value = readJson(path.join(root, relative))
+    if (value.profile !== 'DEV') continue
+    for (const endpoint of value.endpoints || []) {
+      const match = String(endpoint.authority || '').match(/^pid:(\d+):/u)
+      if (!match) continue
+      try { process.kill(Number(match[1]), 0); runningDevProcessAuthorities.push({ path: relative, provider: endpoint.provider, pid: Number(match[1]) }) } catch (error) { if (error.code !== 'ESRCH') throw error }
+    }
+  }
+  const leaseFiles = entries.filter((entry) => entry.type === 'FILE' && /(?:^|\/)leases\//u.test(entry.path)).map((entry) => entry.path)
+  const normalizedDockerObjects = dockerObjects.map((object) => ({
+    type: object.type || object.Type || 'container',
+    objectId: object.objectId || object.Id,
+    name: String(object.name || object.Name || '').replace(/^\//u, ''),
+    running: Boolean(object.running ?? object.State?.Running),
+    labels: object.labels || object.Labels || object.Config?.Labels || {},
+    mounts: (object.mounts || object.Mounts || []).map((mount) => ({ Type: mount.Type, Source: mount.Source ? path.resolve(mount.Source) : undefined, Destination: mount.Destination, Name: mount.Name, RW: mount.RW })).sort((left, right) => `${left.Type}:${left.Source || left.Name}:${left.Destination}`.localeCompare(`${right.Type}:${right.Source || right.Name}:${right.Destination}`))
+  })).sort((left, right) => `${left.type}:${left.objectId}`.localeCompare(`${right.type}:${right.objectId}`))
   const binds = []
-  for (const object of dockerObjects) for (const mount of object.mounts || object.Mounts || []) {
+  for (const object of normalizedDockerObjects) for (const mount of object.mounts) {
     if (mount.Type !== 'bind') continue
     const source = path.resolve(mount.Source)
-    if (source === root || source.startsWith(`${root}${path.sep}`)) binds.push({ objectId: object.objectId || object.Id, name: object.name || object.Name, running: Boolean(object.running ?? object.State?.Running), source, destination: mount.Destination })
+    if (source === root || source.startsWith(`${root}${path.sep}`)) binds.push({ objectId: object.objectId, name: object.name, running: object.running, source, destination: mount.Destination })
   }
-  const raw = { schemaVersion: 3, kind: 'OES_RUNTIME_STATE_LAYOUT_INVENTORY', stateRoot: root, entries, activeRunFiles, leaseFiles, binds, sourceTreeFingerprint: fingerprint(entries) }
+  const relevantObjectIds = new Set(binds.map((bind) => bind.objectId))
+  const relevantDockerObjects = normalizedDockerObjects.filter((object) => relevantObjectIds.has(object.objectId))
+  const semaphoreFiles = entries.filter((entry) => entry.type === 'FILE' && /^semaphore\//u.test(entry.path)).map((entry) => entry.path)
+  const controlLockFiles = entries.filter((entry) => entry.type === 'FILE' && /^locks\//u.test(entry.path)).map((entry) => entry.path)
+  const raw = { schemaVersion: 3, kind: 'OES_RUNTIME_STATE_LAYOUT_INVENTORY', stateRoot: root, entries, activeRunFiles, runningDevProcessAuthorities, leaseFiles, semaphoreFiles, controlLockFiles, dockerObjects: relevantDockerObjects, binds, sourceTreeFingerprint: fingerprint(entries) }
   return { ...raw, inventoryFingerprint: fingerprint(raw) }
 }
 
@@ -59,6 +82,22 @@ function reopenDevBackupReference(reference, expectedDevStackId, stateRoot) {
   return value
 }
 
+/** Enumerates every provider object identity file below one mapped provider tree. */
+function providerIdentityFiles(root) {
+  const files = []
+  const visit = (current) => {
+    for (const name of fs.readdirSync(current).sort()) {
+      const selected = path.join(current, name)
+      const stat = fs.lstatSync(selected)
+      if (stat.isSymbolicLink()) throw new Error(`STATE_MIGRATION_SYMLINK_FORBIDDEN path=${selected}`)
+      if (stat.isDirectory()) visit(selected)
+      else if (/^(?:identity|network-identity)\.json$/u.test(name)) files.push(selected)
+    }
+  }
+  visit(root)
+  return files
+}
+
 /** Produces the closed-world state-layout mapping and fixed sibling activation paths. */
 export function planStateLayoutMigration(inventory, { devStackId, providerSnapshots = [], providerPools = {}, devBackupReference = null } = {}) {
   if (inventory.inventoryFingerprint !== fingerprint(inventory, 'inventoryFingerprint')) throw new Error('STATE_MIGRATION_INVENTORY_FINGERPRINT_MISMATCH')
@@ -70,19 +109,36 @@ export function planStateLayoutMigration(inventory, { devStackId, providerSnapsh
   if (!discoveredDevStackId) throw new Error('STATE_MIGRATION_DEV_STACK_ID_REQUIRED')
   const mappings = []
   const sharedRoot = path.join(oldRoot, 'shared', discoveredDevStackId)
+  const sourceTopLevel = fs.readdirSync(oldRoot).sort()
+  const allowedTopLevel = new Set(['machine', 'shared', 'leases', 'semaphore', 'locks', 'runs', 'restore', 'process-runtime'])
+  const unknownTopLevel = sourceTopLevel.filter((entry) => !allowedTopLevel.has(entry))
+  if (unknownTopLevel.length) throw new Error(`STATE_MIGRATION_UNRESOLVED_ENTRY entries=${unknownTopLevel.join(',')}`)
+  const unresolvedRunPrivateFiles = inventory.entries.filter((entry) => entry.type === 'FILE' && /^runs\/[^/]+\/[^/]+\/(?:credentials|provider|orchestration)\//u.test(entry.path)).map((entry) => entry.path)
+  if (unresolvedRunPrivateFiles.length) throw new Error(`STATE_MIGRATION_RUN_PRIVATE_STATE_UNRESOLVED entries=${unresolvedRunPrivateFiles.join(',')}`)
+  const machineEntries = fs.existsSync(path.join(oldRoot, 'machine')) ? fs.readdirSync(path.join(oldRoot, 'machine')).sort() : []
+  if (machineEntries.length !== 1 || machineEntries[0] !== 'dev-stack.json') throw new Error(`STATE_MIGRATION_MACHINE_IDENTITY_UNRESOLVED entries=${machineEntries.join(',')}`)
+  const sharedIds = fs.existsSync(path.join(oldRoot, 'shared')) ? fs.readdirSync(path.join(oldRoot, 'shared')).sort() : []
+  if (sharedIds.length !== 1 || sharedIds[0] !== discoveredDevStackId) throw new Error(`STATE_MIGRATION_SHARED_ROOT_MISMATCH entries=${sharedIds.join(',')}`)
   if (fs.existsSync(sharedRoot)) for (const provider of fs.readdirSync(sharedRoot).sort()) {
+    if (provider === 'process-runtime') {
+      mappings.push({ type: 'STACK_CREDENTIAL_TREE', provider, source: path.join(sharedRoot, provider), targetRelative: path.join('credentials', 'process-runtime') })
+      continue
+    }
     const identityPath = path.join(sharedRoot, provider, 'identity.json')
     const identity = fs.existsSync(identityPath) ? readJson(identityPath) : null
     const pool = providerPools[provider] || identity?.labels?.['oes.runtime.pool']
     if (!['dev', 'test'].includes(pool)) throw new Error(`STATE_MIGRATION_PROVIDER_POOL_REQUIRED provider=${provider}`)
     mappings.push({ type: provider === 'mtls' ? 'CREDENTIAL_TREE' : 'PROVIDER_TREE', provider, pool, source: path.join(sharedRoot, provider), targetRelative: path.join(provider === 'mtls' ? 'credentials' : 'providers', pool, provider) })
   }
+  const rootProcessRuntime = path.join(oldRoot, 'process-runtime')
+  if (fs.existsSync(rootProcessRuntime)) mappings.push({ type: 'STACK_CREDENTIAL_TREE', provider: 'process-runtime', source: rootProcessRuntime, targetRelative: path.join('credentials', 'process-runtime') })
   const runsRoot = path.join(oldRoot, 'runs')
   if (fs.existsSync(runsRoot)) mappings.push({ type: 'HISTORICAL_RUN_EVIDENCE', source: runsRoot, targetRelative: path.join('evidence', 'pre-activation-runs') })
   const restoreRoot = path.join(oldRoot, 'restore')
   if (fs.existsSync(restoreRoot)) mappings.push({ type: 'RESTORE_STATE', source: restoreRoot, targetRelative: 'restore' })
   const mappedPools = new Map(mappings.filter((mapping) => mapping.provider).map((mapping) => [mapping.provider, mapping.pool]))
-  const normalizedProviderSnapshots = providerSnapshots.map((snapshot) => {
+  const retiredConsumerCredentialReferences = []
+  let normalizedProviderSnapshots = providerSnapshots.map((snapshot) => {
     const provider = snapshot.resource?.provider || snapshot.endpoint?.provider
     const pool = snapshot.resource?.pool || snapshot.resource?.labels?.['oes.runtime.pool'] || snapshot.endpoint?.pool || providerPools[provider] || mappedPools.get(provider)
     if (!provider || !['dev', 'test'].includes(pool)) throw new Error(`STATE_MIGRATION_PROVIDER_POOL_REQUIRED provider=${provider || 'UNKNOWN'}`)
@@ -90,10 +146,89 @@ export function planStateLayoutMigration(inventory, { devStackId, providerSnapsh
     const endpoint = snapshot.endpoint ? { ...snapshot.endpoint, pool } : undefined
     if (resource && resource.scope !== 'SHARED') throw new Error(`STATE_MIGRATION_PROVIDER_SCOPE_INVALID provider=${provider}`)
     if (endpoint && (!endpoint.ready || !endpoint.authority)) throw new Error(`STATE_MIGRATION_PROVIDER_ENDPOINT_INVALID provider=${provider}`)
+    if (endpoint?.credentialReference) {
+      const reference = endpoint.credentialReference
+      retiredConsumerCredentialReferences.push({ provider, pool, type: reference.type, path: reference.path, sha256: reference.sha256, fingerprint: reference.fingerprint })
+      delete endpoint.credentialReference
+    }
     return { ...(resource ? { resource } : {}), ...(endpoint ? { endpoint } : {}) }
   })
-  const hasDevData = normalizedProviderSnapshots.some((snapshot) => snapshot.resource?.pool === 'dev' && ['database', 'bucket'].includes(snapshot.resource.kind))
+  const seenEndpoints = new Map()
+  normalizedProviderSnapshots = normalizedProviderSnapshots.map((snapshot) => {
+    if (!snapshot.endpoint) return snapshot
+    const key = `${snapshot.endpoint.provider}:${snapshot.endpoint.pool}`
+    const observed = fingerprint(snapshot.endpoint)
+    if (seenEndpoints.has(key)) {
+      if (seenEndpoints.get(key) !== observed) throw new Error(`STATE_MIGRATION_PROVIDER_ENDPOINT_CONFLICT provider=${snapshot.endpoint.provider}`)
+      const { endpoint, ...resourceOnly } = snapshot
+      return resourceOnly
+    }
+    seenEndpoints.set(key, observed)
+    return snapshot
+  }).filter((snapshot) => snapshot.resource || snapshot.endpoint)
+  const resourceKeys = normalizedProviderSnapshots.filter((snapshot) => snapshot.resource).map((snapshot) => `${snapshot.resource.provider}:${snapshot.resource.pool}:${snapshot.resource.kind}:${snapshot.resource.objectId || snapshot.resource.name || snapshot.resource.database || snapshot.resource.bucket || snapshot.resource.owner}`)
+  const endpointKeys = normalizedProviderSnapshots.filter((snapshot) => snapshot.endpoint).map((snapshot) => `${snapshot.endpoint.provider}:${snapshot.endpoint.pool}`)
+  if (new Set(resourceKeys).size !== resourceKeys.length) throw new Error('STATE_MIGRATION_PROVIDER_RESOURCE_DUPLICATE')
+  if (new Set(endpointKeys).size !== endpointKeys.length) throw new Error('STATE_MIGRATION_PROVIDER_ENDPOINT_DUPLICATE')
+  const duplicateTargets = mappings.map((mapping) => mapping.targetRelative).filter((target, index, values) => values.indexOf(target) !== index)
+  if (duplicateTargets.length) throw new Error(`STATE_MIGRATION_DUPLICATE_TARGET target=${duplicateTargets[0]}`)
+  const providerMappings = mappings.filter((mapping) => mapping.type === 'PROVIDER_TREE')
+  const identityResources = []
+  for (const mapping of providerMappings) {
+    const identityFiles = providerIdentityFiles(mapping.source)
+    if (!identityFiles.length) throw new Error(`STATE_MIGRATION_PROVIDER_IDENTITY_REQUIRED provider=${mapping.provider}`)
+    for (const identityFile of identityFiles) {
+      const value = readJson(identityFile)
+      const resource = normalizedProviderSnapshots.map((snapshot) => snapshot.resource).find((candidate) => candidate?.objectId === value.objectId && candidate.provider === value.provider)
+      if (!resource || resource.scope !== 'SHARED' || resource.pool !== mapping.pool || (value.kind && resource.kind !== value.kind) || (value.name && resource.name !== value.name)) throw new Error(`STATE_MIGRATION_PROVIDER_SNAPSHOT_COVERAGE_REQUIRED provider=${value.provider || mapping.provider} objectId=${value.objectId || 'UNKNOWN'}`)
+      if (value.labels && Object.entries(value.labels).some(([key, expected]) => resource.labels?.[key] !== expected)) throw new Error(`STATE_MIGRATION_PROVIDER_LABEL_MISMATCH provider=${value.provider || mapping.provider}`)
+      if (value.volume && (resource.volume?.name !== value.volume.name || resource.volume?.objectId !== value.volume.objectId)) throw new Error(`STATE_MIGRATION_VOLUME_IDENTITY_MISMATCH provider=${value.provider || mapping.provider}`)
+      identityResources.push({ provider: value.provider || mapping.provider, pool: mapping.pool, kind: value.kind || resource.kind, objectId: value.objectId, name: value.name || resource.name, source: identityFile, volume: value.volume || null })
+    }
+  }
+  const identityObjectIds = new Set(identityResources.map((resource) => resource.objectId))
+  for (const snapshot of normalizedProviderSnapshots) {
+    const resource = snapshot.resource
+    if (resource?.objectId && ['container', 'network'].includes(resource.kind) && !identityObjectIds.has(resource.objectId)) throw new Error(`STATE_MIGRATION_PROVIDER_IDENTITY_COVERAGE_REQUIRED objectId=${resource.objectId}`)
+    const endpointObjectId = snapshot.endpoint?.authority?.match(/^docker:([^:]+):/u)?.[1]
+    if (endpointObjectId && !identityObjectIds.has(endpointObjectId)) throw new Error(`STATE_MIGRATION_PROVIDER_ENDPOINT_OBJECT_MISMATCH objectId=${endpointObjectId}`)
+  }
+  const endpointProviders = new Set(normalizedProviderSnapshots.filter((snapshot) => snapshot.endpoint).map((snapshot) => `${snapshot.endpoint.provider}:${snapshot.endpoint.pool}`))
+  const supportProviders = new Set(['nacos-mysql', 'tempo', 'loki', 'grafana'])
+  for (const resource of identityResources.filter((identity) => identity.kind === 'container' && !supportProviders.has(identity.provider))) if (!endpointProviders.has(`${resource.provider}:${resource.pool}`)) throw new Error(`STATE_MIGRATION_PROVIDER_ENDPOINT_COVERAGE_REQUIRED provider=${resource.provider}`)
+  for (const mapping of mappings.filter((candidate) => candidate.type === 'CREDENTIAL_TREE')) if (mapping.provider === 'mtls' && !endpointProviders.has(`mtls:${mapping.pool}`)) throw new Error('STATE_MIGRATION_PROVIDER_ENDPOINT_COVERAGE_REQUIRED provider=mtls')
+  const snapshotObjectIds = new Set(normalizedProviderSnapshots.flatMap((snapshot) => [snapshot.resource?.objectId, snapshot.resource?.volume?.objectId]).filter(Boolean))
+  for (const object of inventory.dockerObjects || []) {
+    if (!object.objectId || !snapshotObjectIds.has(object.objectId)) throw new Error(`STATE_MIGRATION_DOCKER_OBJECT_COVERAGE_REQUIRED objectId=${object.objectId || 'UNKNOWN'}`)
+    const resource = normalizedProviderSnapshots.map((snapshot) => snapshot.resource).find((candidate) => candidate?.objectId === object.objectId)
+    if (Object.entries(object.labels || {}).some(([key, expected]) => resource?.labels?.[key] !== expected)) throw new Error(`STATE_MIGRATION_DOCKER_LABEL_MISMATCH objectId=${object.objectId}`)
+    for (const mount of object.mounts || []) if (mount.Type === 'volume' && mount.Name && !normalizedProviderSnapshots.some((snapshot) => snapshot.resource?.volume?.name === mount.Name || (snapshot.resource?.kind === 'volume' && snapshot.resource?.name === mount.Name))) throw new Error(`STATE_MIGRATION_VOLUME_COVERAGE_REQUIRED name=${mount.Name}`)
+  }
+  for (const bind of inventory.binds || []) {
+    const mapping = providerMappings.find((candidate) => bind.source === candidate.source || bind.source.startsWith(`${candidate.source}${path.sep}`))
+    if (!mapping) throw new Error(`STATE_MIGRATION_BIND_MAPPING_REQUIRED source=${bind.source}`)
+    if (!normalizedProviderSnapshots.some((snapshot) => snapshot.resource?.objectId === bind.objectId)) throw new Error(`STATE_MIGRATION_BIND_OBJECT_COVERAGE_REQUIRED objectId=${bind.objectId}`)
+  }
+  const absoluteReferences = []
+  const collectReferences = (value, pointer = '$') => {
+    if (Array.isArray(value)) return value.forEach((child, index) => collectReferences(child, `${pointer}[${index}]`))
+    if (value && typeof value === 'object') return Object.entries(value).forEach(([key, child]) => collectReferences(child, `${pointer}.${key}`))
+    if (typeof value === 'string' && path.isAbsolute(value) && (value === oldRoot || value.startsWith(`${oldRoot}${path.sep}`))) absoluteReferences.push({ pointer, path: path.resolve(value) })
+  }
+  normalizedProviderSnapshots.forEach((snapshot, index) => collectReferences(snapshot, `$[${index}]`))
+  for (const reference of absoluteReferences) if (!mappings.some((mapping) => reference.path === mapping.source || reference.path.startsWith(`${mapping.source}${path.sep}`))) throw new Error(`STATE_MIGRATION_REFERENCE_MAPPING_REQUIRED pointer=${reference.pointer}`)
+  const hasDevData = identityResources.some((resource) => resource.pool === 'dev' && resource.volume && ['postgres', 'minio'].includes(resource.provider)) || normalizedProviderSnapshots.some((snapshot) => snapshot.resource?.pool === 'dev' && ['database', 'bucket'].includes(snapshot.resource.kind))
   if (hasDevData) reopenDevBackupReference(devBackupReference, discoveredDevStackId, oldRoot)
+  const coverage = {
+    mappedSourceRoots: mappings.map((mapping) => ({ type: mapping.type, source: mapping.source, targetRelative: mapping.targetRelative })),
+    consumedSourceRoots: ['machine/dev-stack.json', 'leases', 'semaphore', 'locks'],
+    providerIdentities: identityResources,
+    dockerObjectIds: (inventory.dockerObjects || []).map((object) => object.objectId),
+    bindCount: (inventory.binds || []).length,
+    absoluteReferenceCount: absoluteReferences.length,
+    retiredConsumerCredentialReferences,
+    unresolvedCount: 0
+  }
   const raw = {
     schemaVersion: 3,
     kind: 'OES_RUNTIME_STATE_LAYOUT_MIGRATION_PLAN',
@@ -105,8 +240,9 @@ export function planStateLayoutMigration(inventory, { devStackId, providerSnapsh
     devStackId: discoveredDevStackId,
     mappings,
     providerSnapshots: normalizedProviderSnapshots,
+    coverage,
     devBackupReference,
-    quiescence: { activeRunCount: inventory.activeRunFiles.length, activeStackLeaseCount: inventory.leaseFiles.length, runningBindCount: inventory.binds.filter((item) => item.running).length },
+    quiescence: { activeRunCount: inventory.activeRunFiles.length, activeStackLeaseCount: inventory.leaseFiles.length, runningDevProcessCount: (inventory.runningDevProcessAuthorities || []).length, semaphoreTicketCount: (inventory.semaphoreFiles || []).length, controlLockCount: (inventory.controlLockFiles || []).length, runningBindCount: inventory.binds.filter((item) => item.running).length },
     binds: inventory.binds
   }
   return { ...raw, planFingerprint: fingerprint(raw) }
@@ -224,8 +360,12 @@ function fsyncTree(root) {
 function writeJournal(file, raw) {
   const value = { ...raw, journalFingerprint: fingerprint(raw) }
   writeAtomic(file, value)
+  fsyncDirectory(path.dirname(file))
   return reopenJournal(file)
 }
+
+/** Fsyncs one directory so its most recent atomic entry rename is crash-durable. */
+function fsyncDirectory(directory) { const fd = fs.openSync(directory, 'r'); try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) } }
 
 /** Reopens the activation journal and verifies its exact self binding. */
 export function reopenJournal(file) {
@@ -238,7 +378,7 @@ export function reopenJournal(file) {
 export async function stageStateLayoutMigration(plan, inventory, { identitySeed, hostBinding, faultAt } = {}) {
   if (plan.planFingerprint !== fingerprint(plan, 'planFingerprint') || plan.inventoryReference.fingerprint !== inventory.inventoryFingerprint) throw new Error('STATE_MIGRATION_PLAN_BINDING_MISMATCH')
   verifyPlanTopology(plan, inventory)
-  if (plan.quiescence.activeRunCount || plan.quiescence.activeStackLeaseCount || plan.quiescence.runningBindCount) throw new Error('STATE_MIGRATION_QUIESCENCE_REQUIRED')
+  if (Object.values(plan.quiescence).some((count) => Number(count) > 0)) throw new Error('STATE_MIGRATION_QUIESCENCE_REQUIRED')
   if (plan.devBackupReference) reopenDevBackupReference(plan.devBackupReference, plan.devStackId, plan.oldRoot)
   verifyInventory(inventory)
   for (const selected of [plan.stagedRoot, plan.rollbackRoot, plan.journalPath]) if (fs.existsSync(selected)) throw new Error(`STATE_MIGRATION_TARGET_EXISTS path=${selected}`)
@@ -317,6 +457,33 @@ function inspectDockerContainerOrNull(objectId) {
   }
 }
 
+/** Inventories every Docker container so fresh quiescence includes newly introduced root binds. */
+function observeDockerContainers() {
+  const ids = runChecked('docker', ['ps', '--all', '--quiet'], { timeout: 20000 }).stdout.trim().split(/\s+/u).filter(Boolean)
+  return ids.map((objectId) => inspectDockerContainer(objectId))
+}
+
+/** Recomputes Run, lease, DEV-process, control, admission, and bind quiescence from current authority. */
+function observeLiveQuiescence(journal, roots = [journal.oldRoot]) {
+  const dockerObjects = observeDockerContainers()
+  const inventories = roots.filter((root) => fs.existsSync(root)).map((stateRoot) => inventoryStateLayout({ stateRoot, dockerObjects }))
+  return {
+    activeRunCount: inventories.reduce((count, inventory) => count + inventory.activeRunFiles.length, 0),
+    activeStackLeaseCount: inventories.reduce((count, inventory) => count + inventory.leaseFiles.length, 0),
+    runningDevProcessCount: inventories.reduce((count, inventory) => count + inventory.runningDevProcessAuthorities.length, 0),
+    semaphoreTicketCount: inventories.reduce((count, inventory) => count + inventory.semaphoreFiles.length, 0),
+    controlLockCount: inventories.reduce((count, inventory) => count + inventory.controlLockFiles.length, 0),
+    allocationAdmissionCount: activeRuntimeAdmissions(journal.oldRoot).length,
+    runningBindCount: inventories.reduce((count, inventory) => count + inventory.binds.filter((bind) => bind.running).length, 0)
+  }
+}
+
+/** Fails closed unless every observed quiescence dimension is exactly zero. */
+function assertQuiescent(observation) {
+  const active = Object.entries(observation || {}).filter(([, count]) => Number(count) > 0)
+  if (active.length) throw new Error(`STATE_MIGRATION_QUIESCENCE_REQUIRED ${active.map(([key, count]) => `${key}=${count}`).join(' ')}`)
+}
+
 /** Reconstructs a stopped provider with canonical binds and V2 Stack labels, without Compose metadata. */
 function replacementContainerArgs(observed, binds, journal, name) {
   const args = ['create', '--name', name]
@@ -350,6 +517,26 @@ function replacementContainerArgs(observed, binds, journal, name) {
   return { args, labels, networks }
 }
 
+/** Produces the frozen canonical name for one necessarily replaced shared provider. */
+export function migrationReplacementName(devStackId, pool, provider) {
+  try { return sharedResourceName(devStackId, pool, provider) } catch (error) {
+    if (error.message === 'SHARED_RESOURCE_NAME_IDENTITY_INVALID') throw new Error('STATE_MIGRATION_REPLACEMENT_IDENTITY_INVALID')
+    throw new Error(error.message.replace('SHARED_RESOURCE_NAME_INVALID', 'STATE_MIGRATION_REPLACEMENT_NAME_INVALID'))
+  }
+}
+
+/** Derives the frozen canonical replacement name from sealed Stack, pool, and provider identity. */
+function canonicalReplacementName(observed, binds, journal) {
+  const labels = observed.Config?.Labels || {}
+  const stackRoot = path.join(journal.oldRoot, 'stacks', journal.stackKey)
+  const relative = binds.length ? path.relative(stackRoot, binds[0].nextSource) : ''
+  const components = relative.split(path.sep)
+  const pool = labels['oes.runtime.pool'] || (components[0] === 'providers' ? components[1] : null)
+  const provider = labels['oes.runtime.provider'] || (components[0] === 'providers' ? components[2] : null)
+  const name = migrationReplacementName(journal.devStackId, pool, provider)
+  return { name, pool, provider }
+}
+
 /** Replaces bind-affected providers while retaining stopped originals for pre-commit recovery. */
 const dockerProviderLifecycle = {
   activate(binds, { journal, onProgress = () => {} }) {
@@ -360,9 +547,10 @@ const dockerProviderLifecycle = {
       const before = inspectDockerContainer(oldObjectId)
       if (before.Id !== oldObjectId || before.State.Running || objectBinds.some((bind) => !(before.Mounts || []).some((mount) => mount.Type === 'bind' && path.resolve(mount.Source) === bind.source && mount.Destination === bind.destination))) throw new Error(`STATE_MIGRATION_BIND_OBJECT_MISMATCH objectId=${oldObjectId}`)
       const oldName = String(before.Name).replace(/^\//u, '')
-      const backupName = `${oldName}-pre-layout-${journal.operationId.slice(0, 8)}`
-      const replacement = replacementContainerArgs(before, objectBinds, journal, oldName)
-      results.push({ oldObjectId, newObjectId: null, oldName, backupName, labels: replacement.labels, networks: replacement.networks, binds: objectBinds.map((bind) => ({ oldSource: bind.source, source: bind.nextSource, destination: bind.destination })), stage: 'PLANNED', disposition: 'BIND_PROVIDER_REPLACEMENT_PLANNED' })
+      const canonical = canonicalReplacementName(before, objectBinds, journal)
+      const backupName = `oes-v2-retained-${sha256(`${oldObjectId}:${journal.operationId}`).slice(0, 24)}`
+      const replacement = replacementContainerArgs(before, objectBinds, journal, canonical.name)
+      results.push({ oldObjectId, newObjectId: null, oldName, newName: canonical.name, backupName, provider: canonical.provider, pool: canonical.pool, labels: replacement.labels, networks: replacement.networks, binds: objectBinds.map((bind) => ({ oldSource: bind.source, source: bind.nextSource, destination: bind.destination })), stage: 'PLANNED', disposition: 'BIND_PROVIDER_REPLACEMENT_PLANNED' })
     }
     onProgress([...results])
     for (const record of results) {
@@ -370,7 +558,7 @@ const dockerProviderLifecycle = {
       record.stage = 'OLD_RENAMED'
       onProgress([...results])
       const before = inspectDockerContainer(record.oldObjectId)
-      const replacement = replacementContainerArgs(before, record.binds.map((bind) => ({ source: bind.oldSource, nextSource: bind.source, destination: bind.destination })), journal, record.oldName)
+      const replacement = replacementContainerArgs(before, record.binds.map((bind) => ({ source: bind.oldSource, nextSource: bind.source, destination: bind.destination })), journal, record.newName)
       record.newObjectId = runChecked('docker', replacement.args, { timeout: 120000 }).stdout.trim()
       record.stage = 'NEW_CREATED'
       onProgress([...results])
@@ -392,7 +580,7 @@ const dockerProviderLifecycle = {
     for (const record of [...(records || [])].reverse()) {
       let replacement = record.newObjectId ? inspectDockerContainerOrNull(record.newObjectId) : null
       if (!replacement) {
-        const byName = inspectDockerContainerOrNull(record.oldName)
+        const byName = inspectDockerContainerOrNull(record.newName)
         if (byName && byName.Id !== record.oldObjectId) replacement = byName
       }
       if (replacement) {
@@ -424,8 +612,10 @@ function applyProviderReplacements(value, records) {
       const output = Object.fromEntries(Object.entries(input).map(([key, child]) => [key, rewrite(child)]))
       const replacement = replacements.find((record) => input.objectId === record.oldObjectId)
       if (replacement) {
+        output.objectId = replacement.newObjectId
+        output.name = replacement.newName
         output.labels = replacement.labels
-        output.replacement = { oldObjectId: replacement.oldObjectId, newObjectId: replacement.newObjectId, oldRetainedName: replacement.backupName, reason: 'STATE_LAYOUT_BIND_SOURCE_CHANGED' }
+        output.replacement = { oldObjectId: replacement.oldObjectId, oldName: replacement.oldName, newObjectId: replacement.newObjectId, newName: replacement.newName, oldRetainedName: replacement.backupName, reason: 'STATE_LAYOUT_BIND_SOURCE_CHANGED' }
         delete output.labelCompatibility
       }
       return output
@@ -449,18 +639,33 @@ function verifyDockerStackReadiness(stackManifest) {
   return true
 }
 
+/** Reopens every journal-bound old/new provider identity and verifies retained-old plus ready-new mapping. */
+function verifyActivatedProviderMappings(journal, stackManifest) {
+  for (const record of journal.providerActivation || []) {
+    if (!record.oldObjectId || !record.newObjectId || !record.oldName || !record.newName || !record.backupName) throw new Error('STATE_MIGRATION_PROVIDER_MAPPING_INCOMPLETE')
+    const replacement = inspectDockerContainer(record.newObjectId)
+    if (replacement.Id !== record.newObjectId || String(replacement.Name).replace(/^\//u, '') !== record.newName || !replacement.State.Running) throw new Error(`STATE_MIGRATION_REPLACEMENT_IDENTITY_MISMATCH objectId=${record.newObjectId}`)
+    if (Object.entries(record.labels || {}).some(([key, expected]) => replacement.Config.Labels?.[key] !== expected) || record.binds.some((bind) => !(replacement.Mounts || []).some((mount) => mount.Type === 'bind' && path.resolve(mount.Source) === bind.source && mount.Destination === bind.destination))) throw new Error(`STATE_MIGRATION_REPLACEMENT_MAPPING_MISMATCH objectId=${record.newObjectId}`)
+    const retained = inspectDockerContainer(record.oldObjectId)
+    if (retained.Id !== record.oldObjectId || String(retained.Name).replace(/^\//u, '') !== record.backupName || retained.State.Running) throw new Error(`STATE_MIGRATION_RETAINED_PROVIDER_MISMATCH objectId=${record.oldObjectId}`)
+    const resource = (stackManifest.resources || []).find((candidate) => candidate.objectId === record.newObjectId)
+    if (!resource || resource.name !== record.newName || resource.replacement?.oldObjectId !== record.oldObjectId || resource.replacement?.newObjectId !== record.newObjectId) throw new Error(`STATE_MIGRATION_STACK_PROVIDER_MAPPING_MISMATCH objectId=${record.newObjectId}`)
+  }
+  return true
+}
+
 /** Activates a PREPARED journal through the frozen rename sequence and durable COMMITTED boundary. */
-export function activateStagedState({ journalPath, confirmation, faultAt, verifyNewRoot = () => true, verifyProviderReadiness = verifyDockerStackReadiness, observeQuiescence = (journal) => journal.quiescence, providerLifecycle = dockerProviderLifecycle }) {
+export function activateStagedState({ journalPath, confirmation, faultAt, verifyNewRoot = () => true, verifyProviderReadiness = verifyDockerStackReadiness, observeQuiescence = observeLiveQuiescence, providerLifecycle = dockerProviderLifecycle }) {
   let journal = reopenJournal(journalPath)
-  const lock = path.join(path.dirname(journal.oldRoot), `.${path.basename(journal.oldRoot)}.migration.lock`)
-  try { fs.mkdirSync(lock, { mode: 0o700 }) } catch (error) { if (error.code === 'EEXIST') throw new Error('STATE_MIGRATION_LOCK_HELD'); throw error }
+  const barrier = acquireMigrationBarrier(journal.oldRoot, { operation: 'ACTIVATE', journalFingerprint: journal.journalFingerprint })
   try {
+    journal = reopenJournal(journalPath)
     if (journal.state !== 'PREPARED') throw new Error(`STATE_MIGRATION_ACTIVATION_STATE_INVALID state=${journal.state}`)
     if (confirmation?.kind !== 'OES_RUNTIME_STATE_LAYOUT_ACTIVATION_CONFIRMATION' || confirmation.status !== 'CONFIRMED' || confirmation.journalFingerprint !== journal.journalFingerprint || confirmation.confirmationFingerprint !== fingerprint(confirmation, 'confirmationFingerprint')) throw new Error('STATE_MIGRATION_ACTIVATION_CONFIRMATION_INVALID')
     if (journal.devBackupReference) reopenDevBackupReference(journal.devBackupReference, journal.devStackId, journal.oldRoot)
-    const quiescence = observeQuiescence(journal)
-    if (quiescence.activeRunCount || quiescence.activeStackLeaseCount || quiescence.runningBindCount) throw new Error('STATE_MIGRATION_QUIESCENCE_REQUIRED')
+    assertQuiescent(observeQuiescence(journal))
     if (!fs.existsSync(journal.oldRoot) || !fs.existsSync(journal.stagedRoot) || fs.existsSync(journal.rollbackRoot)) throw new Error('STATE_MIGRATION_ACTIVATION_PATH_STATE_INVALID')
+    if (fingerprint(inventoryTree(journal.oldRoot)) !== journal.sourceTreeFingerprint) throw new Error('STATE_MIGRATION_SOURCE_CHANGED')
     if (fingerprint(inventoryTree(journal.stagedRoot)) !== journal.stagedTreeFingerprint) throw new Error('STATE_MIGRATION_STAGED_TREE_CHANGED')
     fs.renameSync(journal.oldRoot, journal.rollbackRoot)
     fsyncParent(journal.oldRoot)
@@ -485,62 +690,75 @@ export function activateStagedState({ journalPath, confirmation, faultAt, verify
     if (!verifyCanonicalActivatedRoot(journal.oldRoot, journal) || !verifyNewRoot(journal.oldRoot, journal)) throw new Error('STATE_MIGRATION_NEW_ROOT_VERIFICATION_FAILED')
     journal = transition(journalPath, 'COMMITTED', { activatedStackManifestReference: published.reference, committedRootTreeFingerprint: fingerprint(inventoryTree(journal.oldRoot)) })
     return journal
-  } finally { fs.rmSync(lock, { recursive: true, force: true }) }
+  } finally { barrier.release() }
 }
 
 /** Recovers pre-commit activation to old authority, or reopens committed new authority. */
-export function recoverStateLayout({ journalPath, verifyNewRoot = () => true, providerLifecycle = dockerProviderLifecycle }) {
+export function recoverStateLayout({ journalPath, verifyNewRoot = () => true, verifyProviderReadiness = verifyDockerStackReadiness, verifyProviderMappings = verifyActivatedProviderMappings, providerLifecycle = dockerProviderLifecycle }) {
   let journal = reopenJournal(journalPath)
-  if (journal.state === 'COMMITTED') {
-    if (!fs.existsSync(journal.oldRoot) || !verifyCanonicalActivatedRoot(journal.oldRoot, journal) || !verifyNewRoot(journal.oldRoot, journal)) throw new Error('STATE_MIGRATION_COMMITTED_ROOT_INVALID')
-    return { authority: 'NEW', state: 'COMMITTED', root: journal.oldRoot }
-  }
-  if (['RECOVERED_OLD', 'ROLLED_BACK'].includes(journal.state)) {
-    if (!fs.existsSync(journal.oldRoot) || fingerprint(inventoryTree(journal.oldRoot)) !== journal.sourceTreeFingerprint) throw new Error('STATE_MIGRATION_RECOVERED_ROOT_INVALID')
-    return { authority: 'OLD', state: journal.state, root: journal.oldRoot, quarantine: journal.quarantine || journal.retainedNewRoot || null }
-  }
-  const oldExists = fs.existsSync(journal.oldRoot)
-  const stagedExists = fs.existsSync(journal.stagedRoot)
-  const rollbackExists = fs.existsSync(journal.rollbackRoot)
-  if (journal.state === 'PREPARED' && oldExists && stagedExists && !rollbackExists) return { authority: 'OLD', state: 'PREPARED', root: journal.oldRoot }
-  const quarantine = `${journal.stagedRoot}.uncommitted-${journal.operationId}`
-  providerLifecycle.stop(journal.providerActivation || [])
-  if (rollbackExists) {
-    if (oldExists) {
-      if (fs.existsSync(quarantine)) throw new Error('STATE_MIGRATION_QUARANTINE_EXISTS')
-      fs.renameSync(journal.oldRoot, quarantine)
-    } else if (stagedExists) {
-      if (fs.existsSync(quarantine)) throw new Error('STATE_MIGRATION_QUARANTINE_EXISTS')
-      fs.renameSync(journal.stagedRoot, quarantine)
+  const barrier = acquireMigrationBarrier(journal.oldRoot, { operation: 'RECOVER', journalFingerprint: journal.journalFingerprint })
+  try {
+    journal = reopenJournal(journalPath)
+    if (journal.state === 'COMMITTED') {
+      if (!fs.existsSync(journal.oldRoot) || !verifyCanonicalActivatedRoot(journal.oldRoot, journal) || !verifyNewRoot(journal.oldRoot, journal)) throw new Error('STATE_MIGRATION_COMMITTED_ROOT_INVALID')
+      const activated = reopenStackManifest(journal.activatedStackManifestReference, { stackKey: journal.stackKey, devStackId: journal.devStackId })
+      const current = reopenCurrentStackManifest(path.join(journal.oldRoot, 'stacks', journal.stackKey))
+      if (current.pointer.generation !== journal.activatedStackManifestReference.generation || current.pointer.sha256 !== journal.activatedStackManifestReference.sha256 || current.pointer.fingerprint !== journal.activatedStackManifestReference.fingerprint) throw new Error('STATE_MIGRATION_ACTIVATED_GENERATION_MISMATCH')
+      if (!verifyProviderMappings(journal, activated) || !verifyProviderReadiness(activated)) throw new Error('STATE_MIGRATION_COMMITTED_PROVIDER_VERIFICATION_FAILED')
+      return { authority: 'NEW', state: 'COMMITTED', root: journal.oldRoot }
     }
-    fs.renameSync(journal.rollbackRoot, journal.oldRoot)
-    fsyncParent(journal.oldRoot)
-  } else if (!oldExists || fingerprint(inventoryTree(journal.oldRoot)) !== journal.sourceTreeFingerprint) throw new Error('STATE_MIGRATION_ROLLBACK_ROOT_MISSING')
-  providerLifecycle.restart(journal.providerActivation || [])
-  journal = transition(journalPath, 'RECOVERED_OLD', { quarantine })
-  return { authority: 'OLD', state: journal.state, root: journal.oldRoot, quarantine }
+    if (['RECOVERED_OLD', 'ROLLED_BACK'].includes(journal.state)) {
+      if (!fs.existsSync(journal.oldRoot) || fingerprint(inventoryTree(journal.oldRoot)) !== journal.sourceTreeFingerprint) throw new Error('STATE_MIGRATION_RECOVERED_ROOT_INVALID')
+      return { authority: 'OLD', state: journal.state, root: journal.oldRoot, quarantine: journal.quarantine || journal.retainedNewRoot || null }
+    }
+    const oldExists = fs.existsSync(journal.oldRoot)
+    const stagedExists = fs.existsSync(journal.stagedRoot)
+    const rollbackExists = fs.existsSync(journal.rollbackRoot)
+    if (journal.state === 'PREPARED' && oldExists && stagedExists && !rollbackExists) return { authority: 'OLD', state: 'PREPARED', root: journal.oldRoot }
+    const quarantine = `${journal.stagedRoot}.uncommitted-${journal.operationId}`
+    providerLifecycle.stop(journal.providerActivation || [])
+    if (rollbackExists) {
+      if (oldExists) {
+        if (fs.existsSync(quarantine)) throw new Error('STATE_MIGRATION_QUARANTINE_EXISTS')
+        fs.renameSync(journal.oldRoot, quarantine)
+      } else if (stagedExists) {
+        if (fs.existsSync(quarantine)) throw new Error('STATE_MIGRATION_QUARANTINE_EXISTS')
+        fs.renameSync(journal.stagedRoot, quarantine)
+      }
+      fs.renameSync(journal.rollbackRoot, journal.oldRoot)
+      fsyncParent(journal.oldRoot)
+    } else if (!oldExists || fingerprint(inventoryTree(journal.oldRoot)) !== journal.sourceTreeFingerprint) throw new Error('STATE_MIGRATION_ROLLBACK_ROOT_MISSING')
+    providerLifecycle.restart(journal.providerActivation || [])
+    journal = transition(journalPath, 'RECOVERED_OLD', { quarantine })
+    return { authority: 'OLD', state: journal.state, root: journal.oldRoot, quarantine }
+  } finally { barrier.release() }
 }
 
 /** Performs a confirmed whole-state rollback after COMMITTED while retaining the new tree for audit. */
-export function rollbackCommittedState({ journalPath, confirmation, providerLifecycle = dockerProviderLifecycle }) {
+export function rollbackCommittedState({ journalPath, confirmation, observeQuiescence = (journal) => observeLiveQuiescence(journal, [journal.oldRoot, journal.rollbackRoot]), providerLifecycle = dockerProviderLifecycle }) {
   let journal = reopenJournal(journalPath)
-  if (journal.state === 'ROLLED_BACK') {
-    if (!fs.existsSync(journal.oldRoot) || fingerprint(inventoryTree(journal.oldRoot)) !== journal.sourceTreeFingerprint || !fs.existsSync(journal.retainedNewRoot)) throw new Error('STATE_MIGRATION_ROLLED_BACK_ROOT_INVALID')
+  const barrier = acquireMigrationBarrier(journal.oldRoot, { operation: 'ROLLBACK', journalFingerprint: journal.journalFingerprint })
+  try {
+    journal = reopenJournal(journalPath)
+    if (journal.state === 'ROLLED_BACK') {
+      if (!fs.existsSync(journal.oldRoot) || fingerprint(inventoryTree(journal.oldRoot)) !== journal.sourceTreeFingerprint || !fs.existsSync(journal.retainedNewRoot)) throw new Error('STATE_MIGRATION_ROLLED_BACK_ROOT_INVALID')
+      return journal
+    }
+    if (journal.state !== 'COMMITTED') throw new Error(`STATE_MIGRATION_ROLLBACK_STATE_INVALID state=${journal.state}`)
+    if (confirmation?.kind !== 'OES_RUNTIME_STATE_LAYOUT_ROLLBACK_CONFIRMATION' || confirmation.status !== 'CONFIRMED' || confirmation.journalFingerprint !== journal.journalFingerprint || confirmation.confirmationFingerprint !== fingerprint(confirmation, 'confirmationFingerprint')) throw new Error('STATE_MIGRATION_ROLLBACK_CONFIRMATION_INVALID')
+    assertQuiescent(observeQuiescence(journal))
+    const retainedNewRoot = `${journal.stagedRoot}.rolled-back-${journal.operationId}`
+    providerLifecycle.stop(journal.providerActivation || [])
+    if (fs.existsSync(journal.rollbackRoot)) {
+      if (fs.existsSync(journal.oldRoot)) {
+        if (fs.existsSync(retainedNewRoot)) throw new Error('STATE_MIGRATION_RETAINED_NEW_ROOT_EXISTS')
+        fs.renameSync(journal.oldRoot, retainedNewRoot)
+      } else if (!fs.existsSync(retainedNewRoot)) throw new Error('STATE_MIGRATION_COMMITTED_ROOT_MISSING')
+      fs.renameSync(journal.rollbackRoot, journal.oldRoot)
+      fsyncParent(journal.oldRoot)
+    } else if (!fs.existsSync(journal.oldRoot) || fingerprint(inventoryTree(journal.oldRoot)) !== journal.sourceTreeFingerprint || !fs.existsSync(retainedNewRoot)) throw new Error('STATE_MIGRATION_ROLLBACK_ROOT_MISSING')
+    providerLifecycle.restart(journal.providerActivation || [])
+    journal = transition(journalPath, 'ROLLED_BACK', { retainedNewRoot })
     return journal
-  }
-  if (journal.state !== 'COMMITTED') throw new Error(`STATE_MIGRATION_ROLLBACK_STATE_INVALID state=${journal.state}`)
-  if (confirmation?.kind !== 'OES_RUNTIME_STATE_LAYOUT_ROLLBACK_CONFIRMATION' || confirmation.status !== 'CONFIRMED' || confirmation.journalFingerprint !== journal.journalFingerprint || confirmation.confirmationFingerprint !== fingerprint(confirmation, 'confirmationFingerprint')) throw new Error('STATE_MIGRATION_ROLLBACK_CONFIRMATION_INVALID')
-  const retainedNewRoot = `${journal.stagedRoot}.rolled-back-${journal.operationId}`
-  providerLifecycle.stop(journal.providerActivation || [])
-  if (fs.existsSync(journal.rollbackRoot)) {
-    if (fs.existsSync(journal.oldRoot)) {
-      if (fs.existsSync(retainedNewRoot)) throw new Error('STATE_MIGRATION_RETAINED_NEW_ROOT_EXISTS')
-      fs.renameSync(journal.oldRoot, retainedNewRoot)
-    } else if (!fs.existsSync(retainedNewRoot)) throw new Error('STATE_MIGRATION_COMMITTED_ROOT_MISSING')
-    fs.renameSync(journal.rollbackRoot, journal.oldRoot)
-    fsyncParent(journal.oldRoot)
-  } else if (!fs.existsSync(journal.oldRoot) || fingerprint(inventoryTree(journal.oldRoot)) !== journal.sourceTreeFingerprint || !fs.existsSync(retainedNewRoot)) throw new Error('STATE_MIGRATION_ROLLBACK_ROOT_MISSING')
-  providerLifecycle.restart(journal.providerActivation || [])
-  journal = transition(journalPath, 'ROLLED_BACK', { retainedNewRoot })
-  return journal
+  } finally { barrier.release() }
 }

@@ -8,6 +8,7 @@ import { environmentForOwner, resolveResources } from '../manifest.mjs'
 import { fingerprint, writeAtomic } from '../canonical.mjs'
 import { cleanupRunPrivateFiles, startRuntime, withRuntime } from '../orchestrator.mjs'
 import { cleanupSimulatedResource } from '../simulation-driver.mjs'
+import { acquireMigrationBarrier } from '../state-layout.mjs'
 
 const root = path.resolve(import.meta.dirname, '../../../..')
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -67,6 +68,16 @@ test('DEV devStack lease admits only one complete stack for the full process lif
   assert.equal(maximum, 1)
   assert.equal(fs.existsSync(path.join(stateRoot, 'locks', 'stacks')), true)
   assert.equal(fs.readdirSync(path.join(stateRoot, 'locks', 'stacks')).length, 0)
+})
+
+test('machine migration barrier rejects launcher allocation before schema, Stack, or Run publication', async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-runtime-migration-admission-'))
+  const stateRoot = path.join(parent, 'runtime-v2')
+  const barrier = acquireMigrationBarrier(stateRoot, { operation: 'FIXTURE_ACTIVATION' })
+  try {
+    await assert.rejects(startRuntime(intent(stateRoot, 'task_blocked', 'run_blocked')), /STATE_MIGRATION_LOCK_HELD/)
+    assert.equal(fs.existsSync(stateRoot), false)
+  } finally { barrier.release() }
 })
 
 test('abnormal callback failure still reconciles exact run resources', async () => {

@@ -158,14 +158,19 @@ pnpm runtime:state:plan -- --inventory /ABSOLUTE/state-inventory.json \
 ```
 
 `provider-pools.json` is an object from provider name to `dev` or `test` when an old identity does
-not already seal `oes.runtime.pool`. `provider-snapshots.json` is an array of exact `{resource,
-endpoint}` observations; each resource is `SHARED`, and each endpoint contains a ready authority.
-When that snapshot contains a DEV database or bucket, `--dev-backup-record` is mandatory and must
-refer to a byte-verified backup outside the runtime state root; every archive is reopened during
-plan, stage, and activation.
+not already seal `oes.runtime.pool`. `provider-snapshots.json` is a closed-world array of exact
+`{resource, endpoint}` observations: every copied provider identity, object ID, label, volume and
+old-root bind must have one matching `SHARED` resource, while every primary provider and mTLS has one
+ready endpoint. Duplicate/conflicting entries, omitted provider identities, unresolved absolute
+references, unknown machine-root entries and binds outside a mapped provider tree fail planning.
+The stable old `shared/<devStackId>/process-runtime` payload key is classified as Stack credential
+material and moves byte-for-byte to `credentials/process-runtime`, not a provider-data directory.
+An inventoried DEV PostgreSQL/MinIO data carrier or a DEV database/bucket makes
+`--dev-backup-record` mandatory; it must refer to a byte-verified backup outside the runtime state
+root, and every archive is reopened during plan, stage, and activation.
 Stop DEV processes and every container with an old-root bind, then repeat inventory/plan until active
-Run count, Stack lease count, and running-bind count are all zero. Stage creates and fsyncs a
-same-filesystem sibling while leaving the configured root byte-exact:
+Run, Stack lease, DEV-process, semaphore-ticket, control-lock and running-bind counts are all zero.
+Stage creates and fsyncs a same-filesystem sibling while leaving the configured root byte-exact:
 
 ```bash
 pnpm runtime:state:stage -- --plan /ABSOLUTE/state-plan.json \
@@ -180,13 +185,23 @@ pnpm runtime:state:activate -- --journal /ABSOLUTE/.runtime-v2.activation-ID.jso
   --confirmation /ABSOLUTE/state-activation-confirmation.json
 ```
 
-Activation holds the machine migration lock and performs `PREPARED -> OLD_MOVED -> NEW_PLACED ->
-COMMITTED`. Before `COMMITTED`, recover restores old authority and quarantines the staged/new tree;
-after `COMMITTED`, recover verifies new authority:
+Activation atomically closes parent-owned allocation admission, holds the machine migration barrier,
+rechecks live quiescence and source bytes, and performs `PREPARED -> OLD_MOVED -> NEW_PLACED ->
+COMMITTED`. Each parent-journal transition fsyncs its containing directory. Necessary bind-provider
+replacement uses the canonical `oes-v2-<devStackIdToken>-<pool>-<provider>` name and seals both the
+retained old identity and ready new identity. Before `COMMITTED`, recover restores old authority and
+quarantines the staged/new tree; after `COMMITTED`, recover reopens the exact activated generation,
+provider mapping and readiness. Ordinary launcher commands reopen the registry's preserved immutable
+`devStackId`; an explicit ID is only an exact-match assertion:
 
 ```bash
 pnpm runtime:state:recover -- --journal /ABSOLUTE/.runtime-v2.activation-ID.json
 ```
+
+Confirmed rollback holds the same parent migration barrier and performs another zero-Run,
+zero-lease, stopped-DEV-process and zero-running-bind observation across both current and rollback
+roots before stopping or renaming any exact object. Stop the recorded replacement providers first;
+a non-zero observation preserves both roots and reports `STATE_MIGRATION_QUIESCENCE_REQUIRED`.
 
 Whole-state rollback retains the new tree for audit and requires a separately confirmed binding to
 the current committed journal:

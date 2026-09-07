@@ -31,6 +31,14 @@ export function exactResourceToken(value, size = 24) {
   return `${token(value, Math.max(1, size - hash.length - 1))}-${hash}`
 }
 
+/** Produces one unambiguous bounded shared-provider name from immutable Stack identity. */
+export function sharedResourceName(devStackId, pool, provider) {
+  if (!['dev', 'test'].includes(pool) || !/^[a-z0-9][a-z0-9-]*$/u.test(provider || '')) throw new Error('SHARED_RESOURCE_NAME_IDENTITY_INVALID')
+  const name = `oes-v2-${exactResourceToken(devStackId, 32)}-${pool}-${provider}`
+  if (name.length > 63 || !/^[a-z0-9][a-z0-9-]*$/u.test(name)) throw new Error(`SHARED_RESOURCE_NAME_INVALID name=${name}`)
+  return name
+}
+
 /** Binds every run-owned identity to its accountable task and run pair. */
 export function exactRunIdentity(context) { return `${context.taskKey}:${context.runId}` }
 
@@ -149,7 +157,7 @@ export function assertDockerIdentity(resource) {
 
 /** Creates or reopens one shared provider container bound only to devStackId. */
 async function ensureSharedContainer({ context, provider, image, targetPort, targetPorts, command = [], environment = {}, volumeTarget, mounts = [], tmpfs = [], network }) {
-  const name = `oes-v2-${exactResourceToken(context.devStackId, 32)}-${context.pool}-${provider}`
+  const name = sharedResourceName(context.devStackId, context.pool, provider)
   const providerDirectory = sharedProviderDirectory(context, provider)
   const identityPath = path.join(providerDirectory, 'identity.json')
   const ports = targetPorts || [targetPort]
@@ -211,7 +219,7 @@ function ensureSharedNetwork(context, provider) {
     return expected
   }
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
-  const name = `oes-v2-${exactResourceToken(context.devStackId, 32)}-${context.pool}-${provider}`
+  const name = sharedResourceName(context.devStackId, context.pool, provider)
   const resourceLabels = labels(context, 'SHARED', provider)
   docker(['network', 'create', ...labelArgs(resourceLabels), name])
   const resource = { provider, scope: 'SHARED', kind: 'network', name, objectId: docker(['network', 'inspect', '--format', '{{.Id}}', name]).stdout.trim(), labels: resourceLabels, cleanup: 'PRESERVE_SHARED' }

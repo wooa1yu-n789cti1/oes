@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { hostBindingHash, identityDigest, resolveRuntimeLayout } from '../state-layout.mjs'
+import { acquireMigrationBarrier, acquireRuntimeAdmission, hostBindingHash, identityDigest, resolveRuntimeLayout } from '../state-layout.mjs'
 
 const zeroSeed = '0'.repeat(64)
 const host = { kind: 'fixture-v1', value: 'host-a' }
@@ -37,4 +37,19 @@ test('flat pre-hierarchy state is rejected before registry or provider mutation'
   fs.mkdirSync(path.join(stateRoot, 'shared'))
   await assert.rejects(resolveRuntimeLayout({ stateRoot, profile: 'LOCAL_INTEGRATION', taskKey: 'task_a', runId: 'run_a', identitySeed: zeroSeed, hostBinding: host }), /STATE_LAYOUT_MIGRATION_REQUIRED/)
   assert.equal(fs.existsSync(path.join(stateRoot, 'stack-registry.json')), false)
+})
+
+test('parent migration barrier and allocation admission exclude each other before state mutation', async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-layout-admission-'))
+  const stateRoot = path.join(parent, 'runtime-v2')
+  const barrier = acquireMigrationBarrier(stateRoot, { operation: 'FIXTURE' })
+  await assert.rejects(acquireRuntimeAdmission(stateRoot, { taskKey: 'task_a', runId: 'run_a', profile: 'LOCAL_INTEGRATION' }), /STATE_MIGRATION_LOCK_HELD/)
+  assert.equal(fs.existsSync(stateRoot), false)
+  barrier.release()
+
+  const admission = await acquireRuntimeAdmission(stateRoot, { taskKey: 'task_a', runId: 'run_a', profile: 'LOCAL_INTEGRATION' })
+  assert.throws(() => acquireMigrationBarrier(stateRoot, { operation: 'FIXTURE' }), /STATE_MIGRATION_ALLOCATION_ADMISSION_HELD/)
+  admission.release()
+  const reopened = acquireMigrationBarrier(stateRoot, { operation: 'FIXTURE' })
+  reopened.release()
 })
