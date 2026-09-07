@@ -5,6 +5,7 @@ status: ACCEPTED
 decisionDate: 2026-09-06
 architectureTruthSource: docs/architecture/platforms/local-development-and-test-runtime.md
 implementationState: IMPLEMENTED
+stateLayoutExtension: DESIGN_ACCEPTED_PENDING_IMPLEMENTATION
 ```
 
 ## Context
@@ -18,6 +19,11 @@ host port 和 current-directory dotenv discovery 绑定在一起。Focused test 
 OES 同时需要保持既有架构边界：local business service 继续作为 host process；Docker 只提供
 基础设施；每个服务独占数据库与 business truth；内部同步、事实传播、workload trust、测试分类
 与 CI governance 不因本地并发而改变。
+
+首个 V2 implementation 已移除受支持路径中的 Compose lifecycle，却仍使用 flat machine/shared/leases/
+runs state layout，并以一个 `devStackId` 同时关联 DEV 与 shared TEST provider。若把 logical Stack 误作
+Docker Compose Project、复制 Stack/Run manifest payload，或在 bind-mounted state root 上执行无 journal
+的目录切换，会重新引入 coarse ownership、双重 authority 与不可确定 rollback。
 
 ## Decision
 
@@ -46,6 +52,21 @@ OES 同时需要保持既有架构边界：local business service 继续作为 h
 12. Implementation candidate 在切换前只读盘点并分类现有 OES Compose project/container/network/
     volume，交付 deterministic dry-run、sealed exact-identity cleanup plan 和 residue check；真实主机
     删除只在独立 Human-confirmed Cleanup boundary 执行。
+13. 每台 developer machine 恰有一个 machine-shared `LOCAL` logical Stack，包含 DEV provider 与 shared
+    TEST PostgreSQL/MinIO；CI 只使用 job-private state/provider。Logical Stack 是 launcher state/ownership
+    boundary，不是 Docker Compose Project。
+14. V2 不保留、创建或重建 local Compose project；launcher、exact Stack/Run manifest、lease 与
+    `oes.runtime.*` label 是唯一 Docker lifecycle authority。现有 Compose project `oes` 是 legacy
+    inventory，只在 migration/restore acceptance 后通过独立 Cleanup confirmation 删除。
+15. Machine root、Stack root 与 Run root 使用固定层级；sealed Stack generation manifest 与 Run manifest
+    各自只拥有一个 scope，cross-scope join 只保存 absolute path、SHA-256、semantic fingerprint 与 type，
+    不复制 mutable payload。
+16. Developer identity 使用 persisted 32-byte CSPRNG seed 与 byte-exact domain-separated SHA-256；
+    `stackKey=oes-local-<machineFingerprint>` 只作为 registry/state key。CI 使用独立 job-private seed 与
+    `oes-ci-<jobFingerprint>`，不进入 developer-machine registry。
+17. State-layout activation 使用 same-filesystem sibling tree、parent-scope sealed journal、bind-aware
+    provider quiescence 和 `PREPARED -> OLD_MOVED -> NEW_PLACED -> COMMITTED` recovery。Design merge 无
+    live effect；actual command 与 executable runbook 由后续 implementation candidate 同时交付。
 
 完整 profile、provider、lifecycle、permission、migration、A0 和 rollback contract 以
 [Local Development And Test Runtime](../architecture/platforms/local-development-and-test-runtime.md)
@@ -63,6 +84,10 @@ OES 同时需要保持既有架构边界：local business service 继续作为 h
   stale resource 的 broad deletion 风险。
 - Committed migration、service-scoped credential 和 denial matrix 使 schema 与 access evidence 可
   重现、可审计。
+- Logical Stack 与 Docker Compose Project 解耦，避免 Docker UI grouping 成为 coarse lifecycle authority；
+  Stack/Run manifest 分权与 reference-only join 消除重复状态真相。
+- Byte-exact machine/job identity 与 journaled root activation 使 naming、copy detection、crash recovery 和
+  rollback 可由独立实现重现。
 
 ### Cost and risk
 
@@ -75,6 +100,8 @@ OES 同时需要保持既有架构边界：local business service 继续作为 h
 - Dynamic endpoint 要求全部 host process 通过 manifest injection 启动；直接执行依赖 stale `.env`
   的 service command 将在切换后 fail closed。
 - A0 不证明业务 Journey 完整，existing incomplete production chain 必须继续由其 owner 独立关闭。
+- State-layout activation 必须在无 active Run/Stack lease、bind-mounted provider 已安全停止且 snapshot
+  已验证时执行；必要 provider replacement 会增加 migration/rollback evidence 成本。
 
 ## Alternatives rejected
 
@@ -102,6 +129,11 @@ OES 同时需要保持既有架构边界：local business service 继续作为 h
 
 拒绝。双路径会永久分裂 entry、CI、migration、test 和 runbook authority。
 
+### Retain a local Compose project for logical Stack grouping
+
+拒绝。Compose project 是 coarse UI/lifecycle grouping，无法表达 exact Stack/Run ownership；与 launcher、
+manifest、lease 和 `oes.runtime.*` label 并存会形成第二 authority。
+
 ### Business journeys as A0
 
 拒绝。当前 production chain 不完整；以它们验证 runtime 会把 infrastructure acceptance 变成
@@ -115,14 +147,34 @@ data，重建 disposable TEST data，交付一次性 legacy host-resource invent
 dry-run、sealed cleanup plan、rewritten runbook 与 residue check，并在 exact candidate 上完成
 self-test、A0、independent RV 和 `CI / Baseline Checks`。合并需要之后独立的 Human confirmation。
 
+State-layout extension 的 Design PR 只更新 architecture 与本 ADR，不声明尚不存在的 executable command。
+后续独立 delivery 先修复并验证 migrator authority 不进入 host business process environment，再交付
+layout implementation、actual command、failure-injection test、rollback 与 runbook update。Activation 在
+machine migration lock 下要求 active Run/Stack lease 为零，停止所有 state-root bind-mounted provider，
+sealed old state/DEV-data snapshot，并以 parent-scope journal 驱动 same-filesystem root swap。Durable
+`COMMITTED` 前 old root 是 authority；之后 new root 是 authority。中断恢复按 journal exact path 幂等
+恢复，不保留 dual-read/dual-write 或 persistent generation selector。
+
+现有 V2 shared name/object identity 在 Design 阶段不变；delivery 不为命名或 Docker Desktop 展示而替换
+healthy object。任何必要 replacement 都记录 exact old/new mapping。Target path、object、credential 或
+manifest generation 变化使旧 restore binding 失效；new-root verification 后必须形成新的 exact restore
+plan/binding 并停在独立 Restore confirmation。
+
 实际删除主机上的 confirmed-idle legacy OES resource 是后续独立 Cleanup confirmation boundary。
 Apply 前必须重开 exact Docker identity/labels/state/attachment/owner evidence；active、unknown、shared、
 dirty、mismatched 或证据不足资源保留并报告。最终 migration acceptance 要求 confirmed-idle legacy
 resource 归零，且每个保留项都有 exact identity 与理由；Design/implementation delivery 不能借
 cutover、startup 或 merge 自动删除历史资源。
 
-Rollback 是 whole-candidate Git revert，并在需要时恢复 cutover 前 DEV snapshot；不得选择性恢复
-legacy entry、generated `.env` 或 fixed-port path。
+Legacy Compose project `oes` 及其 positively proven container/network/volume/init-mount 仍遵守该边界；
+V2 不保留或重建同名/替代 Compose project。Cleanup 前完成 V2 acceptance、适用的数据 restore 验证和
+exact deletion-set reopen；unknown、active、shared 或证据不足对象继续保留。
+
+Design rollback 是 whole-candidate Git revert，且没有 live effect。Implementation rollback 在 durable
+`COMMITTED` 前隔离 uncommitted new root、恢复 sealed old root 和 retained provider；之后若验证失败，
+停止 exact new object、保留 failure evidence，再按 journal 恢复 old root。若 DEV migration/seed 已影响
+持久数据，则同时恢复 source-bound snapshot；不得选择性恢复 legacy entry、generated `.env` 或
+fixed-port path。
 
 ## Related documents
 
