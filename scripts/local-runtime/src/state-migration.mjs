@@ -44,30 +44,32 @@ export function inventoryStateLayout({ stateRoot, dockerObjects = [] }) {
     }
   }
   const leaseFiles = entries.filter((entry) => entry.type === 'FILE' && /(?:^|\/)leases\//u.test(entry.path)).map((entry) => entry.path)
-  const normalizedDockerObjects = dockerObjects.map((object) => ({
-    type: object.type || object.Type || 'container',
-    objectId: object.objectId || object.Id,
-    name: String(object.name || object.Name || '').replace(/^\//u, ''),
-    running: Boolean(object.running ?? object.State?.Running),
-    labels: object.labels || object.Labels || object.Config?.Labels || {},
-    mounts: (object.mounts || object.Mounts || []).map((mount) => ({ Type: mount.Type, Source: mount.Source ? path.resolve(mount.Source) : undefined, Destination: mount.Destination, Name: mount.Name, RW: mount.RW })).sort((left, right) => `${left.Type}:${left.Source || left.Name}:${left.Destination}`.localeCompare(`${right.Type}:${right.Source || right.Name}:${right.Destination}`))
-  })).sort((left, right) => `${left.type}:${left.objectId}`.localeCompare(`${right.type}:${right.objectId}`))
+  const normalizedDockerObjects = dockerObjects.map((object) => {
+    const type = object.type || object.Type || 'container'
+    const objectId = object.objectId || object.Id || (type === 'volume' ? fingerprint({ name: object.Name, createdAt: object.CreatedAt, driver: object.Driver, scope: object.Scope, labels: object.Labels || {} }) : undefined)
+    return {
+      type,
+      objectId,
+      name: String(object.name || object.Name || '').replace(/^\//u, ''),
+      running: Boolean(object.running ?? object.State?.Running),
+      labels: object.labels || object.Labels || object.Config?.Labels || {},
+      mounts: (object.mounts || object.Mounts || []).map((mount) => ({ Type: mount.Type, Source: mount.Source ? path.resolve(mount.Source) : undefined, Destination: mount.Destination, Name: mount.Name, RW: mount.RW })).sort((left, right) => `${left.Type}:${left.Source || left.Name}:${left.Destination}`.localeCompare(`${right.Type}:${right.Source || right.Name}:${right.Destination}`))
+    }
+  }).sort((left, right) => `${left.type}:${left.objectId}`.localeCompare(`${right.type}:${right.objectId}`))
   const binds = []
   for (const object of normalizedDockerObjects) for (const mount of object.mounts) {
     if (mount.Type !== 'bind') continue
     const source = path.resolve(mount.Source)
     if (source === root || source.startsWith(`${root}${path.sep}`)) binds.push({ objectId: object.objectId, name: object.name, running: object.running, source, destination: mount.Destination })
   }
-  const relevantObjectIds = new Set(binds.map((bind) => bind.objectId))
-  const relevantDockerObjects = normalizedDockerObjects.filter((object) => relevantObjectIds.has(object.objectId))
   const semaphoreFiles = entries.filter((entry) => entry.type === 'FILE' && /^semaphore\//u.test(entry.path)).map((entry) => entry.path)
   const controlLockFiles = entries.filter((entry) => entry.type === 'FILE' && /^locks\//u.test(entry.path)).map((entry) => entry.path)
-  const raw = { schemaVersion: 3, kind: 'OES_RUNTIME_STATE_LAYOUT_INVENTORY', stateRoot: root, entries, activeRunFiles, runningDevProcessAuthorities, leaseFiles, semaphoreFiles, controlLockFiles, dockerObjects: relevantDockerObjects, binds, sourceTreeFingerprint: fingerprint(entries) }
+  const raw = { schemaVersion: 3, kind: 'OES_RUNTIME_STATE_LAYOUT_INVENTORY', stateRoot: root, entries, activeRunFiles, runningDevProcessAuthorities, leaseFiles, semaphoreFiles, controlLockFiles, dockerObjects: normalizedDockerObjects, binds, sourceTreeFingerprint: fingerprint(entries) }
   return { ...raw, inventoryFingerprint: fingerprint(raw) }
 }
 
-/** Reopens one external DEV-data snapshot and verifies every retained archive byte. */
-function reopenDevBackupReference(reference, expectedDevStackId, stateRoot) {
+/** Reopens one external DEV-data snapshot and proves exact logical-carrier coverage. */
+function reopenDevBackupReference(reference, expectedDevStackId, stateRoot, expectedCarriers = []) {
   if (!reference || reference.type !== 'OES_DEV_STATE_BACKUP' || !path.isAbsolute(reference.path)) throw new Error('STATE_MIGRATION_DEV_BACKUP_REFERENCE_INVALID')
   const selected = path.resolve(reference.path)
   const root = path.resolve(stateRoot)
@@ -76,9 +78,19 @@ function reopenDevBackupReference(reference, expectedDevStackId, stateRoot) {
   if (sha256(bytes) !== reference.sha256) throw new Error('STATE_MIGRATION_DEV_BACKUP_SHA_MISMATCH')
   const value = JSON.parse(bytes.toString('utf8'))
   if (value.kind !== 'OES_DEV_STATE_BACKUP' || value.backupFingerprint !== reference.fingerprint || value.backupFingerprint !== fingerprint(value, 'backupFingerprint') || value.devStackId !== expectedDevStackId || value.sourcesPreserved !== true || !value.backups?.length) throw new Error('STATE_MIGRATION_DEV_BACKUP_BINDING_MISMATCH')
+  const expected = new Map(expectedCarriers.map((carrier) => [`${carrier.kind}:${carrier.logicalName}`, carrier]))
+  const observed = new Map()
   for (const backup of value.backups) {
     if (!path.isAbsolute(backup.file) || sha256(fs.readFileSync(backup.file)) !== backup.sha256) throw new Error(`STATE_MIGRATION_DEV_BACKUP_ARCHIVE_MISMATCH kind=${backup.kind}`)
+    const logicalName = backup.database || backup.bucket
+    const key = `${backup.kind}:${logicalName}`
+    if (!logicalName || observed.has(key)) throw new Error(`STATE_MIGRATION_DEV_BACKUP_DUPLICATE key=${key}`)
+    const carrier = expected.get(key)
+    if (!carrier || backup.containerName !== carrier.containerName || backup.containerObjectId !== carrier.containerObjectId) throw new Error(`STATE_MIGRATION_DEV_BACKUP_COVERAGE_MISMATCH key=${key}`)
+    observed.set(key, backup)
   }
+  const missing = [...expected.keys()].filter((key) => !observed.has(key))
+  if (missing.length || observed.size !== expected.size) throw new Error(`STATE_MIGRATION_DEV_BACKUP_COVERAGE_MISMATCH missing=${missing.join(',')}`)
   return value
 }
 
@@ -96,6 +108,38 @@ function providerIdentityFiles(root) {
   }
   visit(root)
   return files
+}
+
+/** Requires the complete legacy-compatible SHARED V2 label identity. */
+function assertSharedV2Labels(labels, { devStackId, pool, provider, objectId }) {
+  const expected = {
+    'oes.runtime.version': '2',
+    'oes.runtime.dev-stack-id': devStackId,
+    'oes.runtime.scope': 'SHARED',
+    'oes.runtime.pool': pool,
+    'oes.runtime.provider': provider
+  }
+  const allowed = new Set(Object.keys(expected))
+  const foreignLifecycle = Object.keys(labels || {}).some((key) => key.startsWith('com.docker.compose.'))
+  const extraRuntime = Object.keys(labels || {}).filter((key) => key.startsWith('oes.runtime.') && !allowed.has(key))
+  if (!labels || foreignLifecycle || extraRuntime.length || Object.entries(expected).some(([key, value]) => labels[key] !== value)) throw new Error(`STATE_MIGRATION_REQUIRED_LABEL_MISMATCH objectId=${objectId || 'UNKNOWN'}`)
+}
+
+/** Reopens a retired consumer credential binding without exposing its values. */
+function reopenRetiredCredentialReference(reference, provider, stateRoot, owners) {
+  if (!reference || !path.isAbsolute(reference.path) || !reference.sha256 || !reference.fingerprint) throw new Error(`STATE_MIGRATION_CREDENTIAL_REFERENCE_INVALID provider=${provider}`)
+  const selected = path.resolve(reference.path)
+  const root = path.resolve(stateRoot)
+  if (selected !== root && !selected.startsWith(`${root}${path.sep}`)) throw new Error(`STATE_MIGRATION_CREDENTIAL_REFERENCE_ESCAPE provider=${provider}`)
+  const bytes = fs.readFileSync(selected)
+  if (sha256(bytes) !== reference.sha256) throw new Error(`STATE_MIGRATION_CREDENTIAL_REFERENCE_SHA_MISMATCH provider=${provider}`)
+  const value = JSON.parse(bytes.toString('utf8'))
+  if (value.provider !== provider || value.credentialFingerprint !== reference.fingerprint || value.credentialFingerprint !== fingerprint(value, 'credentialFingerprint') || !value.ownerEnvironments || typeof value.ownerEnvironments !== 'object') throw new Error(`STATE_MIGRATION_CREDENTIAL_REFERENCE_FINGERPRINT_MISMATCH provider=${provider}`)
+  const expectedOwners = [...new Set(owners || [])].sort()
+  const actualOwners = Object.keys(value.ownerEnvironments).sort()
+  if (!expectedOwners.length || fingerprint(expectedOwners) !== fingerprint(actualOwners)) throw new Error(`STATE_MIGRATION_CREDENTIAL_OWNER_BOUNDARY_MISMATCH provider=${provider}`)
+  if ((fs.statSync(selected).mode & 0o777) !== 0o600) throw new Error(`STATE_MIGRATION_CREDENTIAL_REFERENCE_MODE_INVALID provider=${provider}`)
+  return { provider, type: reference.type || 'OES_RUNTIME_CREDENTIAL', path: selected, sha256: reference.sha256, fingerprint: reference.fingerprint, owners: expectedOwners }
 }
 
 /** Produces the closed-world state-layout mapping and fixed sibling activation paths. */
@@ -145,10 +189,12 @@ export function planStateLayoutMigration(inventory, { devStackId, providerSnapsh
     const resource = snapshot.resource ? { ...snapshot.resource, pool } : undefined
     const endpoint = snapshot.endpoint ? { ...snapshot.endpoint, pool } : undefined
     if (resource && resource.scope !== 'SHARED') throw new Error(`STATE_MIGRATION_PROVIDER_SCOPE_INVALID provider=${provider}`)
+    if (resource && ['container', 'network', 'volume'].includes(resource.kind)) assertSharedV2Labels(resource.labels, { devStackId: discoveredDevStackId, pool, provider, objectId: resource.objectId })
+    if (resource?.volume) assertSharedV2Labels(resource.volume.labels, { devStackId: discoveredDevStackId, pool, provider, objectId: resource.volume.objectId })
     if (endpoint && (!endpoint.ready || !endpoint.authority)) throw new Error(`STATE_MIGRATION_PROVIDER_ENDPOINT_INVALID provider=${provider}`)
     if (endpoint?.credentialReference) {
-      const reference = endpoint.credentialReference
-      retiredConsumerCredentialReferences.push({ provider, pool, type: reference.type, path: reference.path, sha256: reference.sha256, fingerprint: reference.fingerprint })
+      const reference = reopenRetiredCredentialReference(endpoint.credentialReference, provider, oldRoot, endpoint.owners)
+      retiredConsumerCredentialReferences.push({ ...reference, pool })
       delete endpoint.credentialReference
     }
     return { ...(resource ? { resource } : {}), ...(endpoint ? { endpoint } : {}) }
@@ -181,8 +227,14 @@ export function planStateLayoutMigration(inventory, { devStackId, providerSnapsh
       const value = readJson(identityFile)
       const resource = normalizedProviderSnapshots.map((snapshot) => snapshot.resource).find((candidate) => candidate?.objectId === value.objectId && candidate.provider === value.provider)
       if (!resource || resource.scope !== 'SHARED' || resource.pool !== mapping.pool || (value.kind && resource.kind !== value.kind) || (value.name && resource.name !== value.name)) throw new Error(`STATE_MIGRATION_PROVIDER_SNAPSHOT_COVERAGE_REQUIRED provider=${value.provider || mapping.provider} objectId=${value.objectId || 'UNKNOWN'}`)
-      if (value.labels && Object.entries(value.labels).some(([key, expected]) => resource.labels?.[key] !== expected)) throw new Error(`STATE_MIGRATION_PROVIDER_LABEL_MISMATCH provider=${value.provider || mapping.provider}`)
-      if (value.volume && (resource.volume?.name !== value.volume.name || resource.volume?.objectId !== value.volume.objectId)) throw new Error(`STATE_MIGRATION_VOLUME_IDENTITY_MISMATCH provider=${value.provider || mapping.provider}`)
+      assertSharedV2Labels(value.labels, { devStackId: discoveredDevStackId, pool: mapping.pool, provider: value.provider || mapping.provider, objectId: value.objectId })
+      assertSharedV2Labels(resource.labels, { devStackId: discoveredDevStackId, pool: mapping.pool, provider: value.provider || mapping.provider, objectId: value.objectId })
+      if (Object.entries(value.labels).some(([key, expected]) => resource.labels?.[key] !== expected)) throw new Error(`STATE_MIGRATION_PROVIDER_LABEL_MISMATCH provider=${value.provider || mapping.provider}`)
+      if (Boolean(value.volume) !== Boolean(resource.volume)) throw new Error(`STATE_MIGRATION_VOLUME_IDENTITY_MISMATCH provider=${value.provider || mapping.provider}`)
+      if (value.volume) {
+        assertSharedV2Labels(value.volume.labels, { devStackId: discoveredDevStackId, pool: mapping.pool, provider: value.provider || mapping.provider, objectId: value.volume.objectId })
+        if (fingerprint(value.volume) !== fingerprint(resource.volume)) throw new Error(`STATE_MIGRATION_VOLUME_IDENTITY_MISMATCH provider=${value.provider || mapping.provider}`)
+      }
       identityResources.push({ provider: value.provider || mapping.provider, pool: mapping.pool, kind: value.kind || resource.kind, objectId: value.objectId, name: value.name || resource.name, source: identityFile, volume: value.volume || null })
     }
   }
@@ -198,10 +250,14 @@ export function planStateLayoutMigration(inventory, { devStackId, providerSnapsh
   for (const resource of identityResources.filter((identity) => identity.kind === 'container' && !supportProviders.has(identity.provider))) if (!endpointProviders.has(`${resource.provider}:${resource.pool}`)) throw new Error(`STATE_MIGRATION_PROVIDER_ENDPOINT_COVERAGE_REQUIRED provider=${resource.provider}`)
   for (const mapping of mappings.filter((candidate) => candidate.type === 'CREDENTIAL_TREE')) if (mapping.provider === 'mtls' && !endpointProviders.has(`mtls:${mapping.pool}`)) throw new Error('STATE_MIGRATION_PROVIDER_ENDPOINT_COVERAGE_REQUIRED provider=mtls')
   const snapshotObjectIds = new Set(normalizedProviderSnapshots.flatMap((snapshot) => [snapshot.resource?.objectId, snapshot.resource?.volume?.objectId]).filter(Boolean))
+  if (snapshotObjectIds.size !== normalizedProviderSnapshots.flatMap((snapshot) => [snapshot.resource?.objectId, snapshot.resource?.volume?.objectId]).filter(Boolean).length) throw new Error('STATE_MIGRATION_DOCKER_OBJECT_ID_DUPLICATE')
   for (const object of inventory.dockerObjects || []) {
     if (!object.objectId || !snapshotObjectIds.has(object.objectId)) throw new Error(`STATE_MIGRATION_DOCKER_OBJECT_COVERAGE_REQUIRED objectId=${object.objectId || 'UNKNOWN'}`)
-    const resource = normalizedProviderSnapshots.map((snapshot) => snapshot.resource).find((candidate) => candidate?.objectId === object.objectId)
-    if (Object.entries(object.labels || {}).some(([key, expected]) => resource?.labels?.[key] !== expected)) throw new Error(`STATE_MIGRATION_DOCKER_LABEL_MISMATCH objectId=${object.objectId}`)
+    const owner = normalizedProviderSnapshots.map((snapshot) => snapshot.resource).find((candidate) => candidate?.objectId === object.objectId || candidate?.volume?.objectId === object.objectId)
+    const resource = owner?.objectId === object.objectId ? owner : owner?.volume
+    if (!resource || object.type !== (owner?.volume?.objectId === object.objectId ? 'volume' : owner.kind)) throw new Error(`STATE_MIGRATION_DOCKER_OBJECT_TYPE_MISMATCH objectId=${object.objectId}`)
+    assertSharedV2Labels(object.labels, { devStackId: discoveredDevStackId, pool: owner.pool, provider: owner.provider, objectId: object.objectId })
+    if (Object.entries(object.labels).some(([key, expected]) => resource.labels?.[key] !== expected) || Object.entries(resource.labels || {}).some(([key, expected]) => object.labels?.[key] !== expected)) throw new Error(`STATE_MIGRATION_DOCKER_LABEL_MISMATCH objectId=${object.objectId}`)
     for (const mount of object.mounts || []) if (mount.Type === 'volume' && mount.Name && !normalizedProviderSnapshots.some((snapshot) => snapshot.resource?.volume?.name === mount.Name || (snapshot.resource?.kind === 'volume' && snapshot.resource?.name === mount.Name))) throw new Error(`STATE_MIGRATION_VOLUME_COVERAGE_REQUIRED name=${mount.Name}`)
   }
   for (const bind of inventory.binds || []) {
@@ -216,9 +272,22 @@ export function planStateLayoutMigration(inventory, { devStackId, providerSnapsh
     if (typeof value === 'string' && path.isAbsolute(value) && (value === oldRoot || value.startsWith(`${oldRoot}${path.sep}`))) absoluteReferences.push({ pointer, path: path.resolve(value) })
   }
   normalizedProviderSnapshots.forEach((snapshot, index) => collectReferences(snapshot, `$[${index}]`))
+  retiredConsumerCredentialReferences.forEach((reference, index) => collectReferences(reference, `$.retiredConsumerCredentialReferences[${index}]`))
   for (const reference of absoluteReferences) if (!mappings.some((mapping) => reference.path === mapping.source || reference.path.startsWith(`${mapping.source}${path.sep}`))) throw new Error(`STATE_MIGRATION_REFERENCE_MAPPING_REQUIRED pointer=${reference.pointer}`)
-  const hasDevData = identityResources.some((resource) => resource.pool === 'dev' && resource.volume && ['postgres', 'minio'].includes(resource.provider)) || normalizedProviderSnapshots.some((snapshot) => snapshot.resource?.pool === 'dev' && ['database', 'bucket'].includes(snapshot.resource.kind))
-  if (hasDevData) reopenDevBackupReference(devBackupReference, discoveredDevStackId, oldRoot)
+  const devDataCarriers = normalizedProviderSnapshots.filter((snapshot) => snapshot.resource?.pool === 'dev' && ['database', 'bucket'].includes(snapshot.resource.kind)).map(({ resource }) => {
+    const logicalName = resource.database || resource.bucket
+    const expectedProvider = resource.kind === 'database' ? 'postgres' : 'minio'
+    if (resource.provider !== expectedProvider || !logicalName || !resource.containerName || !resource.containerObjectId) throw new Error(`STATE_MIGRATION_DEV_DATA_CARRIER_IDENTITY_REQUIRED kind=${resource.kind}`)
+    const container = identityResources.find((identity) => identity.pool === 'dev' && identity.provider === expectedProvider && identity.kind === 'container' && identity.objectId === resource.containerObjectId && identity.name === resource.containerName)
+    if (!container) throw new Error(`STATE_MIGRATION_DEV_DATA_CARRIER_CONTAINER_MISMATCH kind=${resource.kind} logicalName=${logicalName}`)
+    return { provider: resource.provider, kind: resource.kind, logicalName, containerName: resource.containerName, containerObjectId: resource.containerObjectId }
+  }).sort((left, right) => `${left.kind}:${left.logicalName}`.localeCompare(`${right.kind}:${right.logicalName}`))
+  const carrierKeys = devDataCarriers.map((carrier) => `${carrier.kind}:${carrier.logicalName}`)
+  if (new Set(carrierKeys).size !== carrierKeys.length) throw new Error('STATE_MIGRATION_DEV_DATA_CARRIER_DUPLICATE')
+  const persistentDevProviders = identityResources.filter((resource) => resource.pool === 'dev' && resource.volume && ['postgres', 'minio'].includes(resource.provider))
+  for (const provider of persistentDevProviders) if (!devDataCarriers.some((carrier) => carrier.provider === provider.provider && carrier.containerObjectId === provider.objectId)) throw new Error(`STATE_MIGRATION_DEV_DATA_CARRIER_UNACCOUNTED provider=${provider.provider} objectId=${provider.objectId}`)
+  const hasDevData = persistentDevProviders.length > 0 || devDataCarriers.length > 0
+  if (hasDevData) reopenDevBackupReference(devBackupReference, discoveredDevStackId, oldRoot, devDataCarriers)
   const coverage = {
     mappedSourceRoots: mappings.map((mapping) => ({ type: mapping.type, source: mapping.source, targetRelative: mapping.targetRelative })),
     consumedSourceRoots: ['machine/dev-stack.json', 'leases', 'semaphore', 'locks'],
@@ -226,6 +295,7 @@ export function planStateLayoutMigration(inventory, { devStackId, providerSnapsh
     dockerObjectIds: (inventory.dockerObjects || []).map((object) => object.objectId),
     bindCount: (inventory.binds || []).length,
     absoluteReferenceCount: absoluteReferences.length,
+    devDataCarriers,
     retiredConsumerCredentialReferences,
     unresolvedCount: 0
   }
@@ -240,6 +310,7 @@ export function planStateLayoutMigration(inventory, { devStackId, providerSnapsh
     devStackId: discoveredDevStackId,
     mappings,
     providerSnapshots: normalizedProviderSnapshots,
+    devDataCarriers,
     coverage,
     devBackupReference,
     quiescence: { activeRunCount: inventory.activeRunFiles.length, activeStackLeaseCount: inventory.leaseFiles.length, runningDevProcessCount: (inventory.runningDevProcessAuthorities || []).length, semaphoreTicketCount: (inventory.semaphoreFiles || []).length, controlLockCount: (inventory.controlLockFiles || []).length, runningBindCount: inventory.binds.filter((item) => item.running).length },
@@ -379,7 +450,7 @@ export async function stageStateLayoutMigration(plan, inventory, { identitySeed,
   if (plan.planFingerprint !== fingerprint(plan, 'planFingerprint') || plan.inventoryReference.fingerprint !== inventory.inventoryFingerprint) throw new Error('STATE_MIGRATION_PLAN_BINDING_MISMATCH')
   verifyPlanTopology(plan, inventory)
   if (Object.values(plan.quiescence).some((count) => Number(count) > 0)) throw new Error('STATE_MIGRATION_QUIESCENCE_REQUIRED')
-  if (plan.devBackupReference) reopenDevBackupReference(plan.devBackupReference, plan.devStackId, plan.oldRoot)
+  if (plan.devBackupReference) reopenDevBackupReference(plan.devBackupReference, plan.devStackId, plan.oldRoot, plan.devDataCarriers)
   verifyInventory(inventory)
   for (const selected of [plan.stagedRoot, plan.rollbackRoot, plan.journalPath]) if (fs.existsSync(selected)) throw new Error(`STATE_MIGRATION_TARGET_EXISTS path=${selected}`)
   fs.mkdirSync(plan.stagedRoot, { mode: 0o700 })
@@ -401,7 +472,7 @@ export async function stageStateLayoutMigration(plan, inventory, { identitySeed,
     if (faultAt === 'before-fsync') throw new Error('STATE_MIGRATION_FAULT_BEFORE_FSYNC')
     fsyncTree(plan.stagedRoot)
     const stagedEntries = inventoryTree(plan.stagedRoot)
-    const journalRaw = { schemaVersion: 3, kind: 'OES_RUNTIME_STATE_LAYOUT_ACTIVATION', state: 'PREPARED', operationId: crypto.randomUUID(), planFingerprint: plan.planFingerprint, inventoryFingerprint: inventory.inventoryFingerprint, sourceTreeFingerprint: inventory.sourceTreeFingerprint, devBackupReference: plan.devBackupReference, oldRoot: plan.oldRoot, stagedRoot: plan.stagedRoot, rollbackRoot: plan.rollbackRoot, stackKey: layout.stackKey, devStackId: layout.devStackId, stagedTreeFingerprint: fingerprint(stagedEntries), quiescence: plan.quiescence, binds: plan.binds.map((bind) => ({ ...bind, nextSource: rewriteFinalPaths(bind.source, plan, layout.stackKey) })), invalidatedRestoreBindings, transitions: [{ state: 'PREPARED', at: new Date().toISOString() }] }
+    const journalRaw = { schemaVersion: 3, kind: 'OES_RUNTIME_STATE_LAYOUT_ACTIVATION', state: 'PREPARED', operationId: crypto.randomUUID(), planFingerprint: plan.planFingerprint, inventoryFingerprint: inventory.inventoryFingerprint, sourceTreeFingerprint: inventory.sourceTreeFingerprint, devBackupReference: plan.devBackupReference, devDataCarriers: plan.devDataCarriers, oldRoot: plan.oldRoot, stagedRoot: plan.stagedRoot, rollbackRoot: plan.rollbackRoot, stackKey: layout.stackKey, devStackId: layout.devStackId, stagedTreeFingerprint: fingerprint(stagedEntries), quiescence: plan.quiescence, binds: plan.binds.map((bind) => ({ ...bind, nextSource: rewriteFinalPaths(bind.source, plan, layout.stackKey) })), invalidatedRestoreBindings, transitions: [{ state: 'PREPARED', at: new Date().toISOString() }] }
     const journal = writeJournal(plan.journalPath, journalRaw)
     return { layout, journalPath: plan.journalPath, journal }
   } catch (error) {
@@ -431,6 +502,7 @@ function relocateStackPointer(journal) {
   const raw = { ...pointer, path: path.join(journal.oldRoot, relative) }
   delete raw.pointerFingerprint
   writeAtomic(pointerPath, { ...raw, pointerFingerprint: fingerprint(raw) })
+  fsyncDirectory(stackRoot)
   return reopenCurrentStackManifest(stackRoot)
 }
 
@@ -463,10 +535,11 @@ function observeDockerContainers() {
   return ids.map((objectId) => inspectDockerContainer(objectId))
 }
 
-/** Recomputes Run, lease, DEV-process, control, admission, and bind quiescence from current authority. */
-function observeLiveQuiescence(journal, roots = [journal.oldRoot]) {
+/** Recomputes quiescence while optionally discounting only sealed replacement-provider binds. */
+function observeLiveQuiescence(journal, roots = [journal.oldRoot], allowedRunningObjectIds = []) {
   const dockerObjects = observeDockerContainers()
   const inventories = roots.filter((root) => fs.existsSync(root)).map((stateRoot) => inventoryStateLayout({ stateRoot, dockerObjects }))
+  const allowed = new Set(allowedRunningObjectIds)
   return {
     activeRunCount: inventories.reduce((count, inventory) => count + inventory.activeRunFiles.length, 0),
     activeStackLeaseCount: inventories.reduce((count, inventory) => count + inventory.leaseFiles.length, 0),
@@ -474,7 +547,7 @@ function observeLiveQuiescence(journal, roots = [journal.oldRoot]) {
     semaphoreTicketCount: inventories.reduce((count, inventory) => count + inventory.semaphoreFiles.length, 0),
     controlLockCount: inventories.reduce((count, inventory) => count + inventory.controlLockFiles.length, 0),
     allocationAdmissionCount: activeRuntimeAdmissions(journal.oldRoot).length,
-    runningBindCount: inventories.reduce((count, inventory) => count + inventory.binds.filter((bind) => bind.running).length, 0)
+    runningBindCount: inventories.reduce((count, inventory) => count + inventory.binds.filter((bind) => bind.running && !allowed.has(bind.objectId)).length, 0)
   }
 }
 
@@ -628,6 +701,35 @@ function applyProviderReplacements(value, records) {
   return rewrite(value)
 }
 
+/** Rebinds each copied provider identity file to its exact activated replacement. */
+function rewriteReplacementProviderIdentities(journal, records) {
+  return (records || []).map((record) => {
+    if (!record.oldObjectId || !record.newObjectId) return record
+    const identityPath = path.join(journal.oldRoot, 'stacks', journal.stackKey, 'providers', record.pool, record.provider, 'identity.json')
+    const priorBytes = fs.readFileSync(identityPath)
+    const prior = JSON.parse(priorBytes.toString('utf8'))
+    if (prior.provider !== record.provider || prior.kind !== 'container' || prior.objectId !== record.oldObjectId || prior.name !== record.oldName || prior.labels?.['oes.runtime.pool'] !== record.pool) throw new Error(`STATE_MIGRATION_PROVIDER_IDENTITY_FILE_MISMATCH provider=${record.provider}`)
+    const next = { ...prior, name: record.newName, objectId: record.newObjectId, labels: record.labels }
+    writeAtomic(identityPath, next)
+    fsyncDirectory(path.dirname(identityPath))
+    const nextBytes = fs.readFileSync(identityPath)
+    const reopened = JSON.parse(nextBytes.toString('utf8'))
+    if (reopened.objectId !== record.newObjectId || reopened.name !== record.newName || Object.entries(record.labels || {}).some(([key, expected]) => reopened.labels?.[key] !== expected)) throw new Error(`STATE_MIGRATION_PROVIDER_IDENTITY_REWRITE_FAILED provider=${record.provider}`)
+    return { ...record, identityRewrite: { path: identityPath, priorSha256: sha256(priorBytes), sha256: sha256(nextBytes) } }
+  })
+}
+
+/** Requires one complete replacement identity for every bind-affected old object. */
+function validateCompletedProviderActivations(journal, records) {
+  const expected = [...new Set((journal.binds || []).map((bind) => bind.objectId))].sort()
+  const observed = [...new Set((records || []).map((record) => record.oldObjectId))].sort()
+  if (fingerprint(expected) !== fingerprint(observed)) throw new Error('STATE_MIGRATION_PROVIDER_ACTIVATION_COVERAGE_MISMATCH')
+  for (const record of records || []) {
+    if (!record.oldObjectId || !record.newObjectId || !record.oldName || !record.newName || !record.backupName || !record.provider || !['dev', 'test'].includes(record.pool) || !record.labels || !record.binds?.length) throw new Error('STATE_MIGRATION_PROVIDER_MAPPING_INCOMPLETE')
+  }
+  return records
+}
+
 /** Reopens Docker-backed Stack endpoints and requires their exact containers to be running. */
 function verifyDockerStackReadiness(stackManifest) {
   for (const endpoint of stackManifest.endpoints || []) {
@@ -648,6 +750,10 @@ function verifyActivatedProviderMappings(journal, stackManifest) {
     if (Object.entries(record.labels || {}).some(([key, expected]) => replacement.Config.Labels?.[key] !== expected) || record.binds.some((bind) => !(replacement.Mounts || []).some((mount) => mount.Type === 'bind' && path.resolve(mount.Source) === bind.source && mount.Destination === bind.destination))) throw new Error(`STATE_MIGRATION_REPLACEMENT_MAPPING_MISMATCH objectId=${record.newObjectId}`)
     const retained = inspectDockerContainer(record.oldObjectId)
     if (retained.Id !== record.oldObjectId || String(retained.Name).replace(/^\//u, '') !== record.backupName || retained.State.Running) throw new Error(`STATE_MIGRATION_RETAINED_PROVIDER_MISMATCH objectId=${record.oldObjectId}`)
+    const identityPath = path.join(journal.oldRoot, 'stacks', journal.stackKey, 'providers', record.pool, record.provider, 'identity.json')
+    const identityBytes = fs.readFileSync(identityPath)
+    const identity = JSON.parse(identityBytes.toString('utf8'))
+    if (record.identityRewrite?.path !== identityPath || record.identityRewrite.sha256 !== sha256(identityBytes) || identity.objectId !== record.newObjectId || identity.name !== record.newName || Object.entries(record.labels || {}).some(([key, expected]) => identity.labels?.[key] !== expected)) throw new Error(`STATE_MIGRATION_PROVIDER_IDENTITY_REOPEN_MISMATCH provider=${record.provider}`)
     const resource = (stackManifest.resources || []).find((candidate) => candidate.objectId === record.newObjectId)
     if (!resource || resource.name !== record.newName || resource.replacement?.oldObjectId !== record.oldObjectId || resource.replacement?.newObjectId !== record.newObjectId) throw new Error(`STATE_MIGRATION_STACK_PROVIDER_MAPPING_MISMATCH objectId=${record.newObjectId}`)
   }
@@ -655,14 +761,14 @@ function verifyActivatedProviderMappings(journal, stackManifest) {
 }
 
 /** Activates a PREPARED journal through the frozen rename sequence and durable COMMITTED boundary. */
-export function activateStagedState({ journalPath, confirmation, faultAt, verifyNewRoot = () => true, verifyProviderReadiness = verifyDockerStackReadiness, observeQuiescence = observeLiveQuiescence, providerLifecycle = dockerProviderLifecycle }) {
+export function activateStagedState({ journalPath, confirmation, faultAt, verifyNewRoot = () => true, verifyProviderReadiness = verifyDockerStackReadiness, observeQuiescence = observeLiveQuiescence, providerLifecycle = dockerProviderLifecycle, onDurabilityStep = () => {} }) {
   let journal = reopenJournal(journalPath)
   const barrier = acquireMigrationBarrier(journal.oldRoot, { operation: 'ACTIVATE', journalFingerprint: journal.journalFingerprint })
   try {
     journal = reopenJournal(journalPath)
     if (journal.state !== 'PREPARED') throw new Error(`STATE_MIGRATION_ACTIVATION_STATE_INVALID state=${journal.state}`)
     if (confirmation?.kind !== 'OES_RUNTIME_STATE_LAYOUT_ACTIVATION_CONFIRMATION' || confirmation.status !== 'CONFIRMED' || confirmation.journalFingerprint !== journal.journalFingerprint || confirmation.confirmationFingerprint !== fingerprint(confirmation, 'confirmationFingerprint')) throw new Error('STATE_MIGRATION_ACTIVATION_CONFIRMATION_INVALID')
-    if (journal.devBackupReference) reopenDevBackupReference(journal.devBackupReference, journal.devStackId, journal.oldRoot)
+    if (journal.devBackupReference) reopenDevBackupReference(journal.devBackupReference, journal.devStackId, journal.oldRoot, journal.devDataCarriers)
     assertQuiescent(observeQuiescence(journal))
     if (!fs.existsSync(journal.oldRoot) || !fs.existsSync(journal.stagedRoot) || fs.existsSync(journal.rollbackRoot)) throw new Error('STATE_MIGRATION_ACTIVATION_PATH_STATE_INVALID')
     if (fingerprint(inventoryTree(journal.oldRoot)) !== journal.sourceTreeFingerprint) throw new Error('STATE_MIGRATION_SOURCE_CHANGED')
@@ -676,9 +782,14 @@ export function activateStagedState({ journalPath, confirmation, faultAt, verify
     journal = transition(journalPath, 'NEW_PLACED')
     if (faultAt === 'after-new-placed') throw new Error('STATE_MIGRATION_FAULT_AFTER_NEW_PLACED')
     const relocated = relocateStackPointer(journal)
-    const providerActivation = providerLifecycle.activate(journal.binds, { journal, stackManifest: relocated.manifest, onProgress: (records) => { journal = transition(journalPath, 'NEW_PLACED', { providerActivation: records }) } }) || []
+    onDurabilityStep('RELOCATED_POINTER_DIRECTORY_SYNCED', journal)
+    let providerActivation = providerLifecycle.activate(journal.binds, { journal, stackManifest: relocated.manifest, onProgress: (records) => { journal = transition(journalPath, 'NEW_PLACED', { providerActivation: records }) } }) || []
     journal = transition(journalPath, 'NEW_PLACED', { providerActivation })
     if (faultAt === 'after-provider-activation') throw new Error('STATE_MIGRATION_FAULT_AFTER_PROVIDER_ACTIVATION')
+    validateCompletedProviderActivations(journal, providerActivation)
+    providerActivation = rewriteReplacementProviderIdentities(journal, providerActivation)
+    journal = transition(journalPath, 'NEW_PLACED', { providerActivation })
+    if (faultAt === 'after-provider-identity-rewrite') throw new Error('STATE_MIGRATION_FAULT_AFTER_PROVIDER_IDENTITY_REWRITE')
     const current = reopenCurrentStackManifest(path.join(journal.oldRoot, 'stacks', journal.stackKey)).manifest
     const draft = applyProviderReplacements({ ...current, lifecycle: 'REGISTERED', activationPlanFingerprint: journal.planFingerprint }, providerActivation)
     delete draft.schemaVersion
@@ -686,6 +797,13 @@ export function activateStagedState({ journalPath, confirmation, faultAt, verify
     delete draft.generation
     delete draft.stackManifestFingerprint
     const published = publishStackManifest(path.join(journal.oldRoot, 'stacks', journal.stackKey), draft)
+    fsyncDirectory(path.dirname(published.file))
+    onDurabilityStep('MANIFEST_DIRECTORY_SYNCED', journal)
+    fsyncDirectory(path.join(journal.oldRoot, 'stacks', journal.stackKey))
+    onDurabilityStep('STACK_POINTER_DIRECTORY_SYNCED', journal)
+    const reopenedPublication = reopenCurrentStackManifest(path.join(journal.oldRoot, 'stacks', journal.stackKey))
+    if (reopenedPublication.pointer.generation !== published.reference.generation || reopenedPublication.pointer.sha256 !== published.reference.sha256 || reopenedPublication.pointer.fingerprint !== published.reference.fingerprint) throw new Error('STATE_MIGRATION_STACK_PUBLICATION_REOPEN_MISMATCH')
+    onDurabilityStep('STACK_PUBLICATION_REOPENED', journal)
     if (!verifyProviderReadiness(published.manifest)) throw new Error('STATE_MIGRATION_PROVIDER_READINESS_FAILED')
     if (!verifyCanonicalActivatedRoot(journal.oldRoot, journal) || !verifyNewRoot(journal.oldRoot, journal)) throw new Error('STATE_MIGRATION_NEW_ROOT_VERIFICATION_FAILED')
     journal = transition(journalPath, 'COMMITTED', { activatedStackManifestReference: published.reference, committedRootTreeFingerprint: fingerprint(inventoryTree(journal.oldRoot)) })
@@ -735,7 +853,7 @@ export function recoverStateLayout({ journalPath, verifyNewRoot = () => true, ve
 }
 
 /** Performs a confirmed whole-state rollback after COMMITTED while retaining the new tree for audit. */
-export function rollbackCommittedState({ journalPath, confirmation, observeQuiescence = (journal) => observeLiveQuiescence(journal, [journal.oldRoot, journal.rollbackRoot]), providerLifecycle = dockerProviderLifecycle }) {
+export function rollbackCommittedState({ journalPath, confirmation, observeQuiescence = (journal, { allowedRunningObjectIds = [] } = {}) => observeLiveQuiescence(journal, [journal.oldRoot, journal.rollbackRoot], allowedRunningObjectIds), providerLifecycle = dockerProviderLifecycle }) {
   let journal = reopenJournal(journalPath)
   const barrier = acquireMigrationBarrier(journal.oldRoot, { operation: 'ROLLBACK', journalFingerprint: journal.journalFingerprint })
   try {
@@ -746,9 +864,11 @@ export function rollbackCommittedState({ journalPath, confirmation, observeQuies
     }
     if (journal.state !== 'COMMITTED') throw new Error(`STATE_MIGRATION_ROLLBACK_STATE_INVALID state=${journal.state}`)
     if (confirmation?.kind !== 'OES_RUNTIME_STATE_LAYOUT_ROLLBACK_CONFIRMATION' || confirmation.status !== 'CONFIRMED' || confirmation.journalFingerprint !== journal.journalFingerprint || confirmation.confirmationFingerprint !== fingerprint(confirmation, 'confirmationFingerprint')) throw new Error('STATE_MIGRATION_ROLLBACK_CONFIRMATION_INVALID')
-    assertQuiescent(observeQuiescence(journal))
+    const allowedRunningObjectIds = (journal.providerActivation || []).map((record) => record.newObjectId).filter(Boolean)
+    assertQuiescent(observeQuiescence(journal, { allowedRunningObjectIds }))
     const retainedNewRoot = `${journal.stagedRoot}.rolled-back-${journal.operationId}`
     providerLifecycle.stop(journal.providerActivation || [])
+    assertQuiescent(observeQuiescence(journal, { allowedRunningObjectIds: [] }))
     if (fs.existsSync(journal.rollbackRoot)) {
       if (fs.existsSync(journal.oldRoot)) {
         if (fs.existsSync(retainedNewRoot)) throw new Error('STATE_MIGRATION_RETAINED_NEW_ROOT_EXISTS')

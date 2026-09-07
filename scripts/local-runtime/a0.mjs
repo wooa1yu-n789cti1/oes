@@ -2,6 +2,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
 import { fingerprint, writeAtomic } from './src/canonical.mjs'
 import { resolveCredentialReference } from './src/credentials.mjs'
 import { environmentForOwner, reopenManifest, resolveResources } from './src/manifest.mjs'
@@ -15,13 +16,21 @@ const IMAGES = Object.freeze({
   natsBox: 'natsio/nats-box:0.14.5@sha256:0784ab710aefaf6ef037ed797ee7dcde613c6ad208c4dbff1945fc7c1b5b5375'
 })
 
-/** Parses A0's small explicit option surface. */
-function options(argv) {
+/** Parses A0's small explicit option surface, including pnpm's standalone separator. */
+export function parseA0Options(argv) {
   const output = {}
-  for (let index = 0; index < argv.length; index += 1) if (argv[index].startsWith('--')) {
-    const [key, inline] = argv[index].slice(2).split('=', 2)
+  const allowed = new Set(['driver', 'scenario', 'batch', 'state-root', 'output'])
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index]
+    if (token === '--') continue
+    if (!token.startsWith('--')) throw new Error(`A0_ARGUMENT_INVALID value=${token}`)
+    const [key, inline] = token.slice(2).split('=', 2)
+    const following = argv[index + 1]
+    if (!key || inline === '' || (inline === undefined && (!following || following.startsWith('--')))) throw new Error(`A0_OPTION_VALUE_REQUIRED option=${token}`)
     output[key] = inline ?? argv[++index]
   }
+  const unknown = Object.keys(output).filter((key) => !allowed.has(key))
+  if (unknown.length) throw new Error(`A0_OPTION_INVALID options=${unknown.join(',')}`)
   return output
 }
 
@@ -369,8 +378,9 @@ async function runFull({ stateRoot, driver, batch, output }) {
 
 /** Selects a shortcut or complete A0 execution and prints its exact report reference. */
 async function main(argv = process.argv.slice(2)) {
-  const input = options(argv)
+  const input = parseA0Options(argv)
   const driver = input.driver || 'docker'
+  if (!['docker', 'simulation'].includes(driver)) throw new Error(`A0_DRIVER_INVALID driver=${driver}`)
   const scenario = input.scenario || 'full'
   const batch = input.batch || Date.now().toString(36)
   const stateRoot = path.resolve(input['state-root'] || path.join(process.env.HOME, '.local/state/oes/runtime-v2-a0'))
@@ -379,4 +389,4 @@ async function main(argv = process.argv.slice(2)) {
   process.stdout.write(`${JSON.stringify({ status: 'A0_PASSED', scenario, driver, output, reportFingerprint: report.reportFingerprint, exitStatus: report.exitStatus }, null, 2)}\n`)
 }
 
-main().catch((error) => { process.stderr.write(`${error.stack || error.message || error}\n`); process.exitCode = 1 })
+if (import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((error) => { process.stderr.write(`${error.stack || error.message || error}\n`); process.exitCode = 1 })

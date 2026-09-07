@@ -120,8 +120,10 @@ pnpm runtime:operator:status -- \
 ```
 
 `operator-authority.json` contains only `stackReferences`, `runManifestPaths`, and `leasePaths`.
-The result classifies each observation as `SHARED`, `RUN`, `CI`, `LEGACY`, or `UNKNOWN`; only an
-exact terminal Run/CI manifest join with no active lease is eligible for launcher reconciliation.
+`leasePaths` must exactly enumerate every canonical lease currently present beneath the referenced
+Stacks; omission, duplication, or an unexpected path fails authority reopen. The result classifies
+each observation as `SHARED`, `RUN`, `CI`, `LEGACY`, or `UNKNOWN`; only an exact Run/CI manifest join
+with a fingerprint-valid `cleanup.json` and no active lease is eligible for launcher reconciliation.
 Every other object is preserved.
 
 ## 7. CI parity
@@ -142,8 +144,24 @@ Inventory and plan do not mutate the configured root. First capture exact bind o
 seal the old tree and its provider pool mapping:
 
 ```bash
-ids="$(docker ps -aq --filter label=oes.runtime.version=2)"
-if [ -n "$ids" ]; then docker inspect $ids; else printf '[]\n'; fi \
+state_root=/ABSOLUTE/runtime-v2
+dev_stack_id="$(jq -er '.devStackId | select(type == "string" and length > 0)' \
+  "$state_root/machine/dev-stack.json")"
+containers="$(docker ps -aq --filter label=oes.runtime.version=2 \
+  --filter "label=oes.runtime.dev-stack-id=$dev_stack_id")"
+networks="$(docker network ls -q --filter label=oes.runtime.version=2 \
+  --filter "label=oes.runtime.dev-stack-id=$dev_stack_id")"
+volumes="$(docker volume ls -q --filter label=oes.runtime.version=2 \
+  --filter "label=oes.runtime.dev-stack-id=$dev_stack_id")"
+container_json='[]'; network_json='[]'; volume_json='[]'
+if [ -n "$containers" ]; then container_json="$(docker container inspect $containers)"; fi
+if [ -n "$networks" ]; then network_json="$(docker network inspect $networks)"; fi
+if [ -n "$volumes" ]; then volume_json="$(docker volume inspect $volumes)"; fi
+jq -n --argjson containers "$container_json" --argjson networks "$network_json" \
+  --argjson volumes "$volume_json" \
+  '($containers | map(. + {type:"container"}))
+   + ($networks | map(. + {type:"network"}))
+   + ($volumes | map(. + {type:"volume"}))' \
   > /ABSOLUTE/docker-observations.json
 
 pnpm runtime:state:inventory -- --state-root /ABSOLUTE/runtime-v2 \
@@ -157,7 +175,10 @@ pnpm runtime:state:plan -- --inventory /ABSOLUTE/state-inventory.json \
   --output /ABSOLUTE/state-plan.json
 ```
 
-`provider-pools.json` is an object from provider name to `dev` or `test` when an old identity does
+`docker-observations.json` is the complete exact-`devStackId` V2 container, network, and volume set;
+the inventory preserves every supplied object and planning rejects any object without matching
+provider identity/snapshot coverage or the complete SHARED V2 label set. `provider-pools.json` is an
+object from provider name to `dev` or `test` when an old identity does
 not already seal `oes.runtime.pool`. `provider-snapshots.json` is a closed-world array of exact
 `{resource, endpoint}` observations: every copied provider identity, object ID, label, volume and
 old-root bind must have one matching `SHARED` resource, while every primary provider and mTLS has one
@@ -167,7 +188,8 @@ The stable old `shared/<devStackId>/process-runtime` payload key is classified a
 material and moves byte-for-byte to `credentials/process-runtime`, not a provider-data directory.
 An inventoried DEV PostgreSQL/MinIO data carrier or a DEV database/bucket makes
 `--dev-backup-record` mandatory; it must refer to a byte-verified backup outside the runtime state
-root, and every archive is reopened during plan, stage, and activation.
+root. Its database/bucket keys and exact container identities must equal the complete planned DEV
+data-carrier set, and every archive is reopened during plan, stage, and activation.
 Stop DEV processes and every container with an old-root bind, then repeat inventory/plan until active
 Run, Stack lease, DEV-process, semaphore-ticket, control-lock and running-bind counts are all zero.
 Stage creates and fsyncs a same-filesystem sibling while leaving the configured root byte-exact:
@@ -189,19 +211,23 @@ Activation atomically closes parent-owned allocation admission, holds the machin
 rechecks live quiescence and source bytes, and performs `PREPARED -> OLD_MOVED -> NEW_PLACED ->
 COMMITTED`. Each parent-journal transition fsyncs its containing directory. Necessary bind-provider
 replacement uses the canonical `oes-v2-<devStackIdToken>-<pool>-<provider>` name and seals both the
-retained old identity and ready new identity. Before `COMMITTED`, recover restores old authority and
+retained old identity and ready new identity. It also atomically rewrites and reopens the provider
+`identity.json`. The generation directory and Stack pointer directory are fsynced and the exact
+publication is reopened before `COMMITTED`. Before `COMMITTED`, recover restores old authority and
 quarantines the staged/new tree; after `COMMITTED`, recover reopens the exact activated generation,
-provider mapping and readiness. Ordinary launcher commands reopen the registry's preserved immutable
+provider identity, mapping, and readiness. Ordinary launcher commands reopen the registry's preserved immutable
 `devStackId`; an explicit ID is only an exact-match assertion:
 
 ```bash
 pnpm runtime:state:recover -- --journal /ABSOLUTE/.runtime-v2.activation-ID.json
 ```
 
-Confirmed rollback holds the same parent migration barrier and performs another zero-Run,
-zero-lease, stopped-DEV-process and zero-running-bind observation across both current and rollback
-roots before stopping or renaming any exact object. Stop the recorded replacement providers first;
-a non-zero observation preserves both roots and reports `STATE_MIGRATION_QUIESCENCE_REQUIRED`.
+Confirmed rollback holds the same parent migration barrier. Its first observation across current and
+rollback roots requires zero Run, lease, DEV process, admission, semaphore, lock, and unexpected
+running bind while allowing only the journal-sealed replacement object IDs. It then stops those exact
+replacement providers, performs a second strict zero-running-bind observation, and only then renames
+either root. A non-zero observation preserves both roots and reports
+`STATE_MIGRATION_QUIESCENCE_REQUIRED`.
 
 Whole-state rollback retains the new tree for audit and requires a separately confirmed binding to
 the current committed journal:

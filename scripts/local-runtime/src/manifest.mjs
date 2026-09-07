@@ -4,6 +4,9 @@ import { fingerprint, readJson, sha256, writeAtomic } from './canonical.mjs'
 import { assertNoSymlink, stackPaths } from './state-layout.mjs'
 import { acquireExclusiveLeaseSync } from './locks.mjs'
 
+/** Fsyncs one manifest directory after an atomic entry replacement. */
+function fsyncDirectory(directory) { const fd = fs.openSync(directory, 'r'); try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) } }
+
 /** Serializes immutable Stack generation allocation across launcher processes. */
 function withStackPublicationLock(stackRoot, callback) {
   const lock = path.join(path.dirname(path.dirname(stackRoot)), 'locks', `stack-manifest-${path.basename(stackRoot)}.lock`)
@@ -39,9 +42,13 @@ export function publishStackManifest(stackRoot, draft) {
     const file = path.join(manifestsRoot, `${generation}.json`)
     if (fs.existsSync(file)) throw new Error(`STACK_MANIFEST_GENERATION_EXISTS generation=${generation}`)
     writeAtomic(file, manifest)
+    fsyncDirectory(manifestsRoot)
     const reference = artifactReference(file, manifest, 'OES_RUNTIME_STACK_MANIFEST')
     const pointerRaw = { schemaVersion: 3, kind: 'OES_RUNTIME_STACK_MANIFEST_POINTER', generation, ...reference }
     writeAtomic(path.join(stackRoot, 'current-manifest.json'), { ...pointerRaw, pointerFingerprint: fingerprint(pointerRaw) })
+    fsyncDirectory(canonicalStackRoot)
+    const reopened = reopenCurrentStackManifest(canonicalStackRoot)
+    if (reopened.pointer.generation !== reference.generation || reopened.pointer.sha256 !== reference.sha256 || reopened.pointer.fingerprint !== reference.fingerprint) throw new Error('STACK_MANIFEST_PUBLICATION_REOPEN_MISMATCH')
     return { file, manifest, reference }
   })
 }

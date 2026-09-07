@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import path from 'node:path'
 import { fingerprint, readJson, sha256, writeAtomic } from './canonical.mjs'
 import { reopenManifest, reopenStackManifest } from './manifest.mjs'
 
@@ -10,8 +11,28 @@ function objectIdentity(value) { return value.objectId || value.Id || value.id }
 /** Reopens reference-only manifest inputs before using them as lifecycle authority. */
 export function reopenOperatorAuthority({ stackReferences = [], runManifestPaths = [], leasePaths = [] }) {
   const stacks = stackReferences.map((reference) => reopenStackManifest(reference))
-  const runs = runManifestPaths.map((file) => reopenManifest(file))
-  const leases = leasePaths.filter((file) => fs.existsSync(file)).map((file) => {
+  const runs = runManifestPaths.map((file) => {
+    const run = reopenManifest(file)
+    const cleanupPath = path.join(run.runDirectory, 'cleanup.json')
+    if (!fs.existsSync(cleanupPath)) return { ...run, terminalCleanup: null }
+    const bytes = fs.readFileSync(cleanupPath)
+    const cleanup = JSON.parse(bytes.toString('utf8'))
+    if (cleanup.kind !== 'OES_RUNTIME_RUN_CLEANUP' || cleanup.stackKey !== run.stackKey || cleanup.taskKey !== run.taskKey || cleanup.runId !== run.runId || cleanup.sourceFingerprint !== run.manifestFingerprint || cleanup.recordFingerprint !== fingerprint(cleanup, 'recordFingerprint')) throw new Error(`OPERATOR_TERMINAL_CLEANUP_INVALID path=${cleanupPath}`)
+    return { ...run, terminalCleanup: { path: cleanupPath, sha256: sha256(bytes), fingerprint: cleanup.recordFingerprint, result: cleanup.result } }
+  })
+  const stackRoots = new Set([
+    ...stackReferences.map((reference) => path.dirname(path.dirname(path.resolve(reference.path)))),
+    ...runs.map((run) => path.resolve(run.stackRoot))
+  ])
+  const discoveredLeasePaths = [...stackRoots].flatMap((stackRoot) => {
+    const leasesRoot = path.join(stackRoot, 'leases')
+    return fs.existsSync(leasesRoot) ? fs.readdirSync(leasesRoot).filter((name) => name.endsWith('.json')).sort().map((name) => path.join(leasesRoot, name)) : []
+  }).sort()
+  const suppliedLeasePaths = leasePaths.map((file) => path.resolve(file)).sort()
+  const missing = discoveredLeasePaths.filter((file) => !suppliedLeasePaths.includes(file))
+  const unexpected = suppliedLeasePaths.filter((file) => !discoveredLeasePaths.includes(file))
+  if (new Set(suppliedLeasePaths).size !== suppliedLeasePaths.length || missing.length || unexpected.length) throw new Error(`OPERATOR_LEASE_AUTHORITY_INCOMPLETE missing=${missing.join(',')} unexpected=${unexpected.join(',')}`)
+  const leases = discoveredLeasePaths.map((file) => {
     const bytes = fs.readFileSync(file)
     const value = readJson(file)
     if (value.kind !== 'OES_RUNTIME_STACK_LEASE' || value.leaseFingerprint !== fingerprint(value, 'leaseFingerprint')) throw new Error(`OPERATOR_LEASE_INVALID path=${file}`)
@@ -49,15 +70,16 @@ export function classifyRuntimeObject(observed, authority) {
   const lease = authority.leases.find((candidate) => candidate.stackKey === stackKey && candidate.taskKey === taskKey && candidate.runId === runId)
   if (!run || !resource) return { status: 'UNKNOWN', objectId, reason: 'RUN_MANIFEST_JOIN_MISSING' }
   if (scope === 'CI' && (!labels['oes.runtime.ci-job-fingerprint'] || labels['oes.runtime.ci-job-fingerprint'] !== run.jobFingerprint)) return { status: 'UNKNOWN', objectId, reason: 'CI_IDENTITY_JOIN_MISSING' }
-  return { status: scope, objectId, stackKey, taskKey, runId, provider, manifestFingerprint: run.manifestFingerprint, leaseStatus: lease ? 'ACTIVE' : 'ABSENT' }
+  const terminalStatus = !run.terminalCleanup ? 'ABSENT' : run.terminalCleanup.result === 'RECONCILED' ? 'VERIFIED' : 'FAILED'
+  return { status: scope, objectId, stackKey, taskKey, runId, provider, manifestFingerprint: run.manifestFingerprint, leaseStatus: lease ? 'ACTIVE' : 'ABSENT', terminalStatus }
 }
 
 /** Produces fail-closed reconciliation decisions without broad name or label deletion. */
 export function planOperatorReconciliation(observations, authority) {
   return observations.map((observed) => {
     const classification = classifyRuntimeObject(observed, authority)
-    const eligible = ['RUN', 'CI'].includes(classification.status) && classification.leaseStatus === 'ABSENT'
-    return { ...classification, action: eligible ? 'RECONCILE_EXACT_MANIFEST_RESOURCE' : 'PRESERVE', reason: eligible ? 'EXACT_TERMINAL_RUN_WITHOUT_LEASE' : classification.reason || classification.leaseStatus || classification.status }
+    const eligible = ['RUN', 'CI'].includes(classification.status) && classification.leaseStatus === 'ABSENT' && classification.terminalStatus === 'VERIFIED'
+    return { ...classification, action: eligible ? 'RECONCILE_EXACT_MANIFEST_RESOURCE' : 'PRESERVE', reason: eligible ? 'EXACT_TERMINAL_RUN_WITHOUT_LEASE' : classification.reason || (classification.leaseStatus === 'ACTIVE' ? 'ACTIVE' : classification.terminalStatus) || classification.status }
   })
 }
 

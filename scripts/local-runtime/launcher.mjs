@@ -18,20 +18,51 @@ import { planOperatorReconciliation, reopenOperatorAuthority, writeOperatorStatu
 import { sha256, writeAtomic } from './src/canonical.mjs'
 
 const root = path.resolve(import.meta.dirname, '../..')
+const BOOLEAN_OPTIONS = new Set(['migrate', 'foundation-seed'])
+const INTENT_OPTIONS = ['profile', 'test-class', 'owner', 'owners', 'capabilities', 'task-key', 'run-id', 'dev-stack-id', 'state-root', 'machine-config', 'concurrency', 'driver']
+const SUBCOMMAND_OPTIONS = Object.freeze({
+  dev: [...INTENT_OPTIONS, 'scope'], plan: INTENT_OPTIONS, start: INTENT_OPTIONS,
+  run: [...INTENT_OPTIONS, 'migrate', 'foundation-seed', 'fixture', 'timeout'],
+  migrate: ['manifest'], 'foundation-seed': ['manifest'], fixture: ['manifest', 'fixture'],
+  reconcile: ['manifest', 'transaction'], status: ['manifest'],
+  'state-inventory': ['state-root', 'docker-observations', 'output'],
+  'state-plan': ['inventory', 'provider-snapshots', 'provider-pools', 'dev-backup-record', 'dev-stack-id', 'output'],
+  'state-stage': ['plan', 'inventory'], 'state-activate': ['journal', 'confirmation'],
+  'state-recover': ['journal'], 'state-rollback': ['journal', 'confirmation'],
+  'operator-status': ['observations', 'authority', 'output'],
+  'dev-backup': ['manifest', 'output'], 'dev-restore': ['manifest', 'backup', 'confirmation'],
+  'legacy-inventory': ['bindings', 'output'], 'legacy-plan': ['inventory', 'owner-task-id', 'output'],
+  'legacy-backup': ['inventory', 'output'], 'legacy-apply': ['plan', 'confirmation', 'collaboration-binding', 'output'],
+  'legacy-residue': ['plan', 'bindings', 'output']
+})
 
 /** Parses long options while preserving the command following `--`. */
 export function parseArguments(argv) {
-  const separator = argv.indexOf('--')
-  const command = separator >= 0 ? argv.slice(separator + 1) : []
-  const tokens = separator >= 0 ? argv.slice(0, separator) : argv
+  const forwarded = argv[0] === '--' ? argv.slice(1) : argv
+  const separator = forwarded.indexOf('--')
+  const command = separator >= 0 ? forwarded.slice(separator + 1) : []
+  const tokens = separator >= 0 ? forwarded.slice(0, separator) : forwarded
   const options = {}
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index]
-    if (!token.startsWith('--')) continue
+    if (!token.startsWith('--')) throw new Error(`RUNTIME_ARGUMENT_INVALID value=${token}`)
     const [key, inline] = token.slice(2).split('=', 2)
-    options[key] = inline ?? (tokens[index + 1]?.startsWith('--') || index + 1 === tokens.length ? 'true' : tokens[++index])
+    if (!key || inline === '') throw new Error(`RUNTIME_OPTION_VALUE_REQUIRED option=${token}`)
+    const missingValue = tokens[index + 1]?.startsWith('--') || index + 1 === tokens.length
+    if (inline === undefined && missingValue && !BOOLEAN_OPTIONS.has(key)) throw new Error(`RUNTIME_OPTION_VALUE_REQUIRED option=${token}`)
+    options[key] = inline ?? (missingValue ? 'true' : tokens[++index])
   }
   return { options, command }
+}
+
+/** Rejects unknown subcommands/options and child commands outside the run boundary. */
+function validateCommandSurface(subcommand, options, command) {
+  if (!subcommand) return
+  const allowed = SUBCOMMAND_OPTIONS[subcommand]
+  if (!allowed) throw new Error(`RUNTIME_SUBCOMMAND_INVALID subcommand=${subcommand}`)
+  const unknown = Object.keys(options).filter((key) => !allowed.includes(key))
+  if (unknown.length) throw new Error(`RUNTIME_OPTION_INVALID subcommand=${subcommand} options=${unknown.join(',')}`)
+  if (subcommand !== 'run' && command.length) throw new Error(`RUNTIME_COMMAND_FORBIDDEN subcommand=${subcommand}`)
 }
 
 /** Splits one comma-separated option into a stable unique list. */
@@ -67,6 +98,7 @@ function ownerEnvironment(manifest, owner) {
 export async function main(argv = process.argv.slice(2)) {
   const subcommand = argv[0]
   const { options, command } = parseArguments(argv.slice(1))
+  validateCommandSurface(subcommand, options, command)
   if (subcommand === 'dev') {
     const scopes = {
       system: ['permission-service','identity-service','hr-service','auth-service','collaboration-service','asset-service','item-master-service','notification-service','public-entry-service','party-service','site-service','tenant-org-service','terminal-device-service','browser-activity-service','api-gateway'],

@@ -20,9 +20,12 @@ test('operator projection distinguishes SHARED, RUN, CI, LEGACY, and UNKNOWN thr
   const run = publishManifest(runRoot, { lifecycle: 'REGISTERED', profile: 'LOCAL_INTEGRATION', stateRoot: root, stackRoot, runDirectory: runRoot, stackKey, devStackId: 'fixture_machine', taskKey: 'task_a', runId: 'run_a', owners: [], resources: [{ provider: 'postgres', kind: 'container', scope: 'RUN', objectId: 'run-object' }], endpoints: [], stackManifestReference: stack.reference })
   const ciRoot = path.join(stackRoot, 'runs', 'task_ci', 'run_ci')
   const ci = publishManifest(ciRoot, { lifecycle: 'REGISTERED', profile: 'CI', stateRoot: root, stackRoot, runDirectory: ciRoot, stackKey, devStackId: 'fixture_machine', jobFingerprint: 'feedfacefeedface', taskKey: 'task_ci', runId: 'run_ci', owners: [], resources: [{ provider: 'postgres', kind: 'container', scope: 'CI', objectId: 'ci-object' }], endpoints: [], stackManifestReference: stack.reference })
+  const cleanupRaw = { schemaVersion: 3, kind: 'OES_RUNTIME_RUN_CLEANUP', stackKey, taskKey: 'task_ci', runId: 'run_ci', sourceFingerprint: ci.manifest.manifestFingerprint, cleanupResults: [], sharedLeaseCount: 0, result: 'RECONCILED' }
+  writeAtomic(path.join(ciRoot, 'cleanup.json'), { ...cleanupRaw, recordFingerprint: fingerprint(cleanupRaw) })
   const leaseRaw = { schemaVersion: 3, kind: 'OES_RUNTIME_STACK_LEASE', stackKey, devStackId: 'fixture_machine', taskKey: 'task_a', runId: 'run_a' }
   const leasePath = path.join(stackRoot, 'leases', 'task_a--run_a.json')
   writeAtomic(leasePath, { ...leaseRaw, leaseFingerprint: fingerprint(leaseRaw) })
+  assert.throws(() => reopenOperatorAuthority({ stackReferences: [stack.reference], runManifestPaths: [run.file, ci.file], leasePaths: [] }), /OPERATOR_LEASE_AUTHORITY_INCOMPLETE/)
   const authority = reopenOperatorAuthority({ stackReferences: [stack.reference], runManifestPaths: [run.file, ci.file], leasePaths: [leasePath] })
   const observations = [
     { objectId: 'shared-object', labels: labels('SHARED') },
@@ -40,4 +43,16 @@ test('operator projection distinguishes SHARED, RUN, CI, LEGACY, and UNKNOWN thr
   const applied = applyOperatorReconciliation(plan, observations, (_observed, decision) => ({ disposition: `RECONCILED_${decision.status}` }))
   assert.equal(applied.find((item) => item.objectId === 'ci-object').disposition, 'RECONCILED_CI')
   assert.equal(applied.find((item) => item.objectId === 'legacy-object').disposition, 'PRESERVED')
+  fs.rmSync(leasePath)
+  const unterminatedAuthority = reopenOperatorAuthority({ stackReferences: [stack.reference], runManifestPaths: [run.file], leasePaths: [] })
+  const unterminated = planOperatorReconciliation([observations[2]], unterminatedAuthority)[0]
+  assert.equal(unterminated.leaseStatus, 'ABSENT')
+  assert.equal(unterminated.terminalStatus, 'ABSENT')
+  assert.equal(unterminated.action, 'PRESERVE')
+  const failedCleanupRaw = { ...cleanupRaw, result: 'PRESERVED_WITH_FINDINGS' }
+  writeAtomic(path.join(ciRoot, 'cleanup.json'), { ...failedCleanupRaw, recordFingerprint: fingerprint(failedCleanupRaw) })
+  const failedCleanupAuthority = reopenOperatorAuthority({ stackReferences: [stack.reference], runManifestPaths: [ci.file], leasePaths: [] })
+  const failedCleanup = planOperatorReconciliation([observations[3]], failedCleanupAuthority)[0]
+  assert.equal(failedCleanup.terminalStatus, 'FAILED')
+  assert.equal(failedCleanup.action, 'PRESERVE')
 })
