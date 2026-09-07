@@ -23,7 +23,7 @@
     "test:integration": "pnpm --workspace-root test:run -- --type integration --owner public-entry-service"
   },
   "dependencies": {
-    "@grpc/grpc-js": "^1.14.3",
+    "@grpc/grpc-js": "^1.14.4",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.3",
     "@nestjs/core": "^11.0.1",

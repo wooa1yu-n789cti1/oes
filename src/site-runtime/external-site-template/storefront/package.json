@@ -10,7 +10,7 @@
     "typecheck": "NUXT_TELEMETRY_DISABLED=1 nuxt typecheck"
   },
   "dependencies": {
-    "nuxt": "^4.0.0",
+    "nuxt": "^4.5.1",
     "vue": "^3.5.0"
   },
   "devDependencies": {

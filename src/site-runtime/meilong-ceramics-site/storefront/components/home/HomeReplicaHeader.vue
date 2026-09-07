@@ -363,7 +363,7 @@ const flowSectionColumns = (tab: NavTab) => {
 const preloadLinks = [
   { rel: 'preload', as: 'image' as const, href: searchImage.desktop },
   { rel: 'preload', as: 'image' as const, href: productTabs[0]?.image },
-].filter((link): link is { rel: string; as: 'image'; href: string } => Boolean(link.href))
+].filter((link): link is { rel: 'preload'; as: 'image'; href: string } => Boolean(link.href))
 
 useHead({
   link: preloadLinks

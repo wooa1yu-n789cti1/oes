@@ -91,10 +91,11 @@ function buildSiteRouteHead(presentation: SiteRoutePresentation | null) {
     htmlAttrs: presentation ? { lang: presentation.locale } : {},
     link: presentation
       ? [
-          { key: 'site-canonical', rel: 'canonical', href: presentation.canonicalUrl },
+          { key: 'site-canonical', rel: 'canonical' as const, href: presentation.canonicalUrl },
           ...presentation.hreflang.map((alternate) => ({
             key: `site-hreflang-${alternate.locale}`,
-            rel: 'alternate',
+            rel: 'alternate' as const,
+            type: 'text/html' as const,
             hreflang: alternate.locale,
             href: alternate.href
           }))
