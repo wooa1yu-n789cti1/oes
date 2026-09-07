@@ -26,19 +26,119 @@ assert.match(workflow, /confirmation-required/)
 assert.match(workflow, /ci-full-approved-/)
 assert.doesNotMatch(workflow, /test:risk|test:l2|test:design-gap|test-matrix|l2-test-runner|Shadow/)
 
-const quickSmoke = workflow.match(/^  quick-smoke:\n[\s\S]*?(?=^  baseline:)/m)?.[0]
-assert.ok(quickSmoke, 'authoritative CI must define the main quick-smoke job')
+const workspaceInstalls = [
+  ['needs-web-install', 'pnpm --dir app/web install --frozen-lockfile'],
+  ['needs-pda-install', 'pnpm --dir app/pda install --frozen-lockfile']
+]
 const orderedSmoke = [
   'pnpm generated:all',
   'pnpm common:build',
   'pnpm --filter @oes/site-runtime-kit build',
   'pnpm test:run -- --type contract'
 ]
-for (let index = 1; index < orderedSmoke.length; index += 1)
-  assert.ok(
-    quickSmoke.indexOf(orderedSmoke[index]) > quickSmoke.indexOf(orderedSmoke[index - 1]),
-    `quick smoke order invalid at ${orderedSmoke[index]}`
+
+/** Extracts only Main Quick Smoke through the next top-level workflow job heading. */
+const extractQuickSmoke = (source) => {
+  const job = source.match(/^  quick-smoke:\n[\s\S]*?(?=^  [A-Za-z0-9_-]+:[ \t]*$)/m)?.[0]
+  assert.ok(job, 'authoritative CI must define the main quick-smoke job')
+  return job
+}
+
+/** Enforces workspace setup and dependency ordering within Main Quick Smoke itself. */
+const assertQuickSmokeContract = (source) => {
+  const quickSmoke = extractQuickSmoke(source)
+  for (const [workspaceOutput, installCommand] of workspaceInstalls) {
+    assert.match(
+      quickSmoke,
+      new RegExp(
+        `- if: \\$\\{\\{ needs\\.change-plan\\.outputs\\.${workspaceOutput} == 'true' \\}\\}\\n` +
+          `\\s+run: ${installCommand.replaceAll('/', '\\/')}`
+      ),
+      `main quick smoke must conditionally install the ${workspaceOutput} workspace`
+    )
+    assert.ok(
+      quickSmoke.indexOf(installCommand) < quickSmoke.indexOf('pnpm test:run'),
+      `${workspaceOutput} install must precede selected quick-smoke tests`
+    )
+  }
+  for (let index = 1; index < orderedSmoke.length; index += 1)
+    assert.ok(
+      quickSmoke.indexOf(orderedSmoke[index]) > quickSmoke.indexOf(orderedSmoke[index - 1]),
+      `quick smoke order invalid at ${orderedSmoke[index]}`
+    )
+  return quickSmoke
+}
+
+/** Applies one regression mutation only to the extracted Main Quick Smoke job. */
+const mutateQuickSmoke = (source, mutation) => {
+  const quickSmoke = extractQuickSmoke(source)
+  return source.replace(quickSmoke, mutation(quickSmoke))
+}
+
+assertQuickSmokeContract(workflow)
+for (const [workspaceOutput, installCommand] of workspaceInstalls) {
+  const installBlock = new RegExp(
+    `      - if: \\$\\{\\{ needs\\.change-plan\\.outputs\\.${workspaceOutput} == 'true' \\}\\}\\n` +
+      `        run: ${installCommand.replaceAll('/', '\\/')}\\n`
   )
+  assert.throws(
+    () =>
+      assertQuickSmokeContract(mutateQuickSmoke(workflow, (job) => job.replace(installBlock, ''))),
+    new RegExp(`must conditionally install the ${workspaceOutput} workspace`),
+    `removing ${workspaceOutput} from quick smoke must fail`
+  )
+}
+
+const lateWebInstall = mutateQuickSmoke(workflow, (job) => {
+  const install =
+    "      - if: ${{ needs.change-plan.outputs.needs-web-install == 'true' }}\n" +
+    '        run: pnpm --dir app/web install --frozen-lockfile\n'
+  return `${job.replace(install, '')}${install}`
+})
+assert.throws(
+  () => assertQuickSmokeContract(lateWebInstall),
+  /needs-web-install install must precede selected quick-smoke tests/,
+  'moving the web install after selected quick-smoke tests must fail'
+)
+
+const decoyJobMutation = mutateQuickSmoke(workflow, (job) => {
+  let brokenJob = job
+  for (const [workspaceOutput, installCommand] of workspaceInstalls) {
+    brokenJob = brokenJob.replace(
+      '      - if: $' +
+        `{{ needs.change-plan.outputs.${workspaceOutput} == 'true' }}\n` +
+        `        run: ${installCommand}\n`,
+      ''
+    )
+  }
+  orderedSmoke.forEach((command, index) => {
+    brokenJob = brokenJob.replace(command, `echo removed-smoke-command-${index}`)
+  })
+  const decoyJob = [
+    '  decoy-job:',
+    '    runs-on: ubuntu-latest',
+    '    steps:',
+    "      - if: ${{ needs.change-plan.outputs.needs-web-install == 'true' }}",
+    '        run: pnpm --dir app/web install --frozen-lockfile',
+    "      - if: ${{ needs.change-plan.outputs.needs-pda-install == 'true' }}",
+    '        run: pnpm --dir app/pda install --frozen-lockfile',
+    '      - run: pnpm generated:all',
+    '      - run: |',
+    '          pnpm common:build',
+    '          pnpm --filter @oes/site-runtime-kit build',
+    '          pnpm test:run -- --type contract --plan .tmp/change-plan.json',
+    ''
+  ].join('\n')
+  return `${brokenJob}${decoyJob}`
+})
+assert.throws(
+  () => assertQuickSmokeContract(decoyJobMutation),
+  /must conditionally install the needs-web-install workspace/,
+  'an intervening top-level decoy job must not satisfy the quick-smoke contract'
+)
+console.log(
+  'main quick-smoke regression mutations: PASS web-omission pda-omission late-install cross-job-decoy'
+)
 
 const journey = workflow.match(/^  journey:\n[\s\S]*?(?=^  quick-smoke:)/m)?.[0]
 assert.ok(journey, 'authoritative CI must define the candidate Journey job')
