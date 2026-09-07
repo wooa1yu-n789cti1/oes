@@ -7,8 +7,9 @@ currentExecutableRunbooks: docs/runbooks/index.md
 ```
 
 本文是 OES 本地开发与测试运行时的唯一平台架构真相源。它定义运行形态、环境配方、
-依赖选择、资源身份、配置注入、权限、schema bootstrap、并发、验证和原子切换；业务服务
-边界、测试分类、消息语义、gRPC 信任和可观测性语义仍分别由其现有真相源拥有。
+依赖选择、资源身份、machine/Stack/Run state layout、配置注入、权限、schema bootstrap、并发、
+验证和原子切换；业务服务边界、测试分类、消息语义、gRPC 信任和可观测性语义仍分别由其
+现有真相源拥有。
 
 仓库的受支持入口、CI 内部路径与现行 runbook 统一执行本文运行时。旧 Compose、生成式
 service `.env` 与独立测试基础设施入口已经从受支持路径退役，不构成第二个运行模式。
@@ -17,6 +18,8 @@ service `.env` 与独立测试基础设施入口已经从受支持路径退役�
 
 - 本地开发和 focused local test 的业务服务是 host process；Docker 只承载基础设施。
 - 每台机器最多存在一个完整、长生命周期的 OES `DEV` 业务服务栈。
+- 每台 developer machine 恰有一个 machine-shared `LOCAL` logical Stack；它包含完整 DEV provider
+  与 shared TEST PostgreSQL/MinIO，但 logical Stack 不是 Docker Compose Project。
 - 并行任务通常只执行选中的测试以及测试所需的最小业务服务集合，不创建完整 OES 栈。
 - 并发增加不构成把 host service 迁入 Docker 的理由。
 - 外部 client 仍只进入 API Gateway / BFF；内部同步调用仍使用 gRPC；跨 context fact 仍经
@@ -25,6 +28,8 @@ service `.env` 与独立测试基础设施入口已经从受支持路径退役�
   服务不得读取或写入另一个服务的数据库。
 - 每个环境只有一个 Permission database，由 Permission Service 独占；其他服务不建立自身的
   Permission database 或 Permission truth 副本。
+- V2 Docker lifecycle 只由 unified launcher、exact Stack/Run manifest、lease 与 `oes.runtime.*`
+  label 共同授权；Docker Desktop grouping 只用于展示，不构成 owner 或 cleanup authority。
 
 ## 2. Runtime profiles
 
@@ -56,6 +61,10 @@ process 启动。
 CI 使用与 local 相同的 dependency planning 和 orchestration core，但 PostgreSQL、MinIO、
 NATS、Redis、certificate material 以及其他被选择 provider 的物理实例全部 job-private。
 CI 不借用 developer machine 的共享 provider、lease 或 credential。
+
+`DEV` 与 `LOCAL_INTEGRATION` 是同一个 machine-shared `LOCAL` logical Stack 中的不同 provider
+pool，不是两个 long-lived Stack。CI 仅在 exact job-local state root 中使用 job-private key、
+manifest 和 provider；它不进入 developer-machine Stack registry，也不成为 resident local Stack。
 
 ## 3. Test-class execution semantics
 
@@ -96,32 +105,140 @@ Unknown owner、冲突声明或 ambiguous resource need 以 declaration gap fail
 mapping 可以要求扩大验证计划，但扩大计划仍不能用 undeclared runtime dependency 启动任意
 资源。
 
-## 5. Identity, ownership, leases, and manifests
+## 5. Identity, state authority, and Docker lifecycle
 
 ### 5.1 Stable identities
 
 | Identity | Meaning | Resource binding |
 | --- | --- | --- |
+| machine identity | launcher 一次生成并持久化的 32-byte CSPRNG seed | machine registry、copy detection、`machineFingerprint` |
+| `stackKey` | `oes-local-<machineFingerprint>`；只用于 machine registry/state path | 一个 machine-shared `LOCAL` logical Stack |
 | `devStackId` | 一台机器的长生命周期 DEV/TEST provider set | shared provider、稳定端口、machine-local runtime material |
 | `taskKey` | 当前 DA/UD/DO/CO/RV task 的 accountable metadata | run ownership/audit context；不是 worktree identity |
 | `runId` | 一次执行 | ephemeral resource、logical TEST allocation、evidence |
 
 Worktree、branch、filesystem path 或 Compose project name 不推导 resource ownership。共享
-provider 只绑定 `devStackId`；ephemeral resource 绑定 `taskKey + runId`。
+provider 绑定 `stackKey + devStackId + pool + provider`；ephemeral resource 绑定
+`taskKey + runId`。Machine registry 对 `stackKey` 与 immutable internal `devStackId` 实行一对一
+映射；`stackKey` 不是 Compose project name，也不授予 Docker prefix cleanup。
 
-### 5.2 Allocation transaction
+`machine-identity.json` 固定包含 `schemaVersion`、`kind`、`seedEncoding=lowercase-hex`、64 个小写
+hex 字符的 seed、`fullDigest`、`machineFingerprint`、`hostBindingKind` 与 `hostBindingHash`，文件模式
+为 `0600`。`fullDigest` 是以下 exact bytes 的 SHA-256：
+
+```text
+UTF8("oes-runtime-v2-machine") || NUL || UTF8("v1") || NUL || decodeHex(seed)
+```
+
+Registry 保存完整 64-character lowercase digest，`machineFingerprint` 取其前 16 个字符。
+`hostBindingHash` 对 versioned stable platform machine identifier 做 domain-separated SHA-256；hostname、
+username、worktree、task/title、`taskKey` 与 `runId` 都不进入 machine identity。Host binding 不匹配时，
+launcher 在 registry、Stack 或 Docker mutation 前 fail closed；rebind/rekey 是后续显式操作，并要求
+active Run 与 Stack lease 均为零。Short fingerprint 相同而 full digest 不同同样 fail closed，不自动
+增长 suffix 或重命名。
+
+CI 在 job-local state root 内生成独立 32-byte CSPRNG seed，并以相同 byte contract、domain
+`oes-runtime-v2-ci-job` 计算 16-character `jobFingerprint`。`oes-ci-<jobFingerprint>` 只在 exact job
+内稳定和可重开；它从不进入 developer-machine registry，并由 job manifest 的 exact reconciliation
+删除。
+
+### 5.2 Machine, Stack, and Run layout
+
+Configured `stateRoot` 是 machine root，规范布局为：
+
+```text
+<stateRoot>/
+├── machine-identity.json
+├── stack-registry.json
+├── schema-version.json
+├── semaphores/
+├── locks/
+└── stacks/
+    └── <stackKey>/
+        ├── stack.json
+        ├── current-manifest.json
+        ├── providers/
+        │   ├── dev/
+        │   └── test/
+        ├── credentials/
+        ├── leases/
+        ├── manifests/
+        │   └── <generation>.json
+        ├── restore/
+        ├── evidence/
+        └── runs/
+            └── <taskKey>/
+                └── <runId>/
+                    ├── transaction.json
+                    ├── manifest.json
+                    ├── credentials/
+                    ├── provider/
+                    ├── processes/
+                    ├── events.ndjson
+                    ├── evidence/
+                    └── cleanup.json
+```
+
+Machine root 只保存 machine identity、Stack registry、global schema version、global FIFO semaphore、
+global exclusive lock 与 `stacks/`。Provider data/credential、lease、manifest、restore state 和 execution
+evidence 不直接放在 machine root。所有 key 在形成 path 前必须通过 versioned path-safe validation；
+path escape、symlink substitution、duplicate `stackKey`/`devStackId` 或 registry/root mismatch 都在 mutation
+前 fail closed。
+
+每一层只拥有自身 scope 的 truth：
+
+- `<stackRoot>/manifests/<generation>.json` 是该 generation 的 shared provider object ID、volume、published
+  endpoint、credential reference、lease、readiness 与 `devStackId` 的唯一 Stack manifest authority；
+- `<stackRoot>/current-manifest.json` 只保存 generation、absolute canonical path、SHA-256 与 manifest
+  fingerprint，并原子指向一个 sealed Stack manifest；
+- `<runRoot>/manifest.json` 是 `taskKey`、`runId`、logical/ephemeral resource、process、transaction 与
+  cleanup 的唯一 Run manifest authority；它只通过 generation、absolute path、SHA-256 与 fingerprint
+  引用 exact Stack manifest，不复制 shared-resource payload；
+- `<stackRoot>/evidence/` 只保存 Stack provisioning、migration、restore 与 Stack-lifecycle evidence；
+  `<runRoot>/evidence/` 只保存该 Run evidence；
+- Cross-scope index 只可保存 canonical path、SHA-256、semantic fingerprint、type 与 lifecycle status，
+  不复制 mutable manifest/evidence payload。
+
+Delivery Package、backup、Proposal、RV evidence 与 collaboration lifecycle evidence 继续位于 runtime
+state root 之外的 stable artifact root。Runtime 只按 absolute canonical path、file SHA-256、存在时的
+semantic fingerprint 和 exact role/type 引用它们；外部 artifact 不成为 runtime ownership authority。
+
+### 5.3 Docker identity and naming
+
+V2 不创建、保留或重建 local Docker Compose Project，也不合成 `com.docker.compose.*` label。
+Unified launcher、active Stack/Run manifest、exact lease 与下列 `oes.runtime.*` identity label 是唯一
+lifecycle authority：runtime version、Stack key/ID、task/run ID、scope、pool、provider 与适用的 CI job
+identity。缺少 exact manifest/lease join 时，name、prefix、Compose label、stopped state 或 Docker Desktop
+分组只构成 discovery evidence。
+
+- 当前 V2 shared object 的 exact name 与 object ID 在 state-layout delivery 前保持不变；
+- 新建或必须替换的 shared object 使用
+  `oes-v2-<devStackIdToken>-<pool>-<provider>`；
+- Local Run object 使用
+  `oes-v2-<exactResourceToken(taskKey + ":" + runId)>-<provider>`；
+- CI object 使用
+  `oes-v2-ci-<jobFingerprint>-<exactRunToken>-<provider>`。
+
+Docker name 只允许 lowercase ASCII letter、digit 和 hyphen。`devStackIdToken` 在截断可能丢失 exact
+identity 时携带 digest；Run token 以可读 bounded prefix 加完整 `taskKey:runId` UTF-8 preimage 的
+SHA-256。完整 `devStackId`、`taskKey`、`runId`、job identity、scope、pool 与 provider 始终保留在
+manifest 和 label。Launcher 在 Docker mutation 前验证最大长度与唯一性，任何 ambiguity 都停止
+admission。Operator status 从 manifest/label join 投影为 `SHARED`、`RUN`、`CI`、`LEGACY` 或 `UNKNOWN`，
+不以 Docker UI grouping 代替状态真相。
+
+### 5.4 Allocation transaction
 
 Launcher 使用 exclusive lock 完成需要串行化的 identity、port 和 logical-resource allocation。
-启动事务在同一 manifest/lease record 中保存尚未发布的 partial progress；只有 dependency
-readiness 成功后，资源才进入 registered 状态并发布可消费的 run manifest。Allocation 与最终
-manifest publication 对 consumer 是原子的：consumer 不会看到包含未 ready endpoint 的有效
-manifest。
+启动事务在 exact Stack/Run transaction 与 lease record 中保存尚未发布的 partial progress；只有
+dependency readiness 成功后，资源才进入 registered 状态并发布可消费的 active Stack pointer 与
+Run manifest。Allocation 与最终 publication 对 consumer 是原子的：consumer 不会看到包含未 ready
+endpoint 或跨 generation payload 的有效 manifest。
 
 同一 manifest/lease record 支持正常失败与 abnormal interruption 的 reconciliation path。
 Manifest 至少记录 profile、`devStackId`、`taskKey`、`runId`、owner、endpoint、resource identity、
 process identity、lease、credential reference 和 evidence reference；它不包含 credential value。
 
-### 5.3 Lease and cleanup
+### 5.5 Lease and cleanup
 
 - Shared provider 使用 lease/reference count；只有不存在 active lease 时才允许停止。
 - 一个 run 只释放 manifest 证明属于自己的 logical/ephemeral resources。
@@ -269,6 +386,11 @@ Service log 在适用时携带 `taskKey`、`runId`、request/trace correlation�
 database URL password、private key 与 secret material 不进入 log/evidence。Trace/audit 业务语义
 继续以 [Observability And Audit](./observability-and-audit.md) 为准。
 
+Migration-only PostgreSQL authority 只能存在于 Stack-private orchestration material，不进入任何 host
+business process environment。任何 target path、Docker object、credential reference 或 manifest
+generation 变化都会使旧 restore binding 失效；restore 在新 exact plan/binding 获得独立 Human
+confirmation 前保持 blocked。
+
 ## 13. A0 business-neutral pilot
 
 A0 只验证 runtime infrastructure，不依赖尚未完成的业务 Journey：
@@ -306,6 +428,10 @@ command/output/exit status 完整；manifest/evidence binding 可重开；rollba
 
 Runtime 实现与验证可以在 isolated candidate 进行，而 `main` 继续使用当前 executable runtime。
 `main` 只进行一次原子切换，不保留 active legacy/v2 runtime mode。
+
+本 Design 只冻结 required operation 与 acceptance semantics；在 implementation candidate 交付并验证
+实际命令前，当前 executable runbook 不加入未来命令。Implementation 必须在同一个 candidate 中提供
+state-layout command、tests、rollback，并原子更新 runbook。
 
 Cutover candidate 必须同时：
 
@@ -365,7 +491,50 @@ delivery、PR、merge、CI、product fix 或 repository diff。未获得 Cleanup
 read-only inventory/dry-run、delivery activation 已授权并验证的 DEV backup/migration，以及
 preserve report；不执行 legacy resource delete。
 
-### 15.2 Final migration acceptance
+现有 Compose project `oes` 明确属于 legacy inventory。V2 logical Stack 不对应 Compose project，
+也不为 Docker Desktop grouping 保留或重建本地 Compose project。Legacy `oes` project、container、
+network、已证明属于它的 volume 与 anonymous init mount 在 Design 和 implementation verification
+阶段保持不变；只有在 V2 migration/restore acceptance 完成、exact deletion set 重开且获得独立
+Cleanup confirmation 后，才按 child-first 顺序删除。Unknown、active、shared 或证据不足对象继续保留。
+
+### 15.2 State-layout activation and recovery
+
+State-layout migration 是 later Human-confirmed delivery 中的一次性操作；Design merge 不移动目录、
+不修改 registry/manifest/credential、不启动 restore/cleanup，也不触碰当前 Docker object。该 delivery
+必须先修复并独立验证 business process environment 暴露 PostgreSQL migrator authority 的 blocker，
+再进入 activation。
+
+Activation precondition 固定为：持有 machine migration lock 并拒绝新 allocation；active Run 为零；
+active Stack lease 为零；DEV host process 已停止；当前 path、mode、hash、Stack/Run manifest、credential
+reference、Docker object ID、volume、endpoint 与每个 Docker bind source 已 sealed；runtime-state 与
+DEV-data snapshot 已验证。任何 bind source 位于旧 `stateRoot` 下的 provider 都必须在 root movement
+前安全停止，且不得有 running container 继续持有指向 renamed path 的 bind。
+
+Staged next root 必须是同一 filesystem 上的 sibling tree。Migration 完成 closed-world mapping、permission、
+path containment、hash、registry uniqueness、manifest fingerprint、external reference 与 zero-unresolved-
+reference 验证后，fsync 全部 file/directory。Parent directory 中、old/next root 之外的 sealed activation
+journal 是 crash recovery authority，状态顺序固定为：
+
+```text
+PREPARED -> OLD_MOVED -> NEW_PLACED -> COMMITTED
+```
+
+在 durable `COMMITTED` 前 old root 保持 authority；在其后 new root 保持 authority。Exact sequence 是：
+把 old root rename 到 journal-bound rollback path；把 staged root rename 到 configured `stateRoot`；fsync
+parent；在 final new bind path 上启动或仅在必要时替换 affected provider；发布新的 exact Stack manifest；
+验证 readiness 与 object mapping；最后 durable commit。Healthy V2 object 不因命名或展示目的被替换；
+任何必要 replacement 都必须在 journal 和新 Stack manifest 中记录 exact old/new identity。
+
+Crash recovery 在没有 `COMMITTED` 时隔离 uncommitted new root、按 journal 恢复 old root 并重启 retained
+old provider；存在 `COMMITTED` 时继续 new-root reopen 与 verification。Failure cleanup 只停止 exact new
+object；unknown 或 identity-drifted object 保留并报告。每一步都使用 no-follow exact path、journal binding
+和 idempotent replay，禁止 dual-read、dual-write 或 persistent generation selector。
+
+Activation 改变任何 restore target binding 后，旧 restore confirmation 继续失效。成功 reopen 后生成
+新的 exact restore plan/binding，并停在独立 Restore confirmation；old root、old provider 和 legacy data
+carrier 在各自 terminal verification 与独立 Cleanup confirmation 前继续保留。
+
+### 15.3 Final migration acceptance
 
 只有 exact-candidate self-test、A0、independent RV 和 `CI / Baseline Checks` 均通过，且获得之后
 独立的 Human merge confirmation，candidate 才可合并。Implementation acceptance 必须包含 A0 的
