@@ -420,32 +420,27 @@ test('transaction recovery reopens and rejects a sealed source replacement befor
   const fifoBefore = snapshotTree(path.join(stateRoot, 'semaphores', 'queue'))
   const resourcePath = fixture.transaction.resources[0].path
   const resourceBytes = fs.readFileSync(resourcePath)
-  const watcherScript = `
-    import fs from 'node:fs'
-    import { fingerprint, writeAtomic } from './scripts/local-runtime/src/canonical.mjs'
-    process.stdout.write('READY\\n')
-    while (fs.existsSync(process.env.FIXTURE_CLAIM_OWNER)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1)
-    const value = JSON.parse(fs.readFileSync(process.env.FIXTURE_TRANSACTION, 'utf8'))
-    value.replacementProbe = 'sealed-after-initial-reopen'
-    value.transactionFingerprint = fingerprint(value, 'transactionFingerprint')
-    writeAtomic(process.env.FIXTURE_TRANSACTION, value)
-  `
-  const watcher = spawn(process.execPath, ['--input-type=module', '--eval', watcherScript], {
-    cwd: root,
-    env: { ...process.env, FIXTURE_CLAIM_OWNER: path.join(fixture.transaction.runLockLease.lockDirectory, 'owner.json'), FIXTURE_TRANSACTION: fixture.transactionPath },
-    stdio: ['ignore', 'pipe', 'pipe']
-  })
-  let stderr = ''
-  watcher.stderr.on('data', (chunk) => { stderr += chunk })
-  await new Promise((resolve, reject) => {
-    watcher.stdout.once('data', (chunk) => { if (chunk.toString() === 'READY\n') resolve(); else reject(new Error(`watcher output=${chunk}`)) })
-    watcher.once('error', reject)
-  })
-  const watcherExited = new Promise((resolve) => watcher.once('exit', (code, signal) => resolve({ code, signal })))
   let cleanupCalls = 0
-  assert.throws(() => reconcileRuntime({ transactionPath: fixture.transactionPath, cleanupResource: (resource) => { cleanupCalls += 1; return cleanupSimulatedResource(resource) } }), /RUNTIME_RECONCILE_SOURCE_CHANGED/u)
-  assert.deepEqual(await watcherExited, { code: 0, signal: null })
-  assert.equal(stderr, '')
+  const readFileSync = fs.readFileSync
+  let sourceReads = 0
+  fs.readFileSync = function readFileSyncWithSealedReplacement(file, ...args) {
+    if (path.resolve(String(file)) === path.resolve(fixture.transactionPath)) {
+      sourceReads += 1
+      if (sourceReads === 2) {
+        const value = JSON.parse(readFileSync.call(fs, file, 'utf8'))
+        value.replacementProbe = 'sealed-after-initial-reopen'
+        value.transactionFingerprint = fingerprint(value, 'transactionFingerprint')
+        writeAtomic(fixture.transactionPath, value)
+      }
+    }
+    return readFileSync.call(fs, file, ...args)
+  }
+  try {
+    assert.throws(() => reconcileRuntime({ transactionPath: fixture.transactionPath, cleanupResource: (resource) => { cleanupCalls += 1; return cleanupSimulatedResource(resource) } }), /RUNTIME_RECONCILE_SOURCE_CHANGED/u)
+  } finally {
+    fs.readFileSync = readFileSync
+  }
+  assert.equal(sourceReads >= 2, true)
   assert.equal(cleanupCalls, 0)
   assert.deepEqual(fs.readFileSync(leasePath), leaseBytes)
   assert.deepEqual(snapshotTree(path.join(stateRoot, 'semaphores', 'queue')), fifoBefore)

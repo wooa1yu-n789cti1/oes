@@ -22,6 +22,13 @@ const IMAGES = Object.freeze({
 
 export const RUNTIME_DOCKER_IMAGES = IMAGES
 
+export const NACOS_MYSQL_JDBC_PARAMETERS = 'characterEncoding=utf8&connectTimeout=1000&socketTimeout=3000&autoReconnect=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC'
+
+/** Builds the complete Nacos container environment shared by persistent, run-scoped, and migration-fixture providers. */
+export function nacosContainerEnvironment(mysqlHost, mysqlPassword, authToken, authIdentityValue) {
+  return { MODE: 'standalone', PREFER_HOST_MODE: 'ip', SPRING_DATASOURCE_PLATFORM: 'mysql', MYSQL_SERVICE_HOST: mysqlHost, MYSQL_SERVICE_PORT: '3306', MYSQL_SERVICE_DB_NAME: 'nacos', MYSQL_SERVICE_USER: 'nacos', MYSQL_SERVICE_PASSWORD: mysqlPassword, MYSQL_SERVICE_DB_PARAM: NACOS_MYSQL_JDBC_PARAMETERS, NACOS_AUTH_ENABLE: 'true', NACOS_AUTH_TOKEN: authToken, NACOS_AUTH_IDENTITY_KEY: 'serverIdentity', NACOS_AUTH_IDENTITY_VALUE: authIdentityValue, JVM_XMS: '256m', JVM_XMX: '256m', JVM_XMN: '128m' }
+}
+
 /** Produces a Docker-safe exact resource suffix. */
 function token(value, size = 24) { return value.toLowerCase().replace(/[^a-z0-9]+/gu, '-').replace(/^-|-$/gu, '').slice(0, size) }
 
@@ -592,7 +599,7 @@ async function provisionNacos(context, shared) {
     await waitReady(() => docker(['exec', mysql.name, 'mysqladmin', 'ping', '-h', '127.0.0.1', '-u', 'root', `-p${credentials.rootPassword}`, '--silent']).status === 0, 'nacos-mysql', 180000)
     const passwordHash = runChecked('htpasswd', ['-bnBC', '10', '', credentials.password]).stdout.trim().replace(/^:/u, '')
     docker(['exec', '-e', `MYSQL_PWD=${credentials.nacosPassword}`, mysql.name, 'mysql', '-h', '127.0.0.1', '-u', 'nacos', 'nacos', '-e', `INSERT INTO users(username,password,enabled) VALUES ('${credentials.username}','${passwordHash}',TRUE) ON DUPLICATE KEY UPDATE password=VALUES(password),enabled=TRUE; INSERT INTO roles(username,role) VALUES ('${credentials.username}','ROLE_ADMIN') ON DUPLICATE KEY UPDATE role=VALUES(role);`])
-    const nacos = (await ensureSharedContainer({ context, provider: 'nacos', image: IMAGES.nacos, targetPort: 8848, network: network.name, environment: { MODE: 'standalone', PREFER_HOST_MODE: 'ip', SPRING_DATASOURCE_PLATFORM: 'mysql', MYSQL_SERVICE_HOST: mysql.name, MYSQL_SERVICE_PORT: '3306', MYSQL_SERVICE_DB_NAME: 'nacos', MYSQL_SERVICE_USER: 'nacos', MYSQL_SERVICE_PASSWORD: credentials.nacosPassword, NACOS_AUTH_ENABLE: 'true', NACOS_AUTH_TOKEN: credentials.authToken, NACOS_AUTH_IDENTITY_KEY: 'serverIdentity', NACOS_AUTH_IDENTITY_VALUE: credentials.authIdentityValue, JVM_XMS: '256m', JVM_XMX: '256m', JVM_XMN: '128m' } })).resource
+    const nacos = (await ensureSharedContainer({ context, provider: 'nacos', image: IMAGES.nacos, targetPort: 8848, network: network.name, environment: nacosContainerEnvironment(mysql.name, credentials.nacosPassword, credentials.authToken, credentials.authIdentityValue) })).resource
     const port = publishedPort(nacos.name, 8848)
     await waitReady(async () => { const response = await fetch(`http://127.0.0.1:${port}/nacos/v1/console/health/readiness`, { signal: AbortSignal.timeout(2000) }); return response.ok && /^(?:OK|UP)$/u.test((await response.text()).trim()) }, 'nacos', 180000)
     const ownerEnvironments = Object.fromEntries(ownersFor(context, 'nacos').map((owner) => [owner, { NACOS_SERVER: `127.0.0.1:${port}`, NACOS_USERNAME: credentials.username, NACOS_PASSWORD: credentials.password }]))
@@ -612,7 +619,7 @@ async function provisionNacos(context, shared) {
   const passwordHash = runChecked('htpasswd', ['-bnBC', '10', '', password]).stdout.trim().replace(/^:/u, '')
   docker(['exec', '-e', `MYSQL_PWD=${nacosPassword}`, mysql.name, 'mysql', '-h', '127.0.0.1', '-u', 'nacos', 'nacos', '-e', `INSERT INTO users(username,password,enabled) VALUES ('${username}','${passwordHash}',TRUE) ON DUPLICATE KEY UPDATE password=VALUES(password),enabled=TRUE; INSERT INTO roles(username,role) VALUES ('${username}','ROLE_ADMIN') ON DUPLICATE KEY UPDATE role=VALUES(role);`])
   const authToken = Buffer.from(randomSecret(48)).toString('base64').slice(0, 64)
-  const nacos = await createRunContainer({ context, provider: 'nacos', image: IMAGES.nacos, targetPort: 8848, network, environment: { MODE: 'standalone', PREFER_HOST_MODE: 'ip', SPRING_DATASOURCE_PLATFORM: 'mysql', MYSQL_SERVICE_HOST: mysql.name, MYSQL_SERVICE_PORT: '3306', MYSQL_SERVICE_DB_NAME: 'nacos', MYSQL_SERVICE_USER: 'nacos', MYSQL_SERVICE_PASSWORD: nacosPassword, NACOS_AUTH_ENABLE: 'true', NACOS_AUTH_TOKEN: authToken, NACOS_AUTH_IDENTITY_KEY: 'serverIdentity', NACOS_AUTH_IDENTITY_VALUE: randomSecret(), JVM_XMS: '256m', JVM_XMX: '256m', JVM_XMN: '128m' } })
+  const nacos = await createRunContainer({ context, provider: 'nacos', image: IMAGES.nacos, targetPort: 8848, network, environment: nacosContainerEnvironment(mysql.name, nacosPassword, authToken, randomSecret()) })
   const port = publishedPort(nacos.name, 8848)
   await waitReady(async () => {
     const response = await fetch(`http://127.0.0.1:${port}/nacos/v1/console/health/readiness`, { signal: AbortSignal.timeout(2000) })
