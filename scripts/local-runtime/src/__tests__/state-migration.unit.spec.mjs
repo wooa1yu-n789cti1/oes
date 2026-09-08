@@ -6,7 +6,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { fingerprint, sha256, writeAtomic } from '../canonical.mjs'
 import { publishStackManifest, reopenCurrentStackManifest } from '../manifest.mjs'
-import { activateStagedState, canonicalHostBindSource, inventoryStateLayout, migrationReplacementName, planStateLayoutMigration, recoverStateLayout, reopenJournal, rollbackCommittedState, stageStateLayoutMigration } from '../state-migration.mjs'
+import { activateStagedState, canonicalHostBindSource, inventoryStateLayout, migrationReplacementName, planStateLayoutMigration, recoverStateLayout, reopenJournal, rollbackCommittedState, sealProviderHostnameDependencies, stageStateLayoutMigration, verifyProviderDependencyProjection } from '../state-migration.mjs'
 import { resolveRuntimeLayout } from '../state-layout.mjs'
 import { trustedProcessEnvironment } from '../trusted-runtime-config.mjs'
 
@@ -15,12 +15,13 @@ const hostBinding = { kind: 'fixture-v1', value: 'migration-host' }
 const providerLifecycle = {
   activate: (binds, { journal }) => binds.map((bind) => {
     const labels = { 'oes.runtime.version': '2', 'oes.runtime.stack-key': journal.stackKey, 'oes.runtime.dev-stack-id': journal.devStackId, 'oes.runtime.scope': 'SHARED', 'oes.runtime.pool': 'test', 'oes.runtime.provider': 'postgres' }
-    return { oldObjectId: bind.objectId, newObjectId: 'object-b', oldName: bind.name, newName: migrationReplacementName(journal.devStackId, 'test', 'postgres'), backupName: 'postgres-retained', provider: 'postgres', pool: 'test', labels, binds: [{ oldSource: bind.source, source: bind.nextSource, destination: bind.destination }], disposition: 'FIXTURE_RESTARTED' }
+    return { oldObjectId: bind.objectId, newObjectId: 'object-b', oldName: bind.name, newName: migrationReplacementName(journal.devStackId, 'test', 'postgres'), backupName: 'postgres-retained', provider: 'postgres', pool: 'test', labels, networks: [], dependencyAliases: [], binds: [{ oldSource: bind.source, source: bind.nextSource, destination: bind.destination }], observedWasRunning: false, restoreWasRunning: true, replacementWasRunning: true, disposition: 'FIXTURE_RESTARTED' }
   }),
   stop: () => {},
   restart: () => {}
 }
 const zeroQuiescence = () => ({ activeRunCount: 0, activeStackLeaseCount: 0, runningDevProcessCount: 0, semaphoreTicketCount: 0, controlLockCount: 0, allocationAdmissionCount: 0, runningBindCount: 0 })
+const skipProviderDependencyReopen = () => true
 
 function fixture({ pool = 'test', volume = null, createPlan = true } = {}) {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-state-migration-'))
@@ -40,6 +41,27 @@ function fixture({ pool = 'test', volume = null, createPlan = true } = {}) {
   const providerSnapshots = [{ resource: { provider: 'postgres', kind: 'container', scope: 'SHARED', pool, objectId: 'object-a', name: 'postgres-a', labels, ...(volume ? { volume } : {}) }, endpoint: { provider: 'postgres', pool, ready: true, authority: 'docker:object-a:5432/tcp', environment: { OES_POSTGRES_PORT: '5432' } } }]
   const plan = createPlan ? planStateLayoutMigration(inventory, { providerSnapshots }) : null
   return { stateRoot, inventory, plan, providerSnapshots, dockerObjects }
+}
+
+/** Builds two SHARED providers with one exact container-environment hostname dependency. */
+function dependencyFixture({ hostname = 'postgres-a', dependentEnvironment = null, targetNetworks = ['fixture-network'], dependentNetworks = ['fixture-network'], extraTargets = [] } = {}) {
+  const base = fixture({ createPlan: false })
+  const network = (name, aliases = []) => ({ name, aliases })
+  base.dockerObjects[0].networks = targetNetworks.map((name) => network(name, ['postgres']))
+  const dependentLabels = { 'oes.runtime.version': '2', 'oes.runtime.dev-stack-id': 'fixture_machine', 'oes.runtime.scope': 'SHARED', 'oes.runtime.pool': 'test', 'oes.runtime.provider': 'nacos' }
+  const dependentRoot = path.join(base.stateRoot, 'shared', 'fixture_machine', 'nacos')
+  writeAtomic(path.join(dependentRoot, 'identity.json'), { provider: 'nacos', kind: 'container', scope: 'SHARED', name: 'nacos-a', objectId: 'nacos-a', labels: dependentLabels })
+  const dependent = { objectId: 'nacos-a', name: 'nacos-a', running: true, labels: dependentLabels, mounts: [], networks: dependentNetworks.map((name) => network(name, ['nacos'])), environment: dependentEnvironment || [`DATABASE_HOST=${hostname}`] }
+  const providerSnapshots = [...base.providerSnapshots, { resource: { provider: 'nacos', kind: 'container', scope: 'SHARED', pool: 'test', objectId: 'nacos-a', name: 'nacos-a', labels: dependentLabels }, endpoint: { provider: 'nacos', pool: 'test', ready: true, authority: 'docker:nacos-a:8848/tcp', environment: { NACOS_SERVER: '127.0.0.1:8848' } } }]
+  const dockerObjects = [...base.dockerObjects, dependent]
+  for (const target of extraTargets) {
+    const targetRoot = path.join(base.stateRoot, 'shared', 'fixture_machine', target.provider)
+    writeAtomic(path.join(targetRoot, 'identity.json'), { provider: target.provider, kind: 'container', scope: 'SHARED', name: target.name, objectId: target.objectId, labels: target.labels })
+    dockerObjects.push(target.object)
+    providerSnapshots.push({ resource: { provider: target.provider, kind: 'container', scope: 'SHARED', pool: 'test', objectId: target.objectId, name: target.name, labels: target.labels }, endpoint: { provider: target.provider, pool: 'test', ready: true, authority: `docker:${target.objectId}:1234/tcp`, environment: {} } })
+  }
+  const inventory = inventoryStateLayout({ stateRoot: base.stateRoot, dockerObjects })
+  return { ...base, inventory, dockerObjects, providerSnapshots, plan: planStateLayoutMigration(inventory, { providerSnapshots }) }
 }
 
 function confirmation(kind, journal) {
@@ -115,17 +137,107 @@ test('Darwin alias identity remains exact through activation, committed recovery
       assert.equal(bind.source, oldSource)
       assert.equal(bind.nextSource, path.join(journal.oldRoot, 'stacks', journal.stackKey, 'providers', 'test', 'postgres', 'data'))
       const labels = { 'oes.runtime.version': '2', 'oes.runtime.stack-key': journal.stackKey, 'oes.runtime.dev-stack-id': journal.devStackId, 'oes.runtime.scope': 'SHARED', 'oes.runtime.pool': 'test', 'oes.runtime.provider': 'postgres' }
-      return { oldObjectId: bind.objectId, newObjectId: 'object-b', oldName: bind.name, newName: migrationReplacementName(journal.devStackId, 'test', 'postgres'), backupName: 'postgres-retained', provider: 'postgres', pool: 'test', labels, binds: [{ oldSource: bind.source, source: bind.nextSource, destination: bind.destination }], disposition: 'FIXTURE_RESTARTED' }
+      return { oldObjectId: bind.objectId, newObjectId: 'object-b', oldName: bind.name, newName: migrationReplacementName(journal.devStackId, 'test', 'postgres'), backupName: 'postgres-retained', provider: 'postgres', pool: 'test', labels, networks: [], dependencyAliases: [], binds: [{ oldSource: bind.source, source: bind.nextSource, destination: bind.destination }], observedWasRunning: false, restoreWasRunning: true, replacementWasRunning: true, disposition: 'FIXTURE_RESTARTED' }
     }),
     stop: (records) => events.push({ operation: 'stop', binds: records.flatMap((record) => record.binds) }),
     restart: (records) => events.push({ operation: 'restart', binds: records.flatMap((record) => record.binds) })
   }
-  const committed = activateStagedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ACTIVATION_CONFIRMATION', staged.journal), verifyProviderReadiness: () => true, observeQuiescence: zeroQuiescence, providerLifecycle: lifecycle })
-  assert.equal(recoverStateLayout({ journalPath: staged.journalPath, verifyProviderReadiness: () => true, verifyProviderMappings: () => true, providerLifecycle: lifecycle }).authority, 'NEW')
-  const rolledBack = rollbackCommittedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ROLLBACK_CONFIRMATION', committed), observeQuiescence: zeroQuiescence, providerLifecycle: lifecycle })
+  const committed = activateStagedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ACTIVATION_CONFIRMATION', staged.journal), verifyProviderReadiness: () => true, verifyProviderDependencyIdentities: skipProviderDependencyReopen, observeQuiescence: zeroQuiescence, providerLifecycle: lifecycle })
+  assert.equal(recoverStateLayout({ journalPath: staged.journalPath, verifyProviderReadiness: () => true, verifyProviderMappings: () => true, verifyProviderDependencyIdentities: skipProviderDependencyReopen, providerLifecycle: lifecycle }).authority, 'NEW')
+  const rolledBack = rollbackCommittedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ROLLBACK_CONFIRMATION', committed), verifyProviderDependencyIdentities: skipProviderDependencyReopen, observeQuiescence: zeroQuiescence, providerLifecycle: lifecycle })
   assert.equal(rolledBack.state, 'ROLLED_BACK')
   assert.deepEqual(events.map((event) => event.operation), ['stop', 'restart'])
   assert.equal(events.every((event) => event.binds.every((bind) => bind.oldSource === oldSource && bind.source.startsWith(`${base.stateRoot}${path.sep}`))), true)
+})
+
+test('planning seals exact inter-provider hostnames and journals the replacement alias contract', async () => {
+  const migrated = dependencyFixture()
+  assert.deepEqual(migrated.plan.providerDependencies, [{
+    dependentObjectId: 'nacos-a',
+    dependentName: 'nacos-a',
+    dependentProvider: 'nacos',
+    dependentPool: 'test',
+    dependentWasRunning: true,
+    environmentKey: 'DATABASE_HOST',
+    hostname: 'postgres-a',
+    targetObjectId: 'object-a',
+    targetName: 'postgres-a',
+    targetProvider: 'postgres',
+    targetPool: 'test',
+    networks: ['fixture-network']
+  }])
+  assert.equal(migrated.plan.coverage.providerDependencyCount, 1)
+  const staged = await stageStateLayoutMigration(migrated.plan, migrated.inventory, { identitySeed: seed, hostBinding })
+  assert.deepEqual(staged.journal.providerDependencies, migrated.plan.providerDependencies)
+  const authorities = []
+  const lifecycle = {
+    activate: (binds, { journal }) => binds.map((bind) => ({
+      oldObjectId: bind.objectId,
+      newObjectId: 'object-b',
+      oldName: bind.name,
+      newName: migrationReplacementName(journal.devStackId, 'test', 'postgres'),
+      backupName: 'postgres-retained',
+      provider: 'postgres',
+      pool: 'test',
+      labels: { ...migrated.providerSnapshots[0].resource.labels, 'oes.runtime.stack-key': journal.stackKey },
+      networks: [{ network: 'fixture-network', aliases: ['postgres', 'postgres-a'] }],
+      dependencyAliases: [{ network: 'fixture-network', hostname: 'postgres-a', dependentObjectId: 'nacos-a', environmentKey: 'DATABASE_HOST' }],
+      binds: [{ oldSource: bind.source, source: bind.nextSource, destination: bind.destination }],
+      observedWasRunning: false,
+      restoreWasRunning: true,
+      replacementWasRunning: true
+    })),
+    stop: () => {},
+    restart: () => {}
+  }
+  const verifyProviderDependencyIdentities = (_journal, authority) => { authorities.push(authority); return true }
+  const committed = activateStagedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ACTIVATION_CONFIRMATION', staged.journal), verifyProviderReadiness: () => true, verifyProviderDependencyIdentities, observeQuiescence: zeroQuiescence, providerLifecycle: lifecycle })
+  assert.equal(recoverStateLayout({ journalPath: staged.journalPath, verifyProviderReadiness: () => true, verifyProviderMappings: () => true, verifyProviderDependencyIdentities, providerLifecycle: lifecycle }).authority, 'NEW')
+  assert.equal(rollbackCommittedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ROLLBACK_CONFIRMATION', committed), verifyProviderDependencyIdentities, observeQuiescence: zeroQuiescence, providerLifecycle: lifecycle }).state, 'ROLLED_BACK')
+  assert.deepEqual(authorities, ['OLD', 'NEW', 'NEW', 'NEW', 'OLD'])
+})
+
+test('provider hostname planning fails closed for ambiguous, unmapped, conflicting, or stale scans', () => {
+  const labels = { 'oes.runtime.version': '2', 'oes.runtime.dev-stack-id': 'fixture_machine', 'oes.runtime.scope': 'SHARED', 'oes.runtime.pool': 'test', 'oes.runtime.provider': 'mysql-shadow' }
+  const shadow = { provider: 'mysql-shadow', name: 'shadow-a', objectId: 'shadow-a', labels, object: { objectId: 'shadow-a', name: 'shadow-a', running: false, labels, mounts: [], networks: [{ name: 'fixture-network', aliases: ['postgres-a'] }], environment: [] } }
+  assert.throws(() => dependencyFixture({ extraTargets: [shadow] }), /STATE_MIGRATION_PROVIDER_DEPENDENCY_AMBIGUOUS/u)
+  assert.throws(() => dependencyFixture({ dependentNetworks: ['other-network'] }), /STATE_MIGRATION_PROVIDER_DEPENDENCY_UNMAPPED/u)
+  assert.throws(() => dependencyFixture({ dependentEnvironment: ['DATABASE_HOST=postgres-a', 'DATABASE_HOST=postgres'] }), /STATE_MIGRATION_PROVIDER_DEPENDENCY_CONFLICT/u)
+  const stale = dependencyFixture()
+  delete stale.inventory.providerDependencyScanVersion
+  delete stale.inventory.inventoryFingerprint
+  stale.inventory.inventoryFingerprint = fingerprint(stale.inventory)
+  assert.throws(() => planStateLayoutMigration(stale.inventory, { providerSnapshots: stale.providerSnapshots }), /STATE_MIGRATION_PROVIDER_DEPENDENCY_SCAN_REQUIRED/u)
+  const projectionDrift = dependencyFixture()
+  projectionDrift.inventory.providerDependencies = []
+  delete projectionDrift.inventory.inventoryFingerprint
+  projectionDrift.inventory.inventoryFingerprint = fingerprint(projectionDrift.inventory)
+  assert.throws(() => planStateLayoutMigration(projectionDrift.inventory, { providerSnapshots: projectionDrift.providerSnapshots }), /STATE_MIGRATION_PROVIDER_DEPENDENCY_SCAN_STALE/u)
+})
+
+test('dependency inventory is secret-free and live projection freshness is exact', async () => {
+  const migrated = dependencyFixture({ dependentEnvironment: ['DATABASE_HOST=postgres-a', 'DATABASE_PASSWORD=secret-value'] })
+  const sealedDependent = migrated.inventory.providerDependencyObjects.find((object) => object.objectId === 'nacos-a')
+  assert.deepEqual(sealedDependent.environment, ['DATABASE_HOST=postgres-a'])
+  assert.equal(JSON.stringify(migrated.inventory).includes('secret-value'), false)
+  const staged = await stageStateLayoutMigration(migrated.plan, migrated.inventory, { identitySeed: seed, hostBinding })
+  assert.equal(verifyProviderDependencyProjection(staged.journal, 'OLD', migrated.dockerObjects), true)
+  const liveDrift = structuredClone(migrated.dockerObjects)
+  liveDrift.find((object) => object.objectId === 'nacos-a').environment.push('SECONDARY_HOST=postgres-a')
+  assert.throws(() => verifyProviderDependencyProjection(staged.journal, 'OLD', liveDrift), /STATE_MIGRATION_PROVIDER_DEPENDENCY_SCAN_STALE/u)
+  const runningDrift = structuredClone(migrated.dockerObjects)
+  runningDrift.find((object) => object.objectId === 'nacos-a').running = false
+  assert.throws(() => verifyProviderDependencyProjection(staged.journal, 'OLD', runningDrift), /STATE_MIGRATION_PROVIDER_DEPENDENCY_REOPEN_MISMATCH/u)
+})
+
+test('dependency discovery rejects self and same-provider per-network alias owners', () => {
+  const migrated = dependencyFixture()
+  const selfAlias = structuredClone(migrated.dockerObjects)
+  selfAlias.find((object) => object.objectId === 'nacos-a').networks[0].aliases.push('postgres-a')
+  assert.throws(() => sealProviderHostnameDependencies(selfAlias), /STATE_MIGRATION_PROVIDER_DEPENDENCY_AMBIGUOUS/u)
+  const sameProviderLabels = { ...migrated.dockerObjects.find((object) => object.objectId === 'object-a').labels }
+  const sameProvider = { objectId: 'postgres-shadow', name: 'postgres-shadow', running: false, labels: sameProviderLabels, mounts: [], networks: [{ name: 'fixture-network', aliases: ['postgres-a'] }], environment: [] }
+  assert.throws(() => sealProviderHostnameDependencies([...migrated.dockerObjects, sameProvider]), /STATE_MIGRATION_PROVIDER_DEPENDENCY_AMBIGUOUS/u)
 })
 
 test('staging creates a sibling canonical Stack, invalidates restore binding, and leaves old root byte-exact', async () => {
@@ -144,13 +256,13 @@ test('fault after OLD_MOVED recovers old authority and quarantines the staged tr
   const { stateRoot, inventory, plan } = fixture()
   const staged = await stageStateLayoutMigration(plan, inventory, { identitySeed: seed, hostBinding })
   const approved = confirmation('OES_RUNTIME_STATE_LAYOUT_ACTIVATION_CONFIRMATION', staged.journal)
-  assert.throws(() => activateStagedState({ journalPath: staged.journalPath, confirmation: approved, faultAt: 'after-old-moved', observeQuiescence: zeroQuiescence }), /STATE_MIGRATION_FAULT_AFTER_OLD_MOVED/)
+  assert.throws(() => activateStagedState({ journalPath: staged.journalPath, confirmation: approved, faultAt: 'after-old-moved', verifyProviderDependencyIdentities: skipProviderDependencyReopen, observeQuiescence: zeroQuiescence }), /STATE_MIGRATION_FAULT_AFTER_OLD_MOVED/)
   assert.equal(reopenJournal(staged.journalPath).state, 'OLD_MOVED')
-  const recovered = recoverStateLayout({ journalPath: staged.journalPath })
+  const recovered = recoverStateLayout({ journalPath: staged.journalPath, verifyProviderDependencyIdentities: skipProviderDependencyReopen })
   assert.equal(recovered.authority, 'OLD')
   assert.equal(fs.existsSync(path.join(stateRoot, 'machine', 'dev-stack.json')), true)
   assert.equal(fs.existsSync(recovered.quarantine), true)
-  assert.equal(recoverStateLayout({ journalPath: staged.journalPath }).state, 'RECOVERED_OLD')
+  assert.equal(recoverStateLayout({ journalPath: staged.journalPath, verifyProviderDependencyIdentities: skipProviderDependencyReopen }).state, 'RECOVERED_OLD')
 })
 
 test('recovery closes both rename-before-journal crash windows idempotently', async () => {
@@ -159,11 +271,11 @@ test('recovery closes both rename-before-journal crash windows idempotently', as
     const staged = await stageStateLayoutMigration(plan, inventory, { identitySeed: seed, hostBinding })
     fs.renameSync(stateRoot, plan.rollbackRoot)
     if (crashWindow === 'BOTH_RENAMES') fs.renameSync(plan.stagedRoot, stateRoot)
-    const recovered = recoverStateLayout({ journalPath: staged.journalPath })
+    const recovered = recoverStateLayout({ journalPath: staged.journalPath, verifyProviderDependencyIdentities: skipProviderDependencyReopen })
     assert.equal(recovered.authority, 'OLD')
     assert.equal(fs.existsSync(path.join(stateRoot, 'machine', 'dev-stack.json')), true)
     assert.equal(fs.existsSync(recovered.quarantine), true)
-    assert.equal(recoverStateLayout({ journalPath: staged.journalPath }).state, 'RECOVERED_OLD')
+    assert.equal(recoverStateLayout({ journalPath: staged.journalPath, verifyProviderDependencyIdentities: skipProviderDependencyReopen }).state, 'RECOVERED_OLD')
   }
 })
 
@@ -171,23 +283,23 @@ test('COMMITTED activation keeps new authority and confirmed rollback restores t
   const { stateRoot, inventory, plan } = fixture()
   const staged = await stageStateLayoutMigration(plan, inventory, { identitySeed: seed, hostBinding })
   const durability = []
-  const committed = activateStagedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ACTIVATION_CONFIRMATION', staged.journal), verifyNewRoot: (root) => fs.existsSync(path.join(root, 'stack-registry.json')), verifyProviderReadiness: () => true, observeQuiescence: zeroQuiescence, providerLifecycle, onDurabilityStep: (step) => { assert.equal(reopenJournal(staged.journalPath).state, 'NEW_PLACED'); durability.push(step) } })
+  const committed = activateStagedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ACTIVATION_CONFIRMATION', staged.journal), verifyNewRoot: (root) => fs.existsSync(path.join(root, 'stack-registry.json')), verifyProviderReadiness: () => true, verifyProviderDependencyIdentities: skipProviderDependencyReopen, observeQuiescence: zeroQuiescence, providerLifecycle, onDurabilityStep: (step) => { assert.equal(reopenJournal(staged.journalPath).state, 'NEW_PLACED'); durability.push(step) } })
   assert.equal(committed.state, 'COMMITTED')
   assert.deepEqual(durability, ['RELOCATED_POINTER_DIRECTORY_SYNCED', 'MANIFEST_DIRECTORY_SYNCED', 'STACK_POINTER_DIRECTORY_SYNCED', 'STACK_PUBLICATION_REOPENED'])
-  assert.throws(() => recoverStateLayout({ journalPath: staged.journalPath, verifyProviderReadiness: () => true, verifyProviderMappings: () => false }), /STATE_MIGRATION_COMMITTED_PROVIDER_VERIFICATION_FAILED/)
-  assert.equal(recoverStateLayout({ journalPath: staged.journalPath, verifyProviderReadiness: () => true, verifyProviderMappings: () => true }).authority, 'NEW')
+  assert.throws(() => recoverStateLayout({ journalPath: staged.journalPath, verifyProviderReadiness: () => true, verifyProviderMappings: () => false, verifyProviderDependencyIdentities: skipProviderDependencyReopen }), /STATE_MIGRATION_COMMITTED_PROVIDER_VERIFICATION_FAILED/)
+  assert.equal(recoverStateLayout({ journalPath: staged.journalPath, verifyProviderReadiness: () => true, verifyProviderMappings: () => true, verifyProviderDependencyIdentities: skipProviderDependencyReopen }).authority, 'NEW')
   const activatedStackRoot = path.join(stateRoot, 'stacks', staged.layout.stackKey)
   const current = reopenCurrentStackManifest(activatedStackRoot).manifest
   const laterDraft = { ...current }
   for (const key of ['schemaVersion', 'kind', 'generation', 'stackManifestFingerprint']) delete laterDraft[key]
   const later = publishStackManifest(activatedStackRoot, laterDraft)
   assert.equal(Number(later.manifest.generation) > Number(committed.activatedStackManifestReference.generation), true)
-  assert.equal(recoverStateLayout({ journalPath: staged.journalPath, verifyProviderReadiness: () => true, verifyProviderMappings: () => true }).authority, 'NEW')
-  const rolledBack = rollbackCommittedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ROLLBACK_CONFIRMATION', committed), observeQuiescence: zeroQuiescence, providerLifecycle })
+  assert.equal(recoverStateLayout({ journalPath: staged.journalPath, verifyProviderReadiness: () => true, verifyProviderMappings: () => true, verifyProviderDependencyIdentities: skipProviderDependencyReopen }).authority, 'NEW')
+  const rolledBack = rollbackCommittedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ROLLBACK_CONFIRMATION', committed), verifyProviderDependencyIdentities: skipProviderDependencyReopen, observeQuiescence: zeroQuiescence, providerLifecycle })
   assert.equal(rolledBack.state, 'ROLLED_BACK')
   assert.equal(fs.existsSync(path.join(stateRoot, 'machine', 'dev-stack.json')), true)
   assert.equal(fs.existsSync(rolledBack.retainedNewRoot), true)
-  assert.equal(rollbackCommittedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ROLLBACK_CONFIRMATION', committed), observeQuiescence: zeroQuiescence, providerLifecycle }).state, 'ROLLED_BACK')
+  assert.equal(rollbackCommittedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ROLLBACK_CONFIRMATION', committed), verifyProviderDependencyIdentities: skipProviderDependencyReopen, observeQuiescence: zeroQuiescence, providerLifecycle }).state, 'ROLLED_BACK')
 })
 
 test('failure after bind-provider activation stops it before root rollback and restarts retained old identity', async () => {
@@ -199,8 +311,8 @@ test('failure after bind-provider activation stops it before root rollback and r
     stop: () => events.push('stop'),
     restart: () => events.push('restart')
   }
-  assert.throws(() => activateStagedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ACTIVATION_CONFIRMATION', staged.journal), faultAt: 'after-provider-activation', observeQuiescence: zeroQuiescence, providerLifecycle: lifecycle }), /STATE_MIGRATION_FAULT_AFTER_PROVIDER_ACTIVATION/)
-  const recovered = recoverStateLayout({ journalPath: staged.journalPath, providerLifecycle: lifecycle })
+  assert.throws(() => activateStagedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ACTIVATION_CONFIRMATION', staged.journal), faultAt: 'after-provider-activation', verifyProviderDependencyIdentities: skipProviderDependencyReopen, observeQuiescence: zeroQuiescence, providerLifecycle: lifecycle }), /STATE_MIGRATION_FAULT_AFTER_PROVIDER_ACTIVATION/)
+  const recovered = recoverStateLayout({ journalPath: staged.journalPath, verifyProviderDependencyIdentities: skipProviderDependencyReopen, providerLifecycle: lifecycle })
   assert.equal(recovered.authority, 'OLD')
   assert.deepEqual(events, ['activate', 'stop', 'restart'])
   assert.equal(fs.existsSync(path.join(stateRoot, 'machine', 'dev-stack.json')), true)
@@ -314,7 +426,7 @@ test('process-runtime key becomes Stack credential material with exact bytes and
 test('ordinary post-migration resolution reopens the preserved immutable devStackId', async () => {
   const { stateRoot, inventory, plan } = fixture()
   const staged = await stageStateLayoutMigration(plan, inventory, { identitySeed: seed, hostBinding })
-  activateStagedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ACTIVATION_CONFIRMATION', staged.journal), verifyProviderReadiness: () => true, observeQuiescence: zeroQuiescence, providerLifecycle })
+  activateStagedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ACTIVATION_CONFIRMATION', staged.journal), verifyProviderReadiness: () => true, verifyProviderDependencyIdentities: skipProviderDependencyReopen, observeQuiescence: zeroQuiescence, providerLifecycle })
   const reopened = await resolveRuntimeLayout({ stateRoot, profile: 'LOCAL_INTEGRATION', taskKey: 'ordinary_task', runId: 'ordinary_run', hostBinding })
   assert.equal(reopened.devStackId, 'fixture_machine')
   const identity = JSON.parse(fs.readFileSync(path.join(reopened.stackRoot, 'providers', 'test', 'postgres', 'identity.json'), 'utf8'))
@@ -326,10 +438,10 @@ test('ordinary post-migration resolution reopens the preserved immutable devStac
 test('rollback rechecks live quiescence before provider or root mutation', async () => {
   const { stateRoot, inventory, plan } = fixture()
   const staged = await stageStateLayoutMigration(plan, inventory, { identitySeed: seed, hostBinding })
-  const committed = activateStagedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ACTIVATION_CONFIRMATION', staged.journal), verifyProviderReadiness: () => true, observeQuiescence: zeroQuiescence, providerLifecycle })
+  const committed = activateStagedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ACTIVATION_CONFIRMATION', staged.journal), verifyProviderReadiness: () => true, verifyProviderDependencyIdentities: skipProviderDependencyReopen, observeQuiescence: zeroQuiescence, providerLifecycle })
   let stopped = false
   const lifecycle = { ...providerLifecycle, stop: () => { stopped = true } }
-  assert.throws(() => rollbackCommittedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ROLLBACK_CONFIRMATION', committed), observeQuiescence: () => ({ activeRunCount: 1 }), providerLifecycle: lifecycle }), /STATE_MIGRATION_QUIESCENCE_REQUIRED/)
+  assert.throws(() => rollbackCommittedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ROLLBACK_CONFIRMATION', committed), verifyProviderDependencyIdentities: skipProviderDependencyReopen, observeQuiescence: () => ({ activeRunCount: 1 }), providerLifecycle: lifecycle }), /STATE_MIGRATION_QUIESCENCE_REQUIRED/)
   assert.equal(stopped, false)
   assert.equal(fs.existsSync(path.join(stateRoot, 'stack-registry.json')), true)
 })
@@ -337,7 +449,7 @@ test('rollback rechecks live quiescence before provider or root mutation', async
 test('rollback discounts only sealed replacement binds, stops them, then requires strict zero binds', async () => {
   const { stateRoot, inventory, plan } = fixture()
   const staged = await stageStateLayoutMigration(plan, inventory, { identitySeed: seed, hostBinding })
-  const committed = activateStagedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ACTIVATION_CONFIRMATION', staged.journal), verifyProviderReadiness: () => true, observeQuiescence: zeroQuiescence, providerLifecycle })
+  const committed = activateStagedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ACTIVATION_CONFIRMATION', staged.journal), verifyProviderReadiness: () => true, verifyProviderDependencyIdentities: skipProviderDependencyReopen, observeQuiescence: zeroQuiescence, providerLifecycle })
   const events = []
   let stopped = false
   const lifecycle = { ...providerLifecycle, stop: () => { events.push('stop'); stopped = true } }
@@ -345,7 +457,7 @@ test('rollback discounts only sealed replacement binds, stops them, then require
     events.push(allowedRunningObjectIds.length ? `observe-allow:${allowedRunningObjectIds.join(',')}` : 'observe-strict')
     return { ...zeroQuiescence(), runningBindCount: stopped || allowedRunningObjectIds.includes('object-b') ? 0 : 1 }
   }
-  const rolledBack = rollbackCommittedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ROLLBACK_CONFIRMATION', committed), observeQuiescence, providerLifecycle: lifecycle })
+  const rolledBack = rollbackCommittedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ROLLBACK_CONFIRMATION', committed), verifyProviderDependencyIdentities: skipProviderDependencyReopen, observeQuiescence, providerLifecycle: lifecycle })
   assert.equal(rolledBack.state, 'ROLLED_BACK')
   assert.deepEqual(events, ['observe-allow:object-b', 'stop', 'observe-strict'])
 })

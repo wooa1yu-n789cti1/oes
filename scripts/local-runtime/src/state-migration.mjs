@@ -37,6 +37,86 @@ function hasExactHostBind(mounts, bind, sourceField = 'source') {
   return (mounts || []).some((mount) => mount.Type === 'bind' && canonicalHostBindSource(mount.Source) === bind[sourceField] && mount.Destination === bind.destination)
 }
 
+/** Normalizes one container's network names and explicit aliases without persisting unrelated inspect data. */
+function providerNetworkAttachments(object) {
+  if (Array.isArray(object.networks)) return object.networks.map((attachment) => ({ name: attachment.name, aliases: [...new Set(attachment.aliases || [])].sort() })).sort((left, right) => left.name.localeCompare(right.name))
+  return Object.entries(object.NetworkSettings?.Networks || {}).map(([name, attachment]) => ({
+    name,
+    aliases: [...new Set((attachment.Aliases || []).filter(Boolean))].sort()
+  })).sort((left, right) => left.name.localeCompare(right.name))
+}
+
+/** Returns the closed SHARED V2 provider identity needed for dependency discovery. */
+function observedProviderIdentity(object) {
+  const labels = object.labels || object.Labels || object.Config?.Labels || {}
+  const objectId = object.objectId || object.Id
+  const name = String(object.name || object.Name || '').replace(/^\//u, '')
+  const type = object.type || object.Type || 'container'
+  if (type !== 'container' || !objectId || !name || labels['oes.runtime.version'] !== '2' || labels['oes.runtime.scope'] !== 'SHARED' || !['dev', 'test'].includes(labels['oes.runtime.pool']) || !labels['oes.runtime.provider']) return null
+  return { objectId, name, provider: labels['oes.runtime.provider'], pool: labels['oes.runtime.pool'], devStackId: labels['oes.runtime.dev-stack-id'], running: Boolean(object.running ?? object.State?.Running), networks: providerNetworkAttachments(object) }
+}
+
+/** Retains only host-valued environment entries needed to rediscover dependencies without persisting secrets. */
+function providerHostnameEnvironment(object) {
+  return (object.Config?.Env || object.environment || []).filter((entry) => {
+    const separator = String(entry).indexOf('=')
+    return separator > 0 && /(?:^|_)(?:HOST|HOSTNAME)$/u.test(String(entry).slice(0, separator))
+  })
+}
+
+/** Seals exact host-valued environment references between observed SHARED V2 providers. */
+export function sealProviderHostnameDependencies(dockerObjects) {
+  const containers = dockerObjects.map((object) => ({ object, identity: observedProviderIdentity(object) })).filter(({ identity }) => identity)
+  const knownHostnames = new Set(containers.flatMap(({ identity }) => [identity.name, ...identity.networks.flatMap((network) => network.aliases)]))
+  const dependencies = []
+  for (const { object, identity: dependent } of containers) {
+    const entries = (object.Config?.Env || object.environment || []).map((entry, index) => {
+      const separator = String(entry).indexOf('=')
+      return separator > 0 ? { key: String(entry).slice(0, separator), value: String(entry).slice(separator + 1), index } : null
+    }).filter((entry) => entry && /(?:^|_)(?:HOST|HOSTNAME)$/u.test(entry.key))
+    for (const [key, selected] of Map.groupBy(entries, (entry) => entry.key)) {
+      const values = [...new Set(selected.map((entry) => entry.value))]
+      if (values.length > 1 && values.some((value) => knownHostnames.has(value))) throw new Error(`STATE_MIGRATION_PROVIDER_DEPENDENCY_CONFLICT dependentObjectId=${dependent.objectId} environmentKey=${key}`)
+      const hostname = values[0]
+      if (!knownHostnames.has(hostname)) continue
+      const dependentNetworks = new Set(dependent.networks.map((network) => network.name))
+      const matches = new Map()
+      let knownOwner = false
+      for (const { identity: target } of containers) {
+        const nameMatch = target.name === hostname
+        const aliasNetworks = target.networks.filter((network) => network.aliases.includes(hostname)).map((network) => network.name)
+        if (!nameMatch && !aliasNetworks.length) continue
+        knownOwner = true
+        const targetNetworks = target.networks.map((network) => network.name)
+        const networks = (nameMatch ? targetNetworks : aliasNetworks).filter((network) => dependentNetworks.has(network)).sort()
+        if (!networks.length) continue
+        matches.set(target.objectId, { target, networks })
+      }
+      const eligible = [...matches.values()].filter(({ target }) => target.objectId !== dependent.objectId && target.provider !== dependent.provider)
+      if (!matches.size && knownOwner) throw new Error(`STATE_MIGRATION_PROVIDER_DEPENDENCY_UNMAPPED dependentObjectId=${dependent.objectId} environmentKey=${key} hostname=${hostname}`)
+      if (matches.size && eligible.length === 0) throw new Error(`STATE_MIGRATION_PROVIDER_DEPENDENCY_UNMAPPED dependentObjectId=${dependent.objectId} environmentKey=${key} hostname=${hostname}`)
+      if (matches.size > 1) throw new Error(`STATE_MIGRATION_PROVIDER_DEPENDENCY_AMBIGUOUS dependentObjectId=${dependent.objectId} environmentKey=${key} hostname=${hostname}`)
+      if (!eligible.length) continue
+      const [{ target, networks }] = eligible
+      dependencies.push({
+        dependentObjectId: dependent.objectId,
+        dependentName: dependent.name,
+        dependentProvider: dependent.provider,
+        dependentPool: dependent.pool,
+        dependentWasRunning: dependent.running,
+        environmentKey: key,
+        hostname,
+        targetObjectId: target.objectId,
+        targetName: target.name,
+        targetProvider: target.provider,
+        targetPool: target.pool,
+        networks
+      })
+    }
+  }
+  return dependencies.sort((left, right) => `${left.dependentObjectId}:${left.environmentKey}:${left.hostname}:${left.targetObjectId}`.localeCompare(`${right.dependentObjectId}:${right.environmentKey}:${right.hostname}:${right.targetObjectId}`))
+}
+
 /** Recursively inventories one state root without following symlinks. */
 function inventoryTree(root) {
   const entries = []
@@ -83,6 +163,7 @@ export function inventoryStateLayout({ stateRoot, dockerObjects = [], hostPlatfo
       name: String(object.name || object.Name || '').replace(/^\//u, ''),
       running: Boolean(object.running ?? object.State?.Running),
       labels: object.labels || object.Labels || object.Config?.Labels || {},
+      ...(type === 'container' ? { networks: providerNetworkAttachments(object), environment: providerHostnameEnvironment(object) } : {}),
       mounts: (object.mounts || object.Mounts || []).map((mount) => {
         if (mount.Type !== 'bind') return { Type: mount.Type, Source: mount.Source ? path.resolve(mount.Source) : undefined, Destination: mount.Destination, Name: mount.Name, RW: mount.RW }
         const rawSource = mount.Source
@@ -100,7 +181,9 @@ export function inventoryStateLayout({ stateRoot, dockerObjects = [], hostPlatfo
   }
   const semaphoreFiles = entries.filter((entry) => entry.type === 'FILE' && /^semaphore\//u.test(entry.path)).map((entry) => entry.path)
   const controlLockFiles = entries.filter((entry) => entry.type === 'FILE' && /^locks\//u.test(entry.path)).map((entry) => entry.path)
-  const raw = { schemaVersion: 3, kind: 'OES_RUNTIME_STATE_LAYOUT_INVENTORY', stateRoot: root, entries, activeRunFiles, runningDevProcessAuthorities, leaseFiles, semaphoreFiles, controlLockFiles, dockerObjects: normalizedDockerObjects, binds, sourceTreeFingerprint: fingerprint(entries) }
+  const providerDependencyObjects = normalizedDockerObjects.filter((object) => observedProviderIdentity(object))
+  const providerDependencies = sealProviderHostnameDependencies(providerDependencyObjects)
+  const raw = { schemaVersion: 3, kind: 'OES_RUNTIME_STATE_LAYOUT_INVENTORY', stateRoot: root, entries, activeRunFiles, runningDevProcessAuthorities, leaseFiles, semaphoreFiles, controlLockFiles, dockerObjects: normalizedDockerObjects, binds, providerDependencyScanVersion: 1, providerDependencyObjects, providerDependencies, sourceTreeFingerprint: fingerprint(entries) }
   return { ...raw, inventoryFingerprint: fingerprint(raw) }
 }
 
@@ -200,6 +283,60 @@ function assertSharedV2Labels(labels, { devStackId, pool, provider, objectId }) 
   const foreignLifecycle = Object.keys(labels || {}).some((key) => key.startsWith('com.docker.compose.'))
   const extraRuntime = Object.keys(labels || {}).filter((key) => key.startsWith('oes.runtime.') && !allowed.has(key))
   if (!labels || foreignLifecycle || extraRuntime.length || Object.entries(expected).some(([key, value]) => labels[key] !== value)) throw new Error(`STATE_MIGRATION_REQUIRED_LABEL_MISMATCH objectId=${objectId || 'UNKNOWN'}`)
+}
+
+/** Reopens sealed provider dependency records against exact inventory and provider identities. */
+function validateProviderDependencies(inventory, identityResources) {
+  if (inventory.providerDependencyScanVersion !== 1 || !Array.isArray(inventory.providerDependencyObjects) || !Array.isArray(inventory.providerDependencies)) throw new Error('STATE_MIGRATION_PROVIDER_DEPENDENCY_SCAN_REQUIRED')
+  const rescanned = sealProviderHostnameDependencies(inventory.providerDependencyObjects)
+  if (fingerprint(rescanned) !== fingerprint(inventory.providerDependencies)) throw new Error('STATE_MIGRATION_PROVIDER_DEPENDENCY_SCAN_STALE')
+  const objects = new Map((inventory.dockerObjects || []).filter((object) => object.type === 'container').map((object) => [object.objectId, object]))
+  const identities = new Map(identityResources.filter((identity) => identity.kind === 'container').map((identity) => [identity.objectId, identity]))
+  const seen = new Set()
+  for (const dependency of inventory.providerDependencies) {
+    const key = `${dependency.dependentObjectId}:${dependency.environmentKey}:${dependency.hostname}`
+    if (seen.has(key)) throw new Error(`STATE_MIGRATION_PROVIDER_DEPENDENCY_CONFLICT dependentObjectId=${dependency.dependentObjectId} environmentKey=${dependency.environmentKey}`)
+    seen.add(key)
+    const dependentObject = objects.get(dependency.dependentObjectId)
+    const targetObject = objects.get(dependency.targetObjectId)
+    const dependentIdentity = identities.get(dependency.dependentObjectId)
+    const targetIdentity = identities.get(dependency.targetObjectId)
+    if (!dependentObject || !targetObject || !dependentIdentity || !targetIdentity || dependency.dependentObjectId === dependency.targetObjectId) throw new Error(`STATE_MIGRATION_PROVIDER_DEPENDENCY_UNMAPPED dependentObjectId=${dependency.dependentObjectId} hostname=${dependency.hostname}`)
+    if (dependency.dependentName !== dependentIdentity.name || dependency.dependentProvider !== dependentIdentity.provider || dependency.dependentPool !== dependentIdentity.pool || dependency.targetName !== targetIdentity.name || dependency.targetProvider !== targetIdentity.provider || dependency.targetPool !== targetIdentity.pool || dependency.dependentProvider === dependency.targetProvider || dependency.dependentWasRunning !== dependentObject.running || !/(?:^|_)(?:HOST|HOSTNAME)$/u.test(dependency.environmentKey || '') || !dependency.hostname || !Array.isArray(dependency.networks) || !dependency.networks.length || new Set(dependency.networks).size !== dependency.networks.length) throw new Error(`STATE_MIGRATION_PROVIDER_DEPENDENCY_IDENTITY_MISMATCH dependentObjectId=${dependency.dependentObjectId} hostname=${dependency.hostname || 'UNKNOWN'}`)
+    const dependentNetworks = new Map((dependentObject.networks || []).map((network) => [network.name, network]))
+    const targetNetworks = new Map((targetObject.networks || []).map((network) => [network.name, network]))
+    for (const network of dependency.networks) {
+      const targetAttachment = targetNetworks.get(network)
+      if (!dependentNetworks.has(network) || !targetAttachment || (dependency.hostname !== targetIdentity.name && !(targetAttachment.aliases || []).includes(dependency.hostname))) throw new Error(`STATE_MIGRATION_PROVIDER_DEPENDENCY_UNMAPPED dependentObjectId=${dependency.dependentObjectId} hostname=${dependency.hostname} network=${network}`)
+    }
+  }
+  return structuredClone(inventory.providerDependencies)
+}
+
+/** Orders bind-provider replacements so every replacement dependency is ready before its dependent. */
+function orderReplacementObjectIds(objectIds, dependencies) {
+  const ids = [...new Set(objectIds)].sort()
+  const selected = new Set(ids)
+  const outgoing = new Map(ids.map((id) => [id, new Set()]))
+  const indegree = new Map(ids.map((id) => [id, 0]))
+  for (const dependency of dependencies || []) {
+    if (!selected.has(dependency.targetObjectId) || !selected.has(dependency.dependentObjectId) || dependency.targetObjectId === dependency.dependentObjectId || outgoing.get(dependency.targetObjectId).has(dependency.dependentObjectId)) continue
+    outgoing.get(dependency.targetObjectId).add(dependency.dependentObjectId)
+    indegree.set(dependency.dependentObjectId, indegree.get(dependency.dependentObjectId) + 1)
+  }
+  const ready = ids.filter((id) => indegree.get(id) === 0)
+  const ordered = []
+  while (ready.length) {
+    const id = ready.shift()
+    ordered.push(id)
+    for (const dependent of [...outgoing.get(id)].sort()) {
+      indegree.set(dependent, indegree.get(dependent) - 1)
+      if (indegree.get(dependent) === 0) ready.push(dependent)
+    }
+    ready.sort()
+  }
+  if (ordered.length !== ids.length) throw new Error('STATE_MIGRATION_PROVIDER_DEPENDENCY_CYCLE')
+  return ordered
 }
 
 /** Reopens a retired consumer credential binding without exposing its values. */
@@ -326,6 +463,8 @@ export function planStateLayoutMigration(inventory, { devStackId, providerSnapsh
   const supportProviders = new Set(['nacos-mysql', 'tempo', 'loki', 'grafana'])
   for (const resource of identityResources.filter((identity) => identity.kind === 'container' && !supportProviders.has(identity.provider))) if (!endpointProviders.has(`${resource.provider}:${resource.pool}`)) throw new Error(`STATE_MIGRATION_PROVIDER_ENDPOINT_COVERAGE_REQUIRED provider=${resource.provider}`)
   for (const mapping of mappings.filter((candidate) => candidate.type === 'CREDENTIAL_TREE')) if (mapping.provider === 'mtls' && !endpointProviders.has(`mtls:${mapping.pool}`)) throw new Error('STATE_MIGRATION_PROVIDER_ENDPOINT_COVERAGE_REQUIRED provider=mtls')
+  const providerDependencies = validateProviderDependencies(inventory, identityResources)
+  orderReplacementObjectIds((inventory.binds || []).map((bind) => bind.objectId), providerDependencies)
   const snapshotObjectIds = new Set(normalizedProviderSnapshots.flatMap((snapshot) => [snapshot.resource?.objectId, snapshot.resource?.volume?.objectId]).filter(Boolean))
   if (snapshotObjectIds.size !== normalizedProviderSnapshots.flatMap((snapshot) => [snapshot.resource?.objectId, snapshot.resource?.volume?.objectId]).filter(Boolean).length) throw new Error('STATE_MIGRATION_DOCKER_OBJECT_ID_DUPLICATE')
   for (const object of inventory.dockerObjects || []) {
@@ -373,6 +512,8 @@ export function planStateLayoutMigration(inventory, { devStackId, providerSnapsh
     providerIdentities: identityResources,
     dockerObjectIds: (inventory.dockerObjects || []).map((object) => object.objectId),
     bindCount: (inventory.binds || []).length,
+    providerDependencyCount: providerDependencies.length,
+    providerDependencies,
     absoluteReferenceCount: absoluteReferences.length,
     devDataCarriers,
     retiredConsumerCredentialReferences,
@@ -389,6 +530,8 @@ export function planStateLayoutMigration(inventory, { devStackId, providerSnapsh
     devStackId: discoveredDevStackId,
     mappings,
     providerSnapshots: normalizedProviderSnapshots,
+    providerDependencyObjects: structuredClone(inventory.providerDependencyObjects),
+    providerDependencies,
     devDataCarriers,
     coverage,
     devBackupReference,
@@ -420,6 +563,7 @@ function verifyPlanTopology(plan, inventory) {
     if ((source !== oldRoot && !source.startsWith(`${oldRoot}${path.sep}`)) || (target !== targetBase && !target.startsWith(`${targetBase}${path.sep}`))) throw new Error('STATE_MIGRATION_PLAN_MAPPING_ESCAPE')
   }
   for (const bind of plan.binds || []) if (path.resolve(bind.source) !== oldRoot && !path.resolve(bind.source).startsWith(`${oldRoot}${path.sep}`)) throw new Error('STATE_MIGRATION_PLAN_BIND_ESCAPE')
+  if (fingerprint(plan.providerDependencyObjects || []) !== fingerprint(inventory.providerDependencyObjects || [])) throw new Error('STATE_MIGRATION_PROVIDER_DEPENDENCY_SCAN_STALE')
 }
 
 /** Copies one closed-world tree while preserving file bytes and modes and rejecting links. */
@@ -551,7 +695,7 @@ export async function stageStateLayoutMigration(plan, inventory, { identitySeed,
     if (faultAt === 'before-fsync') throw new Error('STATE_MIGRATION_FAULT_BEFORE_FSYNC')
     fsyncTree(plan.stagedRoot)
     const stagedEntries = inventoryTree(plan.stagedRoot)
-    const journalRaw = { schemaVersion: 3, kind: 'OES_RUNTIME_STATE_LAYOUT_ACTIVATION', state: 'PREPARED', operationId: crypto.randomUUID(), planFingerprint: plan.planFingerprint, inventoryFingerprint: inventory.inventoryFingerprint, sourceTreeFingerprint: inventory.sourceTreeFingerprint, devBackupReference: plan.devBackupReference, devDataCarriers: plan.devDataCarriers, oldRoot: plan.oldRoot, stagedRoot: plan.stagedRoot, rollbackRoot: plan.rollbackRoot, stackKey: layout.stackKey, devStackId: layout.devStackId, stagedTreeFingerprint: fingerprint(stagedEntries), quiescence: plan.quiescence, binds: plan.binds.map((bind) => ({ ...bind, nextSource: rewriteFinalPaths(bind.source, plan, layout.stackKey) })), invalidatedRestoreBindings, transitions: [{ state: 'PREPARED', at: new Date().toISOString() }] }
+    const journalRaw = { schemaVersion: 3, kind: 'OES_RUNTIME_STATE_LAYOUT_ACTIVATION', state: 'PREPARED', operationId: crypto.randomUUID(), planFingerprint: plan.planFingerprint, inventoryFingerprint: inventory.inventoryFingerprint, sourceTreeFingerprint: inventory.sourceTreeFingerprint, devBackupReference: plan.devBackupReference, devDataCarriers: plan.devDataCarriers, oldRoot: plan.oldRoot, stagedRoot: plan.stagedRoot, rollbackRoot: plan.rollbackRoot, stackKey: layout.stackKey, devStackId: layout.devStackId, stagedTreeFingerprint: fingerprint(stagedEntries), quiescence: plan.quiescence, binds: plan.binds.map((bind) => ({ ...bind, nextSource: rewriteFinalPaths(bind.source, plan, layout.stackKey) })), providerDependencyObjects: plan.providerDependencyObjects, providerDependencies: plan.providerDependencies, invalidatedRestoreBindings, transitions: [{ state: 'PREPARED', at: new Date().toISOString() }] }
     const journal = writeJournal(plan.journalPath, journalRaw)
     return { layout, journalPath: plan.journalPath, journal }
   } catch (error) {
@@ -636,6 +780,24 @@ function assertQuiescent(observation) {
   if (active.length) throw new Error(`STATE_MIGRATION_QUIESCENCE_REQUIRED ${active.map(([key, count]) => `${key}=${count}`).join(' ')}`)
 }
 
+/** Returns the exact network aliases required by sealed dependents of one provider replacement. */
+function dependencyAliasesForProvider(journal, targetObjectId) {
+  const aliases = []
+  for (const dependency of journal.providerDependencies || []) {
+    if (dependency.targetObjectId !== targetObjectId) continue
+    for (const network of dependency.networks) aliases.push({ network, hostname: dependency.hostname, dependentObjectId: dependency.dependentObjectId, environmentKey: dependency.environmentKey })
+  }
+  return aliases.sort((left, right) => `${left.network}:${left.hostname}:${left.dependentObjectId}:${left.environmentKey}`.localeCompare(`${right.network}:${right.hostname}:${right.dependentObjectId}:${right.environmentKey}`))
+}
+
+/** Requires every sealed hostname to resolve through an observed container name or explicit network alias. */
+function hasDependencyNetworkIdentity(observed, network, hostname) {
+  const name = String(observed.Name || observed.name || '').replace(/^\//u, '')
+  const attachment = observed.NetworkSettings?.Networks?.[network] || (observed.networks || []).find((candidate) => candidate.name === network)
+  const aliases = attachment?.Aliases || attachment?.aliases || []
+  return name === hostname || aliases.includes(hostname)
+}
+
 /** Reconstructs a stopped provider with canonical binds and V2 Stack labels, without Compose metadata. */
 function replacementContainerArgs(observed, binds, journal, name) {
   const args = ['create', '--name', name]
@@ -659,9 +821,13 @@ function replacementContainerArgs(observed, binds, journal, name) {
     else if (mount.Type === 'tmpfs') args.push('--tmpfs', mount.Destination)
   }
   for (const [containerPort, bindings] of Object.entries(observed.HostConfig.PortBindings || {})) for (const binding of bindings || []) args.push('--publish', `${binding.HostIp || '127.0.0.1'}:${binding.HostPort}:${containerPort}`)
+  const dependencyAliases = dependencyAliasesForProvider(journal, observed.Id)
   const networks = Object.entries(observed.NetworkSettings.Networks || {}).map(([network, attachment]) => ({
     network,
-    aliases: (attachment.Aliases || []).filter((alias) => alias && alias !== observed.Id && alias !== name)
+    aliases: [...new Set([
+      ...(attachment.Aliases || []).filter((alias) => alias && alias !== observed.Id && alias !== name),
+      ...dependencyAliases.filter((required) => required.network === network && required.hostname !== name).map((required) => required.hostname)
+    ])].sort()
   }))
   if (networks.length) {
     args.push('--network', networks[0].network)
@@ -671,7 +837,7 @@ function replacementContainerArgs(observed, binds, journal, name) {
   if (restart && restart !== 'no') args.push('--restart', restart === 'on-failure' && observed.HostConfig.RestartPolicy.MaximumRetryCount ? `${restart}:${observed.HostConfig.RestartPolicy.MaximumRetryCount}` : restart)
   if (observed.Config.Entrypoint?.length) args.push('--entrypoint', observed.Config.Entrypoint[0])
   args.push(observed.Config.Image, ...(observed.Config.Entrypoint?.slice(1) || []), ...(observed.Config.Cmd || []))
-  return { args, labels, networks }
+  return { args, labels, networks, dependencyAliases }
 }
 
 /** Retries only Docker Desktop's transient visibility error for one exact host-existing replacement bind. */
@@ -687,6 +853,21 @@ function createReplacementContainer(args, binds) {
     }
   }
   throw new Error('STATE_MIGRATION_REPLACEMENT_CREATE_RETRY_EXHAUSTED')
+}
+
+/** Retries an original provider start only for Docker Desktop's sealed old-bind visibility window. */
+function startOriginalContainer(objectId, binds) {
+  const attempts = process.platform === 'darwin' ? 21 : 1
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try { runChecked('docker', ['start', objectId], { timeout: 120000 }); return } catch (error) {
+      const missing = String(error.stderr || '').match(/invalid mount config for type "bind": bind source path does not exist:\s+([^\r\n]+)/u)?.[1]
+      const canonical = missing ? canonicalHostBindSource(missing) : null
+      const expected = new Set((binds || []).map((bind) => path.resolve(bind.oldSource)))
+      if (process.platform !== 'darwin' || attempt === attempts - 1 || !canonical || !expected.has(canonical) || !fs.existsSync(canonical)) throw error
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250)
+    }
+  }
+  throw new Error(`STATE_MIGRATION_ORIGINAL_START_RETRY_EXHAUSTED objectId=${objectId}`)
 }
 
 /** Produces the frozen canonical name for one necessarily replaced shared provider. */
@@ -709,12 +890,82 @@ function canonicalReplacementName(observed, binds, journal) {
   return { name, pool, provider }
 }
 
+/** Resolves one old provider object to the exact object and name for the selected authority. */
+function providerAuthorityIdentity(journal, oldObjectId, oldName, authority) {
+  if (authority === 'OLD') return { objectId: oldObjectId, name: oldName }
+  const replacement = (journal.providerActivation || []).find((record) => record.oldObjectId === oldObjectId)
+  return replacement ? { objectId: replacement.newObjectId, name: replacement.newName } : { objectId: oldObjectId, name: oldName }
+}
+
+/** Returns one authority-specific expected provider identity and running state. */
+function expectedProviderAuthority(journal, sealed, authority) {
+  const replacement = (journal.providerActivation || []).find((record) => record.oldObjectId === sealed.objectId)
+  if (!replacement) return { ...sealed }
+  if (authority === 'NEW') return { ...sealed, objectId: replacement.newObjectId, name: replacement.newName, running: replacement.replacementWasRunning }
+  return { ...sealed, running: replacement.restoreWasRunning }
+}
+
+/** Reduces a discovered dependency to its authority-independent topology. */
+function providerDependencyTopology(dependency) {
+  const { dependentWasRunning: _running, ...topology } = dependency
+  return topology
+}
+
+/** Reopens the complete live dependency projection, unique DNS ownership, and exact authority state. */
+export function verifyProviderDependencyProjection(journal, authority, dockerObjects) {
+  if (!['OLD', 'NEW'].includes(authority) || !Array.isArray(journal.providerDependencyObjects) || !Array.isArray(journal.providerDependencies)) throw new Error('STATE_MIGRATION_PROVIDER_DEPENDENCY_SCAN_REQUIRED')
+  const replacements = journal.providerActivation || []
+  const excluded = new Set(replacements.map((record) => authority === 'NEW' ? record.oldObjectId : record.newObjectId).filter(Boolean))
+  const liveObjects = dockerObjects.filter((object) => {
+    const identity = observedProviderIdentity(object)
+    return identity?.devStackId === journal.devStackId && !excluded.has(identity.objectId)
+  })
+  const liveById = new Map(liveObjects.map((object) => [observedProviderIdentity(object).objectId, object]))
+  const expected = journal.providerDependencyObjects.map((sealed) => expectedProviderAuthority(journal, sealed, authority))
+  const expectedIds = expected.map((identity) => identity.objectId).sort()
+  const actualIds = [...liveById.keys()].sort()
+  if (expectedIds.some((objectId) => !objectId) || fingerprint(expectedIds) !== fingerprint(actualIds)) throw new Error(`STATE_MIGRATION_PROVIDER_DEPENDENCY_ROSTER_MISMATCH authority=${authority}`)
+  const authorityToOld = new Map()
+  for (let index = 0; index < expected.length; index += 1) {
+    const sealed = journal.providerDependencyObjects[index]
+    const identity = expected[index]
+    const observed = observedProviderIdentity(liveById.get(identity.objectId))
+    const expectedNetworks = (sealed.networks || []).map((network) => network.name).sort()
+    const observedNetworks = (observed?.networks || []).map((network) => network.name).sort()
+    if (!observed || observed.name !== identity.name || observed.provider !== identity.labels?.['oes.runtime.provider'] || observed.pool !== identity.labels?.['oes.runtime.pool'] || observed.devStackId !== journal.devStackId || observed.running !== identity.running || fingerprint(expectedNetworks) !== fingerprint(observedNetworks)) throw new Error(`STATE_MIGRATION_PROVIDER_DEPENDENCY_REOPEN_MISMATCH authority=${authority} objectId=${identity.objectId || 'UNKNOWN'}`)
+    authorityToOld.set(identity.objectId, sealed)
+  }
+  const rescanned = sealProviderHostnameDependencies(liveObjects).map((dependency) => {
+    const dependent = authorityToOld.get(dependency.dependentObjectId)
+    const target = authorityToOld.get(dependency.targetObjectId)
+    if (!dependent || !target) throw new Error(`STATE_MIGRATION_PROVIDER_DEPENDENCY_ROSTER_MISMATCH authority=${authority}`)
+    return providerDependencyTopology({ ...dependency, dependentObjectId: dependent.objectId, dependentName: dependent.name, targetObjectId: target.objectId, targetName: target.name })
+  }).sort((left, right) => `${left.dependentObjectId}:${left.environmentKey}:${left.hostname}:${left.targetObjectId}`.localeCompare(`${right.dependentObjectId}:${right.environmentKey}:${right.hostname}:${right.targetObjectId}`))
+  const sealedTopology = journal.providerDependencies.map(providerDependencyTopology)
+  if (fingerprint(rescanned) !== fingerprint(sealedTopology)) throw new Error(`STATE_MIGRATION_PROVIDER_DEPENDENCY_SCAN_STALE authority=${authority}`)
+  for (const dependency of journal.providerDependencies) {
+    const dependentIdentity = providerAuthorityIdentity(journal, dependency.dependentObjectId, dependency.dependentName, authority)
+    const targetIdentity = providerAuthorityIdentity(journal, dependency.targetObjectId, dependency.targetName, authority)
+    const dependent = liveById.get(dependentIdentity.objectId)
+    const target = liveById.get(targetIdentity.objectId)
+    const environmentValues = (dependent?.Config?.Env || dependent?.environment || []).filter((entry) => String(entry).startsWith(`${dependency.environmentKey}=`)).map((entry) => String(entry).slice(dependency.environmentKey.length + 1))
+    if (!dependent || !target || environmentValues.length !== 1 || environmentValues[0] !== dependency.hostname) throw new Error(`STATE_MIGRATION_PROVIDER_DEPENDENCY_REOPEN_MISMATCH hostname=${dependency.hostname}`)
+    for (const network of dependency.networks) if (!hasDependencyNetworkIdentity(target, network, dependency.hostname)) throw new Error(`STATE_MIGRATION_PROVIDER_DEPENDENCY_REOPEN_MISMATCH hostname=${dependency.hostname} network=${network}`)
+  }
+  return true
+}
+
+/** Observes Docker and delegates exact dependency reopening to the pure projection verifier. */
+function verifyDockerProviderDependencies(journal, authority) {
+  return verifyProviderDependencyProjection(journal, authority, observeDockerContainers())
+}
+
 /** Replaces bind-affected providers while retaining stopped originals for pre-commit recovery. */
 const dockerProviderLifecycle = {
-  activate(binds, { journal, onProgress = () => {} }) {
+  activate(binds, { journal, stackManifest, onProgress = () => {} }) {
     const byObject = new Map()
     for (const bind of binds) byObject.set(bind.objectId, [...(byObject.get(bind.objectId) || []), bind])
-    const results = []
+    const resultsByObjectId = new Map()
     for (const [oldObjectId, objectBinds] of byObject) {
       const before = inspectDockerContainer(oldObjectId)
       if (before.Id !== oldObjectId || before.State.Running || objectBinds.some((bind) => !hasExactHostBind(before.Mounts, bind))) throw new Error(`STATE_MIGRATION_BIND_OBJECT_MISMATCH objectId=${oldObjectId}`)
@@ -722,8 +973,12 @@ const dockerProviderLifecycle = {
       const canonical = canonicalReplacementName(before, objectBinds, journal)
       const backupName = `oes-v2-retained-${sha256(`${oldObjectId}:${journal.operationId}`).slice(0, 24)}`
       const replacement = replacementContainerArgs(before, objectBinds, journal, canonical.name)
-      results.push({ oldObjectId, newObjectId: null, oldName, newName: canonical.name, backupName, provider: canonical.provider, pool: canonical.pool, labels: replacement.labels, networks: replacement.networks, binds: objectBinds.map((bind) => ({ oldSource: bind.source, source: bind.nextSource, destination: bind.destination })), stage: 'PLANNED', disposition: 'BIND_PROVIDER_REPLACEMENT_PLANNED' })
+      const requiredByRunningDependent = (journal.providerDependencies || []).some((dependency) => dependency.targetObjectId === oldObjectId && dependency.dependentWasRunning)
+      const requiredByReadyEndpoint = (stackManifest?.endpoints || []).some((endpoint) => endpoint.ready && endpoint.authority?.startsWith(`docker:${oldObjectId}:`))
+      const restoreWasRunning = Boolean(before.State.Running || requiredByRunningDependent || requiredByReadyEndpoint)
+      resultsByObjectId.set(oldObjectId, { oldObjectId, newObjectId: null, oldName, newName: canonical.name, backupName, provider: canonical.provider, pool: canonical.pool, labels: replacement.labels, networks: replacement.networks, dependencyAliases: replacement.dependencyAliases, binds: objectBinds.map((bind) => ({ oldSource: bind.source, source: bind.nextSource, destination: bind.destination })), observedWasRunning: Boolean(before.State.Running), restoreWasRunning, replacementWasRunning: restoreWasRunning, stage: 'PLANNED', disposition: 'BIND_PROVIDER_REPLACEMENT_PLANNED' })
     }
+    const results = orderReplacementObjectIds([...resultsByObjectId.keys()], journal.providerDependencies || []).map((objectId) => resultsByObjectId.get(objectId))
     onProgress([...results])
     for (const record of results) {
       runChecked('docker', ['rename', record.oldObjectId, record.backupName], { timeout: 20000 })
@@ -741,10 +996,10 @@ const dockerProviderLifecycle = {
         runChecked('docker', args, { timeout: 20000 })
       }
       const created = inspectDockerContainer(record.newObjectId)
-      if (created.Id !== record.newObjectId || created.Config.Labels?.['oes.runtime.stack-key'] !== journal.stackKey || record.binds.some((bind) => !hasExactHostBind(created.Mounts, bind))) throw new Error(`STATE_MIGRATION_REPLACEMENT_IDENTITY_MISMATCH objectId=${record.newObjectId}`)
-      runChecked('docker', ['start', record.newObjectId], { timeout: 120000 })
-      if (!inspectDockerContainer(record.newObjectId).State.Running) throw new Error(`STATE_MIGRATION_BIND_PROVIDER_NOT_RUNNING objectId=${record.newObjectId}`)
-      record.stage = 'NEW_RUNNING'
+      if (created.Id !== record.newObjectId || created.Config.Labels?.['oes.runtime.stack-key'] !== journal.stackKey || record.binds.some((bind) => !hasExactHostBind(created.Mounts, bind)) || record.dependencyAliases.some((dependency) => !hasDependencyNetworkIdentity(created, dependency.network, dependency.hostname))) throw new Error(`STATE_MIGRATION_REPLACEMENT_IDENTITY_MISMATCH objectId=${record.newObjectId}`)
+      if (record.replacementWasRunning) runChecked('docker', ['start', record.newObjectId], { timeout: 120000 })
+      if (Boolean(inspectDockerContainer(record.newObjectId).State.Running) !== record.replacementWasRunning) throw new Error(`STATE_MIGRATION_BIND_PROVIDER_RUNNING_STATE_MISMATCH objectId=${record.newObjectId}`)
+      record.stage = record.replacementWasRunning ? 'NEW_RUNNING' : 'NEW_STOPPED'
       record.disposition = 'BIND_PROVIDER_REPLACED_OLD_RETAINED'
       onProgress([...results])
     }
@@ -752,27 +1007,37 @@ const dockerProviderLifecycle = {
   },
   stop(records) {
     for (const record of [...(records || [])].reverse()) {
-      let replacement = record.newObjectId ? inspectDockerContainerOrNull(record.newObjectId) : null
-      if (!replacement) {
-        const byName = inspectDockerContainerOrNull(record.newName)
-        if (byName && byName.Id !== record.oldObjectId) replacement = byName
-      }
+      const replacement = record.newObjectId ? inspectDockerContainerOrNull(record.newObjectId) : null
       if (replacement) {
-        if (replacement.Config.Labels?.['oes.runtime.stack-key'] !== record.labels['oes.runtime.stack-key'] || record.binds.some((bind) => !hasExactHostBind(replacement.Mounts, bind))) throw new Error(`STATE_MIGRATION_PROVIDER_IDENTITY_MISMATCH objectId=${replacement.Id}`)
+        if (String(replacement.Name).replace(/^\//u, '') !== record.newName || replacement.Config.Labels?.['oes.runtime.stack-key'] !== record.labels['oes.runtime.stack-key'] || record.binds.some((bind) => !hasExactHostBind(replacement.Mounts, bind))) throw new Error(`STATE_MIGRATION_PROVIDER_IDENTITY_MISMATCH objectId=${replacement.Id}`)
         runChecked('docker', ['rm', '--force', replacement.Id], { timeout: 60000 })
       }
       const original = inspectDockerContainer(record.oldObjectId)
       const currentName = String(original.Name).replace(/^\//u, '')
       if (original.Id !== record.oldObjectId || ![record.backupName, record.oldName].includes(currentName)) throw new Error(`STATE_MIGRATION_ORIGINAL_IDENTITY_MISMATCH objectId=${record.oldObjectId}`)
-      if (currentName === record.backupName) runChecked('docker', ['rename', record.oldObjectId, record.oldName], { timeout: 20000 })
+      if (currentName === record.backupName) {
+        const occupant = inspectDockerContainerOrNull(record.oldName)
+        if (occupant && occupant.Id !== record.oldObjectId) throw new Error(`STATE_MIGRATION_UNSEALED_REPLACEMENT_PRESERVED name=${record.oldName} objectId=${occupant.Id}`)
+        runChecked('docker', ['rename', record.oldObjectId, record.oldName], { timeout: 20000 })
+      }
     }
   },
-  restart(records) {
+  restart(records, { journal } = {}) {
     for (const record of records || []) {
       const original = inspectDockerContainer(record.oldObjectId)
       if (record.binds.some((bind) => !hasExactHostBind(original.Mounts, bind, 'oldSource'))) throw new Error(`STATE_MIGRATION_ORIGINAL_BIND_MISMATCH objectId=${record.oldObjectId}`)
-      if (!original.State.Running) runChecked('docker', ['start', record.oldObjectId], { timeout: 120000 })
-      if (!inspectDockerContainer(record.oldObjectId).State.Running) throw new Error(`STATE_MIGRATION_ORIGINAL_RESTART_FAILED objectId=${record.oldObjectId}`)
+      if (record.restoreWasRunning && !original.State.Running) startOriginalContainer(record.oldObjectId, record.binds)
+      if (!record.restoreWasRunning && original.State.Running) runChecked('docker', ['stop', record.oldObjectId], { timeout: 120000 })
+      if (Boolean(inspectDockerContainer(record.oldObjectId).State.Running) !== record.restoreWasRunning) throw new Error(`STATE_MIGRATION_ORIGINAL_RUNNING_STATE_MISMATCH objectId=${record.oldObjectId}`)
+    }
+    const restarted = new Set((records || []).map((record) => record.oldObjectId))
+    for (const dependency of journal?.providerDependencies || []) {
+      if (restarted.has(dependency.dependentObjectId)) continue
+      const dependent = inspectDockerContainer(dependency.dependentObjectId)
+      if (dependency.dependentWasRunning && !dependent.State.Running) runChecked('docker', ['start', dependency.dependentObjectId], { timeout: 120000 })
+      if (!dependency.dependentWasRunning && dependent.State.Running) runChecked('docker', ['stop', dependency.dependentObjectId], { timeout: 120000 })
+      if (Boolean(inspectDockerContainer(dependency.dependentObjectId).State.Running) !== dependency.dependentWasRunning) throw new Error(`STATE_MIGRATION_DEPENDENT_RUNNING_STATE_MISMATCH objectId=${dependency.dependentObjectId}`)
+      restarted.add(dependency.dependentObjectId)
     }
   }
 }
@@ -827,7 +1092,8 @@ function validateCompletedProviderActivations(journal, records) {
   const observed = [...new Set((records || []).map((record) => record.oldObjectId))].sort()
   if (fingerprint(expected) !== fingerprint(observed)) throw new Error('STATE_MIGRATION_PROVIDER_ACTIVATION_COVERAGE_MISMATCH')
   for (const record of records || []) {
-    if (!record.oldObjectId || !record.newObjectId || !record.oldName || !record.newName || !record.backupName || !record.provider || !['dev', 'test'].includes(record.pool) || !record.labels || !record.binds?.length) throw new Error('STATE_MIGRATION_PROVIDER_MAPPING_INCOMPLETE')
+    if (!record.oldObjectId || !record.newObjectId || !record.oldName || !record.newName || !record.backupName || !record.provider || !['dev', 'test'].includes(record.pool) || !record.labels || !record.binds?.length || typeof record.observedWasRunning !== 'boolean' || typeof record.restoreWasRunning !== 'boolean' || typeof record.replacementWasRunning !== 'boolean') throw new Error('STATE_MIGRATION_PROVIDER_MAPPING_INCOMPLETE')
+    if (fingerprint(record.dependencyAliases || []) !== fingerprint(dependencyAliasesForProvider(journal, record.oldObjectId))) throw new Error(`STATE_MIGRATION_PROVIDER_DEPENDENCY_ALIAS_COVERAGE_MISMATCH objectId=${record.oldObjectId}`)
   }
   return records
 }
@@ -847,8 +1113,10 @@ function verifyDockerStackReadiness(stackManifest) {
 function verifyActivatedProviderMappings(journal, stackManifest) {
   for (const record of journal.providerActivation || []) {
     if (!record.oldObjectId || !record.newObjectId || !record.oldName || !record.newName || !record.backupName) throw new Error('STATE_MIGRATION_PROVIDER_MAPPING_INCOMPLETE')
+    const dependencyAliases = dependencyAliasesForProvider(journal, record.oldObjectId)
+    if (fingerprint(record.dependencyAliases || []) !== fingerprint(dependencyAliases)) throw new Error(`STATE_MIGRATION_PROVIDER_DEPENDENCY_ALIAS_COVERAGE_MISMATCH objectId=${record.oldObjectId}`)
     const replacement = inspectDockerContainer(record.newObjectId)
-    if (replacement.Id !== record.newObjectId || String(replacement.Name).replace(/^\//u, '') !== record.newName || !replacement.State.Running) throw new Error(`STATE_MIGRATION_REPLACEMENT_IDENTITY_MISMATCH objectId=${record.newObjectId}`)
+    if (replacement.Id !== record.newObjectId || String(replacement.Name).replace(/^\//u, '') !== record.newName || Boolean(replacement.State.Running) !== record.replacementWasRunning || dependencyAliases.some((dependency) => !hasDependencyNetworkIdentity(replacement, dependency.network, dependency.hostname))) throw new Error(`STATE_MIGRATION_REPLACEMENT_IDENTITY_MISMATCH objectId=${record.newObjectId}`)
     if (Object.entries(record.labels || {}).some(([key, expected]) => replacement.Config.Labels?.[key] !== expected) || record.binds.some((bind) => !hasExactHostBind(replacement.Mounts, bind))) throw new Error(`STATE_MIGRATION_REPLACEMENT_MAPPING_MISMATCH objectId=${record.newObjectId}`)
     const retained = inspectDockerContainer(record.oldObjectId)
     if (retained.Id !== record.oldObjectId || String(retained.Name).replace(/^\//u, '') !== record.backupName || retained.State.Running) throw new Error(`STATE_MIGRATION_RETAINED_PROVIDER_MISMATCH objectId=${record.oldObjectId}`)
@@ -863,7 +1131,7 @@ function verifyActivatedProviderMappings(journal, stackManifest) {
 }
 
 /** Activates a PREPARED journal through the frozen rename sequence and durable COMMITTED boundary. */
-export function activateStagedState({ journalPath, confirmation, faultAt, verifyNewRoot = () => true, verifyProviderReadiness = verifyDockerStackReadiness, observeQuiescence = observeLiveQuiescence, providerLifecycle = dockerProviderLifecycle, onDurabilityStep = () => {} }) {
+export function activateStagedState({ journalPath, confirmation, faultAt, verifyNewRoot = () => true, verifyProviderReadiness = verifyDockerStackReadiness, verifyProviderDependencyIdentities = verifyDockerProviderDependencies, observeQuiescence = observeLiveQuiescence, providerLifecycle = dockerProviderLifecycle, onDurabilityStep = () => {} }) {
   let journal = reopenJournal(journalPath)
   const barrier = acquireMigrationBarrier(journal.oldRoot, { operation: 'ACTIVATE', journalFingerprint: journal.journalFingerprint })
   try {
@@ -875,6 +1143,7 @@ export function activateStagedState({ journalPath, confirmation, faultAt, verify
     if (!fs.existsSync(journal.oldRoot) || !fs.existsSync(journal.stagedRoot) || fs.existsSync(journal.rollbackRoot)) throw new Error('STATE_MIGRATION_ACTIVATION_PATH_STATE_INVALID')
     if (fingerprint(inventoryTree(journal.oldRoot)) !== journal.sourceTreeFingerprint) throw new Error('STATE_MIGRATION_SOURCE_CHANGED')
     if (fingerprint(inventoryTree(journal.stagedRoot)) !== journal.stagedTreeFingerprint) throw new Error('STATE_MIGRATION_STAGED_TREE_CHANGED')
+    if (!verifyProviderDependencyIdentities(journal, 'OLD')) throw new Error('STATE_MIGRATION_PROVIDER_DEPENDENCY_VERIFICATION_FAILED authority=OLD')
     fs.renameSync(journal.oldRoot, journal.rollbackRoot)
     fsyncParent(journal.oldRoot)
     journal = transition(journalPath, 'OLD_MOVED')
@@ -907,6 +1176,7 @@ export function activateStagedState({ journalPath, confirmation, faultAt, verify
     if (reopenedPublication.pointer.generation !== published.reference.generation || reopenedPublication.pointer.sha256 !== published.reference.sha256 || reopenedPublication.pointer.fingerprint !== published.reference.fingerprint) throw new Error('STATE_MIGRATION_STACK_PUBLICATION_REOPEN_MISMATCH')
     onDurabilityStep('STACK_PUBLICATION_REOPENED', journal)
     if (!verifyProviderReadiness(published.manifest)) throw new Error('STATE_MIGRATION_PROVIDER_READINESS_FAILED')
+    if (!verifyProviderDependencyIdentities(journal, 'NEW')) throw new Error('STATE_MIGRATION_PROVIDER_DEPENDENCY_VERIFICATION_FAILED authority=NEW')
     if (!verifyCanonicalActivatedRoot(journal.oldRoot, journal) || !verifyNewRoot(journal.oldRoot, journal)) throw new Error('STATE_MIGRATION_NEW_ROOT_VERIFICATION_FAILED')
     journal = transition(journalPath, 'COMMITTED', { activatedStackManifestReference: published.reference, committedRootTreeFingerprint: fingerprint(inventoryTree(journal.oldRoot)) })
     return journal
@@ -914,7 +1184,7 @@ export function activateStagedState({ journalPath, confirmation, faultAt, verify
 }
 
 /** Recovers pre-commit activation to old authority, or reopens committed new authority. */
-export function recoverStateLayout({ journalPath, verifyNewRoot = () => true, verifyProviderReadiness = verifyDockerStackReadiness, verifyProviderMappings = verifyActivatedProviderMappings, providerLifecycle = dockerProviderLifecycle }) {
+export function recoverStateLayout({ journalPath, verifyNewRoot = () => true, verifyProviderReadiness = verifyDockerStackReadiness, verifyProviderMappings = verifyActivatedProviderMappings, verifyProviderDependencyIdentities = verifyDockerProviderDependencies, providerLifecycle = dockerProviderLifecycle }) {
   let journal = reopenJournal(journalPath)
   const barrier = acquireMigrationBarrier(journal.oldRoot, { operation: 'RECOVER', journalFingerprint: journal.journalFingerprint })
   try {
@@ -927,17 +1197,20 @@ export function recoverStateLayout({ journalPath, verifyNewRoot = () => true, ve
       const currentGeneration = Number(current.pointer.generation)
       if (currentGeneration < activatedGeneration) throw new Error('STATE_MIGRATION_ACTIVATED_GENERATION_MISMATCH')
       if (currentGeneration === activatedGeneration && (current.pointer.sha256 !== journal.activatedStackManifestReference.sha256 || current.pointer.fingerprint !== journal.activatedStackManifestReference.fingerprint)) throw new Error('STATE_MIGRATION_ACTIVATED_GENERATION_MISMATCH')
-      if (current.manifest.devStackId !== journal.devStackId || !verifyProviderMappings(journal, activated) || !verifyProviderReadiness(activated) || !verifyProviderMappings(journal, current.manifest) || !verifyProviderReadiness(current.manifest)) throw new Error('STATE_MIGRATION_COMMITTED_PROVIDER_VERIFICATION_FAILED')
+      if (current.manifest.devStackId !== journal.devStackId || !verifyProviderMappings(journal, activated) || !verifyProviderReadiness(activated) || !verifyProviderMappings(journal, current.manifest) || !verifyProviderReadiness(current.manifest) || !verifyProviderDependencyIdentities(journal, 'NEW')) throw new Error('STATE_MIGRATION_COMMITTED_PROVIDER_VERIFICATION_FAILED')
       return { authority: 'NEW', state: 'COMMITTED', root: journal.oldRoot }
     }
     if (['RECOVERED_OLD', 'ROLLED_BACK'].includes(journal.state)) {
-      if (!fs.existsSync(journal.oldRoot) || fingerprint(inventoryTree(journal.oldRoot)) !== journal.sourceTreeFingerprint) throw new Error('STATE_MIGRATION_RECOVERED_ROOT_INVALID')
+      if (!fs.existsSync(journal.oldRoot) || fingerprint(inventoryTree(journal.oldRoot)) !== journal.sourceTreeFingerprint || !verifyProviderDependencyIdentities(journal, 'OLD')) throw new Error('STATE_MIGRATION_RECOVERED_ROOT_INVALID')
       return { authority: 'OLD', state: journal.state, root: journal.oldRoot, quarantine: journal.quarantine || journal.retainedNewRoot || null }
     }
     const oldExists = fs.existsSync(journal.oldRoot)
     const stagedExists = fs.existsSync(journal.stagedRoot)
     const rollbackExists = fs.existsSync(journal.rollbackRoot)
-    if (journal.state === 'PREPARED' && oldExists && stagedExists && !rollbackExists) return { authority: 'OLD', state: 'PREPARED', root: journal.oldRoot }
+    if (journal.state === 'PREPARED' && oldExists && stagedExists && !rollbackExists) {
+      if (!verifyProviderDependencyIdentities(journal, 'OLD')) throw new Error('STATE_MIGRATION_PROVIDER_DEPENDENCY_VERIFICATION_FAILED authority=OLD')
+      return { authority: 'OLD', state: 'PREPARED', root: journal.oldRoot }
+    }
     const quarantine = `${journal.stagedRoot}.uncommitted-${journal.operationId}`
     providerLifecycle.stop(journal.providerActivation || [])
     if (rollbackExists) {
@@ -951,24 +1224,26 @@ export function recoverStateLayout({ journalPath, verifyNewRoot = () => true, ve
       fs.renameSync(journal.rollbackRoot, journal.oldRoot)
       fsyncParent(journal.oldRoot)
     } else if (!oldExists || fingerprint(inventoryTree(journal.oldRoot)) !== journal.sourceTreeFingerprint) throw new Error('STATE_MIGRATION_ROLLBACK_ROOT_MISSING')
-    providerLifecycle.restart(journal.providerActivation || [])
+    providerLifecycle.restart(journal.providerActivation || [], { journal, authority: 'OLD' })
+    if (!verifyProviderDependencyIdentities(journal, 'OLD')) throw new Error('STATE_MIGRATION_PROVIDER_DEPENDENCY_VERIFICATION_FAILED authority=OLD')
     journal = transition(journalPath, 'RECOVERED_OLD', { quarantine })
     return { authority: 'OLD', state: journal.state, root: journal.oldRoot, quarantine }
   } finally { barrier.release() }
 }
 
 /** Performs a confirmed whole-state rollback after COMMITTED while retaining the new tree for audit. */
-export function rollbackCommittedState({ journalPath, confirmation, observeQuiescence = (journal, { allowedRunningObjectIds = [] } = {}) => observeLiveQuiescence(journal, [journal.oldRoot, journal.rollbackRoot], allowedRunningObjectIds), providerLifecycle = dockerProviderLifecycle }) {
+export function rollbackCommittedState({ journalPath, confirmation, observeQuiescence = (journal, { allowedRunningObjectIds = [] } = {}) => observeLiveQuiescence(journal, [journal.oldRoot, journal.rollbackRoot], allowedRunningObjectIds), verifyProviderDependencyIdentities = verifyDockerProviderDependencies, providerLifecycle = dockerProviderLifecycle }) {
   let journal = reopenJournal(journalPath)
   const barrier = acquireMigrationBarrier(journal.oldRoot, { operation: 'ROLLBACK', journalFingerprint: journal.journalFingerprint })
   try {
     journal = reopenJournal(journalPath)
     if (journal.state === 'ROLLED_BACK') {
-      if (!fs.existsSync(journal.oldRoot) || fingerprint(inventoryTree(journal.oldRoot)) !== journal.sourceTreeFingerprint || !fs.existsSync(journal.retainedNewRoot)) throw new Error('STATE_MIGRATION_ROLLED_BACK_ROOT_INVALID')
+      if (!fs.existsSync(journal.oldRoot) || fingerprint(inventoryTree(journal.oldRoot)) !== journal.sourceTreeFingerprint || !fs.existsSync(journal.retainedNewRoot) || !verifyProviderDependencyIdentities(journal, 'OLD')) throw new Error('STATE_MIGRATION_ROLLED_BACK_ROOT_INVALID')
       return journal
     }
     if (journal.state !== 'COMMITTED') throw new Error(`STATE_MIGRATION_ROLLBACK_STATE_INVALID state=${journal.state}`)
     if (confirmation?.kind !== 'OES_RUNTIME_STATE_LAYOUT_ROLLBACK_CONFIRMATION' || confirmation.status !== 'CONFIRMED' || confirmation.journalFingerprint !== journal.journalFingerprint || confirmation.confirmationFingerprint !== fingerprint(confirmation, 'confirmationFingerprint')) throw new Error('STATE_MIGRATION_ROLLBACK_CONFIRMATION_INVALID')
+    if (!verifyProviderDependencyIdentities(journal, 'NEW')) throw new Error('STATE_MIGRATION_PROVIDER_DEPENDENCY_VERIFICATION_FAILED authority=NEW')
     const allowedRunningObjectIds = (journal.providerActivation || []).map((record) => record.newObjectId).filter(Boolean)
     assertQuiescent(observeQuiescence(journal, { allowedRunningObjectIds }))
     const retainedNewRoot = `${journal.stagedRoot}.rolled-back-${journal.operationId}`
@@ -982,7 +1257,8 @@ export function rollbackCommittedState({ journalPath, confirmation, observeQuies
       fs.renameSync(journal.rollbackRoot, journal.oldRoot)
       fsyncParent(journal.oldRoot)
     } else if (!fs.existsSync(journal.oldRoot) || fingerprint(inventoryTree(journal.oldRoot)) !== journal.sourceTreeFingerprint || !fs.existsSync(retainedNewRoot)) throw new Error('STATE_MIGRATION_ROLLBACK_ROOT_MISSING')
-    providerLifecycle.restart(journal.providerActivation || [])
+    providerLifecycle.restart(journal.providerActivation || [], { journal, authority: 'OLD' })
+    if (!verifyProviderDependencyIdentities(journal, 'OLD')) throw new Error('STATE_MIGRATION_PROVIDER_DEPENDENCY_VERIFICATION_FAILED authority=OLD')
     journal = transition(journalPath, 'ROLLED_BACK', { retainedNewRoot })
     return journal
   } finally { barrier.release() }
