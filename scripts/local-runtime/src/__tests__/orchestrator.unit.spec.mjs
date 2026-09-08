@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -16,6 +17,54 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 function intent(stateRoot, taskKey, runId) { return { root, stateRoot, profile: 'LOCAL_INTEGRATION', testClass: 'integration', owners: ['permission-service'], capabilities: [], taskKey, runId, devStackId: 'fixture_machine', driver: 'simulation', concurrency: 2 } }
 function devIntent(stateRoot, taskKey, runId) { return { root, stateRoot, profile: 'DEV', testClass: 'integration', owners: ['permission-service'], capabilities: [], taskKey, runId, devStackId: 'fixture_machine', driver: 'simulation', concurrency: 2, devLockTimeoutMs: 2000 } }
 function physical(manifest) { return resolveResources(manifest, { includeStack: true }).find((resource) => resource.kind === 'simulated-provider' && resource.provider === 'postgres') }
+
+/** Captures file content and directory shape without relying on mutable timestamps. */
+function snapshotTree(target) {
+  if (!fs.existsSync(target)) return null
+  const output = {}
+  const walk = (current) => {
+    const relative = path.relative(target, current) || '.'
+    const stat = fs.lstatSync(current)
+    if (stat.isSymbolicLink()) { output[relative] = `link:${fs.readlinkSync(current)}`; return }
+    if (stat.isFile()) { output[relative] = `file:${fs.readFileSync(current).toString('base64')}`; return }
+    output[relative] = 'directory'
+    for (const entry of fs.readdirSync(current).sort()) walk(path.join(current, entry))
+  }
+  walk(target)
+  return output
+}
+
+/** Starts a separate simulator owner and resolves once its exact manifest is durable. */
+function spawnRuntimeOwner(stateRoot, taskKey, runId, waitForCleanup) {
+  const script = `
+    import { reconcileRuntime, startRuntime } from './scripts/local-runtime/src/orchestrator.mjs'
+    const started = await startRuntime({ root: process.env.FIXTURE_ROOT, stateRoot: process.env.FIXTURE_STATE_ROOT, profile: 'LOCAL_INTEGRATION', testClass: 'integration', owners: ['permission-service'], capabilities: [], taskKey: process.env.FIXTURE_TASK_KEY, runId: process.env.FIXTURE_RUN_ID, devStackId: 'fixture_machine', driver: 'simulation', concurrency: 2 })
+    process.stdout.write(JSON.stringify({ file: started.file }) + '\\n')
+    if (process.env.FIXTURE_WAIT === 'true') {
+      await new Promise((resolve) => process.stdin.once('data', resolve))
+      reconcileRuntime({ manifestPath: started.file, cleanupResource: started.cleanup, releaseSlot: started.releaseSlot, releaseRunLock: started.releaseRunLock, releaseDevLock: started.releaseDevLock })
+    }
+  `
+  const child = spawn(process.execPath, ['--input-type=module', '--eval', script], {
+    cwd: root,
+    env: { ...process.env, FIXTURE_ROOT: root, FIXTURE_STATE_ROOT: stateRoot, FIXTURE_TASK_KEY: taskKey, FIXTURE_RUN_ID: runId, FIXTURE_WAIT: String(waitForCleanup) },
+    stdio: ['pipe', 'pipe', 'pipe']
+  })
+  let output = ''
+  let errorOutput = ''
+  child.stderr.on('data', (chunk) => { errorOutput += chunk })
+  const ready = new Promise((resolve, reject) => {
+    child.stdout.on('data', (chunk) => {
+      output += chunk
+      const newline = output.indexOf('\n')
+      if (newline !== -1) resolve(JSON.parse(output.slice(0, newline)))
+    })
+    child.once('error', reject)
+    child.once('exit', (code) => { if (!output.includes('\n')) reject(new Error(`fixture owner exited code=${code} stderr=${errorOutput}`)) })
+  })
+  const exited = new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal, stderr: errorOutput })))
+  return { child, ready, exited }
+}
 
 test('two runs share physical TEST provider but receive isolated logical allocations and credentials', async () => {
   const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-runtime-two-run-'))
@@ -94,6 +143,51 @@ test('one atomic Run claim rejects a concurrent duplicate before provider mutati
   reconcileRuntime({ manifestPath: winner.file, cleanupResource: winner.cleanup, releaseSlot: winner.releaseSlot, releaseRunLock: winner.releaseRunLock, releaseDevLock: winner.releaseDevLock })
   assert.deepEqual(fs.readdirSync(path.join(winner.context.stackRoot, 'leases')), [])
   assert.deepEqual(fs.readdirSync(path.join(stateRoot, 'semaphores', 'queue')), [])
+})
+
+test('standalone reconciliation preserves a live foreign Run and its exact root and Stack state', async () => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-runtime-live-reconcile-'))
+  const owner = spawnRuntimeOwner(stateRoot, 'task_live', 'run_live', true)
+  let manifestPath
+  try {
+    manifestPath = (await owner.ready).file
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+    const before = snapshotTree(stateRoot)
+    assert.doesNotThrow(() => process.kill(owner.child.pid, 0))
+    assert.throws(() => reconcileRuntime({ manifestPath, cleanupResource: cleanupSimulatedResource }), /RUNTIME_RUN_ACTIVE/u)
+    assert.doesNotThrow(() => process.kill(owner.child.pid, 0))
+    assert.deepEqual(snapshotTree(stateRoot), before)
+    assert.equal(fs.existsSync(manifest.runLockLease.lockDirectory), true)
+    assert.equal(fs.existsSync(stackLeasePath(manifest.stackRoot, manifest.taskKey, manifest.runId)), true)
+    assert.equal(fs.readdirSync(path.join(stateRoot, 'semaphores', 'queue')).filter((entry) => entry.endsWith('.json')).length, 1)
+    for (const resource of manifest.resources.filter((entry) => entry.path)) assert.equal(fs.existsSync(resource.path), true)
+    owner.child.stdin.end('reconcile\n')
+    const terminal = await owner.exited
+    assert.deepEqual(terminal, { code: 0, signal: null, stderr: '' })
+    const cleanup = JSON.parse(fs.readFileSync(path.join(path.dirname(manifestPath), 'cleanup.json'), 'utf8'))
+    assert.equal(cleanup.result, 'RECONCILED')
+    assert.equal(fs.existsSync(manifest.runLockLease.lockDirectory), false)
+    assert.equal(fs.existsSync(stackLeasePath(manifest.stackRoot, manifest.taskKey, manifest.runId)), false)
+    assert.deepEqual(fs.readdirSync(path.join(stateRoot, 'semaphores', 'queue')), [])
+  } finally {
+    if (owner.child.exitCode === null && owner.child.signalCode === null) owner.child.kill('SIGKILL')
+  }
+})
+
+test('standalone reconciliation atomically claims and cleans one stale foreign Run', async () => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-runtime-stale-reconcile-'))
+  const owner = spawnRuntimeOwner(stateRoot, 'task_stale', 'run_stale', false)
+  const manifestPath = (await owner.ready).file
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+  const terminal = await owner.exited
+  assert.deepEqual(terminal, { code: 0, signal: null, stderr: '' })
+  assert.equal(fs.existsSync(manifest.runLockLease.lockDirectory), true)
+  const cleanup = reconcileRuntime({ manifestPath, cleanupResource: cleanupSimulatedResource })
+  assert.equal(cleanup.result, 'RECONCILED')
+  assert.equal(fs.existsSync(manifest.runLockLease.lockDirectory), false)
+  assert.equal(fs.existsSync(stackLeasePath(manifest.stackRoot, manifest.taskKey, manifest.runId)), false)
+  assert.deepEqual(fs.readdirSync(path.join(stateRoot, 'semaphores', 'queue')), [])
+  for (const resource of manifest.resources.filter((entry) => entry.path && entry.cleanup !== 'PRESERVE_SHARED')) assert.equal(fs.existsSync(resource.path), false)
 })
 
 test('pre-transaction lease publication failure removes its FIFO ticket and owner-only Run directory', async () => {

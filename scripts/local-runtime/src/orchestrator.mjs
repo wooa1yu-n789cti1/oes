@@ -1,7 +1,7 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { acquireExclusiveLease, acquireFifoSlot, releaseExclusiveLease, releaseFifoIdentity } from './locks.mjs'
+import { acquireExclusiveLease, acquireExclusiveLeaseSync, acquireFifoSlot, releaseExclusiveLease, releaseFifoIdentity } from './locks.mjs'
 import { fingerprint, readJson, redact, sha256, writeAtomic } from './canonical.mjs'
 import { loadRuntimeConfig } from './config.mjs'
 import { planRuntime } from './planner.mjs'
@@ -137,6 +137,42 @@ function removeIncompleteRunOwner(context) {
   fs.rmdirSync(expectedRunDirectory)
 }
 
+/** Reopens and validates the exact machine-global Run claim recorded by one Run source. */
+function reopenRunClaim(value) {
+  const lockDirectory = runClaimLockPath(value.stateRoot, value.stackKey, value.taskKey, value.runId)
+  const ownerPath = path.join(lockDirectory, 'owner.json')
+  if (!fs.existsSync(ownerPath)) return { lockDirectory, owner: null, live: false }
+  const owner = readJson(ownerPath)
+  const identity = { kind: 'RUN', stackKey: value.stackKey, devStackId: value.devStackId, taskKey: value.taskKey, runId: value.runId }
+  for (const [key, expected] of Object.entries(identity)) if (owner[key] !== expected) throw new Error(`RUNTIME_RUN_CLAIM_IDENTITY_MISMATCH key=${key}`)
+  if (!Number.isInteger(owner.pid) || owner.pid <= 0 || typeof owner.leaseId !== 'string') throw new Error('RUNTIME_RUN_CLAIM_OWNER_INVALID')
+  if (value.runLockLease) {
+    if (path.resolve(value.runLockLease.lockDirectory) !== path.resolve(lockDirectory)) throw new Error('RUNTIME_RUN_CLAIM_PATH_MISMATCH')
+    if (fingerprint(value.runLockLease.owner) !== fingerprint(owner)) throw new Error('RUNTIME_RUN_CLAIM_OWNER_MISMATCH')
+  }
+  let live = true
+  try { process.kill(owner.pid, 0) } catch (error) { if (error.code === 'ESRCH') live = false }
+  return { lockDirectory, owner, live }
+}
+
+/** Verifies an in-process Run claim or atomically acquires a dead/absent claim for standalone recovery. */
+function claimRunForReconciliation(value, releaseRunLock) {
+  const observed = reopenRunClaim(value)
+  if (releaseRunLock) {
+    if (!observed.owner || !observed.live || observed.owner.pid !== process.pid) throw new Error(`RUNTIME_RUN_CLAIM_NOT_OWNED taskKey=${value.taskKey} runId=${value.runId}`)
+    return { release: releaseRunLock }
+  }
+  if (observed.live) throw new Error(`RUNTIME_RUN_ACTIVE taskKey=${value.taskKey} runId=${value.runId}`)
+  return acquireExclusiveLeaseSync(observed.lockDirectory, { kind: 'RUN', stackKey: value.stackKey, devStackId: value.devStackId, taskKey: value.taskKey, runId: value.runId })
+}
+
+/** Requires a Run source reopened after claim acquisition to retain the same exact identity. */
+function assertReconciliationIdentity(initial, value) {
+  for (const key of ['stateRoot', 'stackRoot', 'stackKey', 'devStackId', 'taskKey', 'runId']) {
+    if (value[key] !== initial[key]) throw new Error(`RUNTIME_RECONCILE_IDENTITY_CHANGED key=${key}`)
+  }
+}
+
 /** Starts one exact runtime allocation and publishes Stack then Run authority only after readiness. */
 export async function startRuntime(intent, adapters = {}) {
   const root = path.resolve(intent.root)
@@ -251,33 +287,36 @@ export async function startRuntime(intent, adapters = {}) {
 export function reconcileRuntime({ manifestPath, transactionPath, cleanupResource, releaseSlot = () => {}, releaseRunLock, releaseDevLock }) {
   const source = manifestPath || transactionPath
   if (!source || !fs.existsSync(source)) throw new Error(`RUNTIME_RECONCILE_SOURCE_MISSING path=${source}`)
-  const value = manifestPath ? reopenManifest(manifestPath) : readJson(transactionPath)
-  const directory = path.dirname(source)
-  const context = { root: value.root, stateRoot: value.stateRoot, stackRoot: value.stackRoot, runDirectory: directory, profile: value.profile, pool: value.pool, taskKey: value.taskKey, runId: value.runId, stackKey: value.stackKey, devStackId: value.devStackId, identityKind: value.identityKind, jobFingerprint: value.jobFingerprint, jobIdentity: value.jobIdentity, owners: value.owners || value.plan.owners, capabilities: value.capabilities || value.plan.capabilities, providerOwners: value.providerOwners || value.plan.providerOwners }
-  const cleanup = cleanupResource || cleanupDockerResource
-  const cleanupResults = []
-  for (const resource of [...value.resources].reverse()) cleanupResults.push(cleanup(resource, context))
-  cleanupResults.push(cleanupResults.some((result) => result.exitStatus !== 0)
-    ? { resource: { kind: 'run-private-files', scope: 'RUN', runDirectory: directory }, disposition: 'PRESERVED_DEPENDENT_CLEANUP_FAILURE', exitStatus: 1 }
-    : cleanupRunPrivateFiles(context))
-  const failures = cleanupResults.filter((result) => result.exitStatus !== 0)
-  const leasePath = stackLeasePath(value.stackRoot, value.taskKey, value.runId)
-  if (fs.existsSync(leasePath)) removeStackLease(leasePath, { stackRoot: value.stackRoot, stackKey: value.stackKey, devStackId: value.devStackId, taskKey: value.taskKey, runId: value.runId })
-  releaseSlot()
-  releaseFifoIdentity(value.stateRoot, value.taskKey, value.runId)
-  if (releaseDevLock) releaseDevLock()
-  else if (value.devLockLease) releaseExclusiveLease(value.devLockLease)
-  if (releaseRunLock) releaseRunLock()
-  else if (value.runLockLease) releaseExclusiveLease(value.runLockLease)
-  const record = { schemaVersion: 3, kind: 'OES_RUNTIME_RUN_CLEANUP', stackKey: value.stackKey, taskKey: value.taskKey, runId: value.runId, sourceFingerprint: value.manifestFingerprint || fingerprint(value), cleanupResults: redact(cleanupResults), sharedLeaseCount: sharedLeaseCount(context), result: failures.length ? 'PRESERVED_WITH_FINDINGS' : 'RECONCILED' }
-  record.recordFingerprint = fingerprint(record)
-  writeAtomic(path.join(directory, 'cleanup.json'), record)
-  appendEvent(directory, { event: 'RUN_RECONCILED', result: record.result, sharedLeaseCount: record.sharedLeaseCount })
-  if (value.stackManifestReference) {
-    const stack = reopenStackManifest(value.stackManifestReference, { stackKey: value.stackKey, devStackId: value.devStackId })
-    publishStackState(context, stack.resources, stack.endpoints)
-  }
-  return record
+  const initial = manifestPath ? reopenManifest(manifestPath) : readJson(transactionPath)
+  const runClaim = claimRunForReconciliation(initial, releaseRunLock)
+  try {
+    const value = manifestPath ? reopenManifest(manifestPath) : readJson(transactionPath)
+    assertReconciliationIdentity(initial, value)
+    const directory = path.dirname(source)
+    const context = { root: value.root, stateRoot: value.stateRoot, stackRoot: value.stackRoot, runDirectory: directory, profile: value.profile, pool: value.pool, taskKey: value.taskKey, runId: value.runId, stackKey: value.stackKey, devStackId: value.devStackId, identityKind: value.identityKind, jobFingerprint: value.jobFingerprint, jobIdentity: value.jobIdentity, owners: value.owners || value.plan.owners, capabilities: value.capabilities || value.plan.capabilities, providerOwners: value.providerOwners || value.plan.providerOwners }
+    const cleanup = cleanupResource || cleanupDockerResource
+    const cleanupResults = []
+    for (const resource of [...value.resources].reverse()) cleanupResults.push(cleanup(resource, context))
+    cleanupResults.push(cleanupResults.some((result) => result.exitStatus !== 0)
+      ? { resource: { kind: 'run-private-files', scope: 'RUN', runDirectory: directory }, disposition: 'PRESERVED_DEPENDENT_CLEANUP_FAILURE', exitStatus: 1 }
+      : cleanupRunPrivateFiles(context))
+    const failures = cleanupResults.filter((result) => result.exitStatus !== 0)
+    const leasePath = stackLeasePath(value.stackRoot, value.taskKey, value.runId)
+    if (fs.existsSync(leasePath)) removeStackLease(leasePath, { stackRoot: value.stackRoot, stackKey: value.stackKey, devStackId: value.devStackId, taskKey: value.taskKey, runId: value.runId })
+    releaseSlot()
+    releaseFifoIdentity(value.stateRoot, value.taskKey, value.runId)
+    if (releaseDevLock) releaseDevLock()
+    else if (value.devLockLease) releaseExclusiveLease(value.devLockLease)
+    const record = { schemaVersion: 3, kind: 'OES_RUNTIME_RUN_CLEANUP', stackKey: value.stackKey, taskKey: value.taskKey, runId: value.runId, sourceFingerprint: value.manifestFingerprint || fingerprint(value), cleanupResults: redact(cleanupResults), sharedLeaseCount: sharedLeaseCount(context), result: failures.length ? 'PRESERVED_WITH_FINDINGS' : 'RECONCILED' }
+    record.recordFingerprint = fingerprint(record)
+    writeAtomic(path.join(directory, 'cleanup.json'), record)
+    appendEvent(directory, { event: 'RUN_RECONCILED', result: record.result, sharedLeaseCount: record.sharedLeaseCount })
+    if (value.stackManifestReference) {
+      const stack = reopenStackManifest(value.stackManifestReference, { stackKey: value.stackKey, devStackId: value.devStackId })
+      publishStackState(context, stack.resources, stack.endpoints)
+    }
+    return record
+  } finally { runClaim.release() }
 }
 
 /** Runs a callback against one Run manifest and always reconciles exact owned resources. */
