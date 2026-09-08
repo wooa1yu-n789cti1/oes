@@ -8,6 +8,35 @@ import { acquireMigrationBarrier, activeRuntimeAdmissions, assertNoSymlink, exac
 import { sharedResourceIdentity } from './stack-resource.mjs'
 import { runChecked } from './process.mjs'
 
+const DOCKER_DESKTOP_HOST_MOUNT_ROOT = '/host_mnt'
+
+/** Identifies Docker Desktop's Darwin-only host-mount source representation. */
+function isDockerDesktopHostMountSource(source, platform = process.platform) {
+  return platform === 'darwin' && typeof source === 'string' && (source === DOCKER_DESKTOP_HOST_MOUNT_ROOT || source.startsWith(`${DOCKER_DESKTOP_HOST_MOUNT_ROOT}/`))
+}
+
+/** Canonicalizes one Docker bind source to its exact host path without broadening Linux matching. */
+export function canonicalHostBindSource(source, { platform = process.platform, requireExisting = false } = {}) {
+  if (typeof source !== 'string' || source.length === 0) throw new Error(`STATE_MIGRATION_BIND_SOURCE_INVALID rawSource=${JSON.stringify(source)}`)
+  if (!isDockerDesktopHostMountSource(source, platform)) return path.resolve(source)
+  if (source === DOCKER_DESKTOP_HOST_MOUNT_ROOT || source === `${DOCKER_DESKTOP_HOST_MOUNT_ROOT}/`) throw new Error(`STATE_MIGRATION_BIND_SOURCE_UNMAPPABLE rawSource=${JSON.stringify(source)}`)
+  const hostSource = source.slice(DOCKER_DESKTOP_HOST_MOUNT_ROOT.length)
+  if (path.posix.resolve(source) !== source || !path.posix.isAbsolute(hostSource) || path.posix.resolve(hostSource) !== hostSource) throw new Error(`STATE_MIGRATION_BIND_SOURCE_AMBIGUOUS rawSource=${JSON.stringify(source)}`)
+  if (fs.existsSync(source)) throw new Error(`STATE_MIGRATION_BIND_SOURCE_AMBIGUOUS rawSource=${JSON.stringify(source)}`)
+  if (requireExisting && !fs.existsSync(hostSource)) throw new Error(`STATE_MIGRATION_BIND_SOURCE_UNMAPPABLE rawSource=${JSON.stringify(source)}`)
+  return hostSource
+}
+
+/** Returns the collision-free identity key for one canonical host bind and destination pair. */
+function hostBindKey(source, destination) {
+  return JSON.stringify([canonicalHostBindSource(source), destination])
+}
+
+/** Matches one observed Docker mount to an exact canonical host bind identity. */
+function hasExactHostBind(mounts, bind, sourceField = 'source') {
+  return (mounts || []).some((mount) => mount.Type === 'bind' && canonicalHostBindSource(mount.Source) === bind[sourceField] && mount.Destination === bind.destination)
+}
+
 /** Recursively inventories one state root without following symlinks. */
 function inventoryTree(root) {
   const entries = []
@@ -24,7 +53,7 @@ function inventoryTree(root) {
 }
 
 /** Captures read-only old-layout, lease, Run, bind, and provider identity evidence. */
-export function inventoryStateLayout({ stateRoot, dockerObjects = [] }) {
+export function inventoryStateLayout({ stateRoot, dockerObjects = [], hostPlatform = process.platform, requireBindSourceExisting = true }) {
   const root = path.resolve(stateRoot)
   if (!fs.existsSync(root)) throw new Error(`STATE_MIGRATION_SOURCE_MISSING path=${root}`)
   assertNoSymlink(root)
@@ -54,13 +83,19 @@ export function inventoryStateLayout({ stateRoot, dockerObjects = [] }) {
       name: String(object.name || object.Name || '').replace(/^\//u, ''),
       running: Boolean(object.running ?? object.State?.Running),
       labels: object.labels || object.Labels || object.Config?.Labels || {},
-      mounts: (object.mounts || object.Mounts || []).map((mount) => ({ Type: mount.Type, Source: mount.Source ? path.resolve(mount.Source) : undefined, Destination: mount.Destination, Name: mount.Name, RW: mount.RW })).sort((left, right) => `${left.Type}:${left.Source || left.Name}:${left.Destination}`.localeCompare(`${right.Type}:${right.Source || right.Name}:${right.Destination}`))
+      mounts: (object.mounts || object.Mounts || []).map((mount) => {
+        if (mount.Type !== 'bind') return { Type: mount.Type, Source: mount.Source ? path.resolve(mount.Source) : undefined, Destination: mount.Destination, Name: mount.Name, RW: mount.RW }
+        const rawSource = mount.Source
+        const sourceRepresentation = isDockerDesktopHostMountSource(rawSource, hostPlatform) ? 'DOCKER_DESKTOP_HOST_MNT' : 'HOST_PATH'
+        const source = canonicalHostBindSource(rawSource, { platform: hostPlatform, requireExisting: requireBindSourceExisting })
+        return { Type: mount.Type, Source: source, RawSource: rawSource, SourceRepresentation: sourceRepresentation, Destination: mount.Destination, Name: mount.Name, RW: mount.RW }
+      }).sort((left, right) => `${left.Type}:${left.Source || left.Name}:${left.Destination}`.localeCompare(`${right.Type}:${right.Source || right.Name}:${right.Destination}`))
     }
   }).sort((left, right) => `${left.type}:${left.objectId}`.localeCompare(`${right.type}:${right.objectId}`))
   const binds = []
   for (const object of normalizedDockerObjects) for (const mount of object.mounts) {
     if (mount.Type !== 'bind') continue
-    const source = path.resolve(mount.Source)
+    const source = canonicalHostBindSource(mount.Source, { platform: hostPlatform })
     if (source === root || source.startsWith(`${root}${path.sep}`)) binds.push({ objectId: object.objectId, name: object.name, running: object.running, source, destination: mount.Destination })
   }
   const semaphoreFiles = entries.filter((entry) => entry.type === 'FILE' && /^semaphore\//u.test(entry.path)).map((entry) => entry.path)
@@ -582,7 +617,7 @@ function observeDockerContainers() {
 /** Recomputes quiescence while optionally discounting only sealed replacement-provider binds. */
 function observeLiveQuiescence(journal, roots = [journal.oldRoot], allowedRunningObjectIds = []) {
   const dockerObjects = observeDockerContainers()
-  const inventories = roots.filter((root) => fs.existsSync(root)).map((stateRoot) => inventoryStateLayout({ stateRoot, dockerObjects }))
+  const inventories = roots.filter((root) => fs.existsSync(root)).map((stateRoot) => inventoryStateLayout({ stateRoot, dockerObjects, requireBindSourceExisting: false }))
   const allowed = new Set(allowedRunningObjectIds)
   return {
     activeRunCount: inventories.reduce((count, inventory) => count + inventory.activeRunFiles.length, 0),
@@ -610,10 +645,15 @@ function replacementContainerArgs(observed, binds, journal, name) {
   for (const value of observed.Config.Env || []) args.push('--env', value)
   if (observed.Config.User) args.push('--user', observed.Config.User)
   if (observed.Config.WorkingDir) args.push('--workdir', observed.Config.WorkingDir)
-  const bindingMap = new Map(binds.map((bind) => [`${path.resolve(bind.source)}:${bind.destination}`, bind.nextSource]))
+  const bindingMap = new Map()
+  for (const bind of binds) {
+    const key = hostBindKey(bind.source, bind.destination)
+    if (bindingMap.has(key)) throw new Error(`STATE_MIGRATION_BIND_IDENTITY_DUPLICATE source=${bind.source} destination=${bind.destination}`)
+    bindingMap.set(key, bind.nextSource)
+  }
   for (const mount of observed.Mounts || []) {
     if (mount.Type === 'bind') {
-      const source = bindingMap.get(`${path.resolve(mount.Source)}:${mount.Destination}`) || mount.Source
+      const source = bindingMap.get(hostBindKey(mount.Source, mount.Destination)) || mount.Source
       args.push('--mount', `type=bind,src=${source},dst=${mount.Destination}${mount.RW === false ? ',readonly' : ''}`)
     } else if (mount.Type === 'volume') args.push('--mount', `type=volume,src=${mount.Name},dst=${mount.Destination}${mount.RW === false ? ',readonly' : ''}`)
     else if (mount.Type === 'tmpfs') args.push('--tmpfs', mount.Destination)
@@ -632,6 +672,21 @@ function replacementContainerArgs(observed, binds, journal, name) {
   if (observed.Config.Entrypoint?.length) args.push('--entrypoint', observed.Config.Entrypoint[0])
   args.push(observed.Config.Image, ...(observed.Config.Entrypoint?.slice(1) || []), ...(observed.Config.Cmd || []))
   return { args, labels, networks }
+}
+
+/** Retries only Docker Desktop's transient visibility error for one exact host-existing replacement bind. */
+function createReplacementContainer(args, binds) {
+  const attempts = process.platform === 'darwin' ? 21 : 1
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try { return { objectId: runChecked('docker', args, { timeout: 120000 }).stdout.trim(), visibilityRetries: attempt } } catch (error) {
+      const missing = String(error.stderr || '').match(/invalid mount config for type "bind": bind source path does not exist:\s+([^\r\n]+)/u)?.[1]
+      const canonical = missing ? canonicalHostBindSource(missing) : null
+      const expected = new Set(binds.map((bind) => path.resolve(bind.source)))
+      if (process.platform !== 'darwin' || attempt === attempts - 1 || !canonical || !expected.has(canonical) || !fs.existsSync(canonical)) throw error
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250)
+    }
+  }
+  throw new Error('STATE_MIGRATION_REPLACEMENT_CREATE_RETRY_EXHAUSTED')
 }
 
 /** Produces the frozen canonical name for one necessarily replaced shared provider. */
@@ -662,7 +717,7 @@ const dockerProviderLifecycle = {
     const results = []
     for (const [oldObjectId, objectBinds] of byObject) {
       const before = inspectDockerContainer(oldObjectId)
-      if (before.Id !== oldObjectId || before.State.Running || objectBinds.some((bind) => !(before.Mounts || []).some((mount) => mount.Type === 'bind' && path.resolve(mount.Source) === bind.source && mount.Destination === bind.destination))) throw new Error(`STATE_MIGRATION_BIND_OBJECT_MISMATCH objectId=${oldObjectId}`)
+      if (before.Id !== oldObjectId || before.State.Running || objectBinds.some((bind) => !hasExactHostBind(before.Mounts, bind))) throw new Error(`STATE_MIGRATION_BIND_OBJECT_MISMATCH objectId=${oldObjectId}`)
       const oldName = String(before.Name).replace(/^\//u, '')
       const canonical = canonicalReplacementName(before, objectBinds, journal)
       const backupName = `oes-v2-retained-${sha256(`${oldObjectId}:${journal.operationId}`).slice(0, 24)}`
@@ -676,7 +731,9 @@ const dockerProviderLifecycle = {
       onProgress([...results])
       const before = inspectDockerContainer(record.oldObjectId)
       const replacement = replacementContainerArgs(before, record.binds.map((bind) => ({ source: bind.oldSource, nextSource: bind.source, destination: bind.destination })), journal, record.newName)
-      record.newObjectId = runChecked('docker', replacement.args, { timeout: 120000 }).stdout.trim()
+      const createdIdentity = createReplacementContainer(replacement.args, record.binds)
+      record.newObjectId = createdIdentity.objectId
+      record.dockerDesktopVisibilityRetries = createdIdentity.visibilityRetries
       record.stage = 'NEW_CREATED'
       onProgress([...results])
       for (const attachment of replacement.networks.slice(1)) {
@@ -684,7 +741,7 @@ const dockerProviderLifecycle = {
         runChecked('docker', args, { timeout: 20000 })
       }
       const created = inspectDockerContainer(record.newObjectId)
-      if (created.Id !== record.newObjectId || created.Config.Labels?.['oes.runtime.stack-key'] !== journal.stackKey || record.binds.some((bind) => !(created.Mounts || []).some((mount) => mount.Type === 'bind' && path.resolve(mount.Source) === bind.source && mount.Destination === bind.destination))) throw new Error(`STATE_MIGRATION_REPLACEMENT_IDENTITY_MISMATCH objectId=${record.newObjectId}`)
+      if (created.Id !== record.newObjectId || created.Config.Labels?.['oes.runtime.stack-key'] !== journal.stackKey || record.binds.some((bind) => !hasExactHostBind(created.Mounts, bind))) throw new Error(`STATE_MIGRATION_REPLACEMENT_IDENTITY_MISMATCH objectId=${record.newObjectId}`)
       runChecked('docker', ['start', record.newObjectId], { timeout: 120000 })
       if (!inspectDockerContainer(record.newObjectId).State.Running) throw new Error(`STATE_MIGRATION_BIND_PROVIDER_NOT_RUNNING objectId=${record.newObjectId}`)
       record.stage = 'NEW_RUNNING'
@@ -701,7 +758,7 @@ const dockerProviderLifecycle = {
         if (byName && byName.Id !== record.oldObjectId) replacement = byName
       }
       if (replacement) {
-        if (replacement.Config.Labels?.['oes.runtime.stack-key'] !== record.labels['oes.runtime.stack-key'] || record.binds.some((bind) => !(replacement.Mounts || []).some((mount) => mount.Type === 'bind' && path.resolve(mount.Source) === bind.source && mount.Destination === bind.destination))) throw new Error(`STATE_MIGRATION_PROVIDER_IDENTITY_MISMATCH objectId=${replacement.Id}`)
+        if (replacement.Config.Labels?.['oes.runtime.stack-key'] !== record.labels['oes.runtime.stack-key'] || record.binds.some((bind) => !hasExactHostBind(replacement.Mounts, bind))) throw new Error(`STATE_MIGRATION_PROVIDER_IDENTITY_MISMATCH objectId=${replacement.Id}`)
         runChecked('docker', ['rm', '--force', replacement.Id], { timeout: 60000 })
       }
       const original = inspectDockerContainer(record.oldObjectId)
@@ -713,6 +770,7 @@ const dockerProviderLifecycle = {
   restart(records) {
     for (const record of records || []) {
       const original = inspectDockerContainer(record.oldObjectId)
+      if (record.binds.some((bind) => !hasExactHostBind(original.Mounts, bind, 'oldSource'))) throw new Error(`STATE_MIGRATION_ORIGINAL_BIND_MISMATCH objectId=${record.oldObjectId}`)
       if (!original.State.Running) runChecked('docker', ['start', record.oldObjectId], { timeout: 120000 })
       if (!inspectDockerContainer(record.oldObjectId).State.Running) throw new Error(`STATE_MIGRATION_ORIGINAL_RESTART_FAILED objectId=${record.oldObjectId}`)
     }
@@ -791,7 +849,7 @@ function verifyActivatedProviderMappings(journal, stackManifest) {
     if (!record.oldObjectId || !record.newObjectId || !record.oldName || !record.newName || !record.backupName) throw new Error('STATE_MIGRATION_PROVIDER_MAPPING_INCOMPLETE')
     const replacement = inspectDockerContainer(record.newObjectId)
     if (replacement.Id !== record.newObjectId || String(replacement.Name).replace(/^\//u, '') !== record.newName || !replacement.State.Running) throw new Error(`STATE_MIGRATION_REPLACEMENT_IDENTITY_MISMATCH objectId=${record.newObjectId}`)
-    if (Object.entries(record.labels || {}).some(([key, expected]) => replacement.Config.Labels?.[key] !== expected) || record.binds.some((bind) => !(replacement.Mounts || []).some((mount) => mount.Type === 'bind' && path.resolve(mount.Source) === bind.source && mount.Destination === bind.destination))) throw new Error(`STATE_MIGRATION_REPLACEMENT_MAPPING_MISMATCH objectId=${record.newObjectId}`)
+    if (Object.entries(record.labels || {}).some(([key, expected]) => replacement.Config.Labels?.[key] !== expected) || record.binds.some((bind) => !hasExactHostBind(replacement.Mounts, bind))) throw new Error(`STATE_MIGRATION_REPLACEMENT_MAPPING_MISMATCH objectId=${record.newObjectId}`)
     const retained = inspectDockerContainer(record.oldObjectId)
     if (retained.Id !== record.oldObjectId || String(retained.Name).replace(/^\//u, '') !== record.backupName || retained.State.Running) throw new Error(`STATE_MIGRATION_RETAINED_PROVIDER_MISMATCH objectId=${record.oldObjectId}`)
     const identityPath = path.join(journal.oldRoot, 'stacks', journal.stackKey, 'providers', record.pool, record.provider, 'identity.json')
