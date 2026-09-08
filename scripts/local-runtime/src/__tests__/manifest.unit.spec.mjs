@@ -4,8 +4,10 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import test from 'node:test'
+import { fingerprint, writeAtomic } from '../canonical.mjs'
 import { writeCredentialBundle, resolveCredentialReference } from '../credentials.mjs'
-import { environmentForOwner, publishManifest, publishStackManifest, reopenManifest } from '../manifest.mjs'
+import { environmentForOwner, publishManifest, publishStackManifest, reopenCurrentStackManifest, reopenManifest } from '../manifest.mjs'
+import { publishStackState } from '../orchestrator.mjs'
 
 test('manifest publication is readiness-gated, atomic and value-free', () => {
   const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-runtime-manifest-'))
@@ -43,4 +45,45 @@ test('concurrent Stack publishers allocate distinct immutable generations', asyn
   assert.equal(new Set(generations).size, 8)
   assert.deepEqual(generations.sort(), Array.from({ length: 8 }, (_, index) => String(index + 1).padStart(12, '0')))
   for (const generation of generations) assert.equal(fs.existsSync(path.join(stackRoot, 'manifests', `${generation}.json`)), true)
+})
+
+test('concurrent Stack state updates preserve both semantic additions and the complete active lease set', async () => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-runtime-stack-update-concurrent-'))
+  const stackKey = 'oes-local-0123456789abcdef'
+  const stackRoot = path.join(stateRoot, 'stacks', stackKey)
+  publishStackManifest(stackRoot, { lifecycle: 'REGISTERED', stackKey, devStackId: 'machine_a', identityKind: 'LOCAL', pools: ['dev'], resources: [], endpoints: [], leases: [], evidenceReferences: [] })
+  for (const side of ['a', 'b']) {
+    const raw = { schemaVersion: 3, kind: 'OES_RUNTIME_STACK_LEASE', stackKey, devStackId: 'machine_a', taskKey: `task_${side}`, runId: `run_${side}` }
+    writeAtomic(path.join(stackRoot, 'leases', `task_${side}--run_${side}.json`), { ...raw, leaseFingerprint: fingerprint(raw) })
+  }
+  const moduleUrl = new URL('../orchestrator.mjs', import.meta.url).href
+  const run = (side, provider) => new Promise((resolve, reject) => {
+    const context = { stackRoot, stackKey, devStackId: 'machine_a', identityKind: 'LOCAL', profile: 'DEV', pool: 'dev' }
+    const resource = provider === 'postgres'
+      ? { provider, pool: 'dev', scope: 'SHARED', kind: 'database', database: `db_${side}`, objectId: `object_${side}` }
+      : { provider, pool: 'dev', scope: 'SHARED', kind: 'bucket', bucket: `bucket_${side}`, objectId: `object_${side}` }
+    const endpoint = { provider, pool: 'dev', ready: true, authority: `fixture:${side}`, owners: [], environment: {} }
+    const script = `import { publishStackState } from ${JSON.stringify(moduleUrl)}; const result = publishStackState(${JSON.stringify(context)}, [${JSON.stringify(resource)}], [${JSON.stringify(endpoint)}]); process.stdout.write(result.manifest.generation)`
+    const child = spawn(process.execPath, ['--input-type=module', '--eval', script], { stdio: ['ignore', 'pipe', 'pipe'] })
+    let stdout = '', stderr = ''
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+    child.on('error', reject)
+    child.on('close', (code) => code === 0 ? resolve(stdout) : reject(new Error(`publisher exit=${code} stderr=${stderr}`)))
+  })
+  const generations = await Promise.all([run('a', 'postgres'), run('b', 'minio')])
+  assert.equal(new Set(generations).size, 2)
+  const current = reopenCurrentStackManifest(stackRoot).manifest
+  assert.deepEqual(current.resources.map((resource) => resource.objectId).sort(), ['object_a', 'object_b'])
+  assert.deepEqual(current.endpoints.map((endpoint) => endpoint.provider).sort(), ['minio', 'postgres'])
+  assert.deepEqual(current.leases.map((lease) => lease.lifecycle), ['ACTIVE', 'ACTIVE'])
+})
+
+test('Stack publication rejects a corrupted active lease instead of referencing it', () => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-runtime-stack-lease-invalid-'))
+  const stackKey = 'oes-local-0123456789abcdef'
+  const stackRoot = path.join(stateRoot, 'stacks', stackKey)
+  const lease = { schemaVersion: 3, kind: 'OES_RUNTIME_STACK_LEASE', stackKey, devStackId: 'machine_a', taskKey: 'task_a', runId: 'run_a', leaseFingerprint: 'corrupt' }
+  writeAtomic(path.join(stackRoot, 'leases', 'task_a--run_a.json'), lease)
+  assert.throws(() => publishStackState({ stackRoot, stackKey, devStackId: 'machine_a', identityKind: 'LOCAL', profile: 'DEV', pool: 'dev' }), /STACK_LEASE_INVALID/)
 })

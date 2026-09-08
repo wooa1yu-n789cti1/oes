@@ -5,12 +5,13 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { resolveCredentialReference } from './credentials.mjs'
 import { cleanProcessEnvironment } from './bootstrap.mjs'
-import { environmentForOwner, publishManifest } from './manifest.mjs'
-import { cleanupDockerResource, exactResourceToken } from './docker-driver.mjs'
+import { environmentForOwner, publishManifest, reopenManifest } from './manifest.mjs'
+import { cleanupDockerResource, exactResourceToken, runtimeLabels } from './docker-driver.mjs'
 import { canonicalJson, sha256, writeAtomic } from './canonical.mjs'
 import { runChecked } from './process.mjs'
 import { trustedProcessEnvironment } from './trusted-runtime-config.mjs'
 import { withExclusiveLock } from './locks.mjs'
+import { publishStackState } from './orchestrator.mjs'
 
 /** Reserves one OS-assigned loopback port until the caller explicitly hands it to a child. */
 export async function reservePort() {
@@ -120,21 +121,20 @@ export function signerWorkDirectory(manifest) {
 /** Builds and starts one isolated run-owned protected signer, returning only reference metadata. */
 export async function startProtectedSigner(root, manifest, signal) {
   const sourceHash = signerSourceHash(root)
-  const image = `oes-local-execution-signer:${sourceHash.slice(0, 16)}`
-  try { runChecked('docker', ['image', 'inspect', image], { timeout: 20000 }) } catch {
-    runChecked('docker', ['build', '--tag', image, '--file', path.join(root, 'docker/grpc-trust/execution-token-signer/local/softhsm2/Dockerfile'), path.join(root, 'docker/grpc-trust/execution-token-signer')], { timeout: 900000 })
+  const provider = 'execution-token-signer'
+  const imageLabels = runtimeLabels(manifest, 'SHARED', provider)
+  const image = `oes-v2-${exactResourceToken(manifest.stackKey, 32)}-execution-signer:${sourceHash.slice(0, 16)}`
+  let observedImage
+  try { observedImage = JSON.parse(runChecked('docker', ['image', 'inspect', image], { timeout: 20000 }).stdout)[0] } catch { /* Build the exact Stack cache below. */ }
+  if (!observedImage) {
+    runChecked('docker', ['build', '--tag', image, ...Object.entries(imageLabels).flatMap(([key, value]) => ['--label', `${key}=${value}`]), '--file', path.join(root, 'docker/grpc-trust/execution-token-signer/local/softhsm2/Dockerfile'), path.join(root, 'docker/grpc-trust/execution-token-signer')], { timeout: 900000 })
+    observedImage = JSON.parse(runChecked('docker', ['image', 'inspect', image], { timeout: 20000 }).stdout)[0]
   }
+  if (Object.entries(imageLabels).some(([key, value]) => observedImage.Config?.Labels?.[key] !== value)) throw new Error(`SIGNER_IMAGE_LABEL_MISMATCH image=${image}`)
   const work = signerWorkDirectory(manifest)
   if (fs.existsSync(work)) throw new Error(`SIGNER_WORK_DIRECTORY_EXISTS path=${work}`)
   fs.mkdirSync(work, { recursive: true, mode: 0o700 })
-  const labels = {
-    'oes.runtime.version': '2',
-    'oes.runtime.dev-stack-id': manifest.devStackId,
-    'oes.runtime.scope': 'RUN',
-    'oes.runtime.provider': 'execution-token-signer',
-    'oes.runtime.task-key': manifest.taskKey,
-    'oes.runtime.run-id': manifest.runId
-  }
+  const labels = runtimeLabels(manifest, 'RUN', provider)
   const marker = path.join(work, '.oes-runtime-resource.json')
   writeAtomic(marker, { schemaVersion: 2, path: work, labels })
   const directoryResource = { provider: 'execution-token-signer', scope: 'RUN', kind: 'directory', path: work, marker, objectId: sha256(fs.readFileSync(marker)), labels, cleanup: 'DELETE_DIRECTORY_EXACT' }
@@ -160,8 +160,9 @@ export async function startProtectedSigner(root, manifest, signal) {
       image
     ], { timeout: 180000 })
     const observed = JSON.parse(runChecked('docker', ['inspect', '--type', 'container', name], { timeout: 20000 }).stdout)[0]
-    const imageResource = { provider: 'execution-token-signer', scope: 'SHARED', kind: 'image', name: image, objectId: observed.Image, sourceHash, cleanup: 'PRESERVE_SHARED' }
-    const containerResource = { provider: 'execution-token-signer', scope: 'RUN', kind: 'container', name, objectId: observed.Id, labels, volume: null, cleanup: 'DELETE_EXACT', sourceHash, imageId: observed.Image }
+    if (observed.Image !== observedImage.Id) throw new Error(`SIGNER_IMAGE_IDENTITY_MISMATCH image=${image}`)
+    const imageResource = { provider, pool: manifest.pool, scope: 'SHARED', kind: 'image', name: image, objectId: observedImage.Id, labels: imageLabels, sourceHash, cleanup: 'PRESERVE_SHARED' }
+    const containerResource = { provider, pool: manifest.pool, scope: 'RUN', kind: 'container', name, objectId: observed.Id, labels, volume: null, cleanup: 'DELETE_EXACT', sourceHash, imageId: observedImage.Id }
     const started = Date.now()
     while (Date.now() - started < 180000) {
       if (signal?.aborted) throw signal.reason
@@ -187,6 +188,17 @@ export async function startProtectedSigner(root, manifest, signal) {
   }
 }
 
+/** Publishes signer cache through Stack authority and retains only Run-owned signer truth in the Run. */
+export function publishDevelopmentProcessManifest(manifestPath, { signer = null, issuerEndpoints = [], processEndpoints = [] } = {}) {
+  const manifest = reopenManifest(manifestPath)
+  const sharedSignerResources = (signer?.resources || []).filter((resource) => resource.scope === 'SHARED')
+  const stackManifestReference = sharedSignerResources.length ? publishStackState(manifest, sharedSignerResources).reference : manifest.stackManifestReference
+  const runSignerResources = (signer?.resources || []).filter((resource) => resource.scope !== 'SHARED')
+  const raw = { ...manifest, lifecycle: 'REGISTERED', resources: [...manifest.resources, ...runSignerResources], endpoints: [...manifest.endpoints, ...(signer ? [signer.endpoint] : []), ...issuerEndpoints, ...processEndpoints], stackManifestReference }
+  delete raw.manifestFingerprint
+  return publishManifest(path.dirname(manifestPath), raw)
+}
+
 /** Verifies a directory marker before recursively deleting a run-owned signer work root. */
 export function cleanupRuntimeDirectory(resource) {
   const bytes = fs.readFileSync(resource.marker)
@@ -199,7 +211,7 @@ export function cleanupRuntimeDirectory(resource) {
 
 /** Starts selected host-process business services and republishes their ready endpoints atomically. */
 export async function startDevelopmentProcesses(manifestPath, { root, selectorPath, signal } = {}) {
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+  const manifest = reopenManifest(manifestPath)
   if (manifest.profile !== 'DEV') throw new Error('DEVELOPMENT_PROCESS_PROFILE_REQUIRED')
   const declarations = JSON.parse(fs.readFileSync(path.join(root, 'scripts/local-runtime/relationships.json'), 'utf8'))
   const children = []
@@ -266,9 +278,7 @@ export async function startDevelopmentProcesses(manifestPath, { root, selectorPa
     children.push(...started.attemptChildren)
     const processEndpoints = started.attemptChildren.filter(({ kind }) => kind === 'service').map(({ owner, port, child }) => ({ provider: 'host-process', authority: `pid:${child.pid}:tcp:${port}`, host: `${owner}.localhost`, port, ready: true, owners: manifest.owners.filter((candidate) => candidate === owner || declarations.owners[candidate].downstreams?.includes(owner)), environment: endpointEnvironment(owner, port), credentialReference: null }))
     const issuerEndpoints = started.authHttpPort ? [{ provider: 'host-issuer', authority: `pid:${started.attemptChildren.find(({ owner }) => owner === 'local-issuer').child.pid}:https:${started.issuerPort}`, host: 'issuer.local.oes.internal', port: started.issuerPort, ready: true, owners: manifest.owners, environment: { AUTH_EXECUTION_ISSUER: `https://issuer.local.oes.internal:${started.issuerPort}` }, credentialReference: null }] : []
-    const raw = { ...manifest, lifecycle: 'REGISTERED', resources: [...manifest.resources, ...(signer?.resources || [])], endpoints: [...manifest.endpoints, ...(signer ? [signer.endpoint] : []), ...issuerEndpoints, ...processEndpoints] }
-    delete raw.manifestFingerprint
-    const published = publishManifest(path.dirname(manifestPath), raw)
+    const published = publishDevelopmentProcessManifest(manifestPath, { signer, issuerEndpoints, processEndpoints })
     return { children, manifest: published.manifest, manifestPath: published.file }
   } catch (error) {
     await stopDevelopmentProcesses(children)

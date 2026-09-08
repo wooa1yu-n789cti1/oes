@@ -23,33 +23,45 @@ export function artifactReference(file, value, type) {
   return { type, ...(type === 'OES_RUNTIME_STACK_MANIFEST' ? { generation: value.generation } : {}), path: absolute, sha256: sha256(fs.readFileSync(absolute)), fingerprint: value.manifestFingerprint || value.stackManifestFingerprint || value.leaseFingerprint || value.recordFingerprint || fingerprint(value) }
 }
 
-/** Publishes one immutable Stack generation and atomically advances its reference-only pointer. */
+/** Publishes one already-serialized immutable Stack generation and advances its pointer. */
+function publishStackManifestLocked(stackRoot, draft) {
+  const canonicalStackRoot = path.resolve(stackRoot)
+  const stateRoot = path.dirname(path.dirname(canonicalStackRoot))
+  assertNoSymlink(stateRoot, canonicalStackRoot)
+  if (path.basename(canonicalStackRoot) !== draft.stackKey) throw new Error('STACK_MANIFEST_DIRECTORY_MISMATCH')
+  if (draft.lifecycle !== 'REGISTERED') throw new Error(`STACK_MANIFEST_NOT_READY lifecycle=${draft.lifecycle}`)
+  for (const resource of draft.resources || []) if (resource.scope !== 'SHARED') throw new Error(`STACK_MANIFEST_SCOPE_INVALID scope=${resource.scope}`)
+  for (const endpoint of draft.endpoints || []) if (!endpoint.ready || !endpoint.authority) throw new Error(`STACK_MANIFEST_ENDPOINT_UNREADY provider=${endpoint.provider}`)
+  const manifestsRoot = path.join(stackRoot, 'manifests')
+  fs.mkdirSync(manifestsRoot, { recursive: true, mode: 0o700 })
+  const generations = fs.readdirSync(manifestsRoot).map((name) => name.match(/^(\d+)\.json$/u)?.[1]).filter(Boolean).map(Number)
+  const generation = String((generations.length ? Math.max(...generations) : 0) + 1).padStart(12, '0')
+  const raw = { ...draft, schemaVersion: 3, kind: 'OES_RUNTIME_STACK_MANIFEST', generation }
+  const manifest = { ...raw, stackManifestFingerprint: fingerprint(raw) }
+  const file = path.join(manifestsRoot, `${generation}.json`)
+  if (fs.existsSync(file)) throw new Error(`STACK_MANIFEST_GENERATION_EXISTS generation=${generation}`)
+  writeAtomic(file, manifest)
+  fsyncDirectory(manifestsRoot)
+  const reference = artifactReference(file, manifest, 'OES_RUNTIME_STACK_MANIFEST')
+  const pointerRaw = { schemaVersion: 3, kind: 'OES_RUNTIME_STACK_MANIFEST_POINTER', generation, ...reference }
+  writeAtomic(path.join(stackRoot, 'current-manifest.json'), { ...pointerRaw, pointerFingerprint: fingerprint(pointerRaw) })
+  fsyncDirectory(canonicalStackRoot)
+  const reopened = reopenCurrentStackManifest(canonicalStackRoot)
+  if (reopened.pointer.generation !== reference.generation || reopened.pointer.sha256 !== reference.sha256 || reopened.pointer.fingerprint !== reference.fingerprint) throw new Error('STACK_MANIFEST_PUBLICATION_REOPEN_MISMATCH')
+  return { file, manifest, reference }
+}
+
+/** Publishes one complete Stack draft while serializing its immutable generation allocation. */
 export function publishStackManifest(stackRoot, draft) {
+  return withStackPublicationLock(stackRoot, () => publishStackManifestLocked(stackRoot, draft))
+}
+
+/** Reopens, mutates, and publishes current Stack truth inside one serializable lock boundary. */
+export function updateStackManifest(stackRoot, update) {
   return withStackPublicationLock(stackRoot, () => {
-    const canonicalStackRoot = path.resolve(stackRoot)
-    const stateRoot = path.dirname(path.dirname(canonicalStackRoot))
-    assertNoSymlink(stateRoot, canonicalStackRoot)
-    if (path.basename(canonicalStackRoot) !== draft.stackKey) throw new Error('STACK_MANIFEST_DIRECTORY_MISMATCH')
-    if (draft.lifecycle !== 'REGISTERED') throw new Error(`STACK_MANIFEST_NOT_READY lifecycle=${draft.lifecycle}`)
-    for (const resource of draft.resources || []) if (resource.scope !== 'SHARED') throw new Error(`STACK_MANIFEST_SCOPE_INVALID scope=${resource.scope}`)
-    for (const endpoint of draft.endpoints || []) if (!endpoint.ready || !endpoint.authority) throw new Error(`STACK_MANIFEST_ENDPOINT_UNREADY provider=${endpoint.provider}`)
-    const manifestsRoot = path.join(stackRoot, 'manifests')
-    fs.mkdirSync(manifestsRoot, { recursive: true, mode: 0o700 })
-    const generations = fs.readdirSync(manifestsRoot).map((name) => name.match(/^(\d+)\.json$/u)?.[1]).filter(Boolean).map(Number)
-    const generation = String((generations.length ? Math.max(...generations) : 0) + 1).padStart(12, '0')
-    const raw = { ...draft, schemaVersion: 3, kind: 'OES_RUNTIME_STACK_MANIFEST', generation }
-    const manifest = { ...raw, stackManifestFingerprint: fingerprint(raw) }
-    const file = path.join(manifestsRoot, `${generation}.json`)
-    if (fs.existsSync(file)) throw new Error(`STACK_MANIFEST_GENERATION_EXISTS generation=${generation}`)
-    writeAtomic(file, manifest)
-    fsyncDirectory(manifestsRoot)
-    const reference = artifactReference(file, manifest, 'OES_RUNTIME_STACK_MANIFEST')
-    const pointerRaw = { schemaVersion: 3, kind: 'OES_RUNTIME_STACK_MANIFEST_POINTER', generation, ...reference }
-    writeAtomic(path.join(stackRoot, 'current-manifest.json'), { ...pointerRaw, pointerFingerprint: fingerprint(pointerRaw) })
-    fsyncDirectory(canonicalStackRoot)
-    const reopened = reopenCurrentStackManifest(canonicalStackRoot)
-    if (reopened.pointer.generation !== reference.generation || reopened.pointer.sha256 !== reference.sha256 || reopened.pointer.fingerprint !== reference.fingerprint) throw new Error('STACK_MANIFEST_PUBLICATION_REOPEN_MISMATCH')
-    return { file, manifest, reference }
+    const pointer = path.join(stackRoot, 'current-manifest.json')
+    const previous = fs.existsSync(pointer) ? reopenCurrentStackManifest(stackRoot).manifest : null
+    return publishStackManifestLocked(stackRoot, update(previous))
   })
 }
 

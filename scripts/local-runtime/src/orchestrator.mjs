@@ -5,7 +5,7 @@ import { acquireExclusiveLease, acquireFifoSlot, releaseExclusiveLease, releaseF
 import { fingerprint, readJson, redact, sha256, writeAtomic } from './canonical.mjs'
 import { loadRuntimeConfig } from './config.mjs'
 import { planRuntime } from './planner.mjs'
-import { artifactReference, publishManifest, publishStackManifest, reopenCurrentStackManifest, reopenManifest, reopenStackManifest, runDirectory } from './manifest.mjs'
+import { artifactReference, publishManifest, reopenManifest, reopenStackManifest, runDirectory, updateStackManifest } from './manifest.mjs'
 import { acquireRuntimeAdmission, resolveRuntimeLayout } from './state-layout.mjs'
 import { cleanupDockerResource, provisionDockerProvider } from './docker-driver.mjs'
 import { cleanupSimulatedResource, provisionSimulatedProvider } from './simulation-driver.mjs'
@@ -33,6 +33,7 @@ function activeLeaseReferences(stackRoot) {
   return fs.readdirSync(leasesRoot).filter((entry) => entry.endsWith('.json')).sort().map((entry) => {
     const file = path.join(leasesRoot, entry)
     const value = readJson(file)
+    if (value.schemaVersion !== 3 || value.kind !== 'OES_RUNTIME_STACK_LEASE' || value.stackKey !== path.basename(stackRoot) || value.leaseFingerprint !== fingerprint(value, 'leaseFingerprint')) throw new Error(`STACK_LEASE_INVALID path=${file}`)
     return { ...artifactReference(file, value, 'OES_RUNTIME_STACK_LEASE'), lifecycle: 'ACTIVE' }
   })
 }
@@ -48,30 +49,31 @@ function mergedSharedResources(previous, additions) {
   return [...output.values()]
 }
 
-/** Publishes a new Stack generation from exact shared resources and active lease references. */
-function publishStackState(context, resources = [], endpoints = []) {
-  let previous = { resources: [], endpoints: [] }
-  if (fs.existsSync(path.join(context.stackRoot, 'current-manifest.json'))) previous = reopenCurrentStackManifest(context.stackRoot).manifest
-  const mergedResources = mergedSharedResources(previous.resources || [], resources.filter((resource) => resource.scope === 'SHARED'))
-  const endpointMap = new Map((previous.endpoints || []).map((endpoint) => [`${endpoint.pool || context.pool}:${endpoint.provider}`, endpoint]))
-  for (const endpoint of endpoints) {
-    const hasShared = resources.some((resource) => resource.provider === endpoint.provider && resource.scope === 'SHARED' && (resource.pool || context.pool) === (endpoint.pool || context.pool))
-    if (!hasShared) continue
-    const sharedEndpoint = { ...endpoint }
-    if (context.profile !== 'DEV') delete sharedEndpoint.credentialReference
-    endpointMap.set(`${endpoint.pool || context.pool}:${endpoint.provider}`, sharedEndpoint)
-  }
-  return publishStackManifest(context.stackRoot, {
-    lifecycle: 'REGISTERED',
-    stackKey: context.stackKey,
-    devStackId: context.devStackId,
-    identityKind: context.identityKind,
-    pools: [...new Set(mergedResources.map((resource) => resource.pool || resource.labels?.['oes.runtime.pool']).filter(Boolean).concat(context.pool))].sort(),
-    jobFingerprint: context.jobFingerprint,
-    resources: mergedResources,
-    endpoints: [...endpointMap.values()],
-    leases: activeLeaseReferences(context.stackRoot),
-    evidenceReferences: []
+/** Reopens, merges, and publishes shared Stack truth in one serializable transaction. */
+export function publishStackState(context, resources = [], endpoints = []) {
+  return updateStackManifest(context.stackRoot, (current) => {
+    const previous = current || { resources: [], endpoints: [] }
+    const mergedResources = mergedSharedResources(previous.resources || [], resources.filter((resource) => resource.scope === 'SHARED'))
+    const endpointMap = new Map((previous.endpoints || []).map((endpoint) => [`${endpoint.pool || context.pool}:${endpoint.provider}`, endpoint]))
+    for (const endpoint of endpoints) {
+      const hasShared = resources.some((resource) => resource.provider === endpoint.provider && resource.scope === 'SHARED' && (resource.pool || context.pool) === (endpoint.pool || context.pool))
+      if (!hasShared) continue
+      const sharedEndpoint = { ...endpoint }
+      if (context.profile !== 'DEV') delete sharedEndpoint.credentialReference
+      endpointMap.set(`${endpoint.pool || context.pool}:${endpoint.provider}`, sharedEndpoint)
+    }
+    return {
+      lifecycle: 'REGISTERED',
+      stackKey: context.stackKey,
+      devStackId: context.devStackId,
+      identityKind: context.identityKind,
+      pools: [...new Set(mergedResources.map((resource) => resource.pool || resource.labels?.['oes.runtime.pool']).filter(Boolean).concat(context.pool))].sort(),
+      jobFingerprint: context.jobFingerprint,
+      resources: mergedResources,
+      endpoints: [...endpointMap.values()],
+      leases: activeLeaseReferences(context.stackRoot),
+      evidenceReferences: previous.evidenceReferences || []
+    }
   })
 }
 

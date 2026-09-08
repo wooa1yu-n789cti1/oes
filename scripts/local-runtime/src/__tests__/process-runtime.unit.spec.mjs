@@ -6,8 +6,10 @@ import net from 'node:net'
 import test from 'node:test'
 import { sha256, writeAtomic } from '../canonical.mjs'
 import { writeCredentialBundle } from '../credentials.mjs'
-import { exactResourceToken, exactRunIdentity, isPublishedPortCollision } from '../docker-driver.mjs'
-import { cleanupRuntimeDirectory, downstreamEnvironment, endpointEnvironment, gatewayReadinessEnvironment, reservePort, signerSourceHash, signerWorkDirectory } from '../process-runtime.mjs'
+import { exactResourceToken, exactRunIdentity, isPublishedPortCollision, runtimeLabels } from '../docker-driver.mjs'
+import { publishManifest, publishStackManifest, reopenCurrentStackManifest } from '../manifest.mjs'
+import { classifyRuntimeObject, reopenOperatorAuthority } from '../operator-status.mjs'
+import { cleanupRuntimeDirectory, downstreamEnvironment, endpointEnvironment, gatewayReadinessEnvironment, publishDevelopmentProcessManifest, reservePort, signerSourceHash, signerWorkDirectory } from '../process-runtime.mjs'
 import { bindHumanOboPolicies, loadMachineSelectors, loadWorkloadPolicies, selectorEnvironment, trustedProcessEnvironment } from '../trusted-runtime-config.mjs'
 
 const root = path.resolve(import.meta.dirname, '../../../..')
@@ -56,7 +58,7 @@ function manifestFixture(directory, owners = ['auth-service', 'api-gateway', 'pe
     OES_GRPC_TLS_KEY_PATH: path.join(directory, owner, 'key.pem'),
     OES_WORKLOAD_SPIFFE_ID: `spiffe://local.oes.internal/ns/oes/sa/${owner}`
   }])))
-  return { profile: 'DEV', stateRoot: directory, stackRoot: directory, runDirectory: directory, devStackId: 'machine_fixture', taskKey: 'task_fixture', runId: 'run_fixture', owners, endpoints: [{ provider: 'mtls', owners, credentialReference: reference }] }
+  return { profile: 'DEV', stateRoot: directory, stackRoot: directory, runDirectory: directory, stackKey: 'oes-local-0123456789abcdef', devStackId: 'machine_fixture', pool: 'dev', taskKey: 'task_fixture', runId: 'run_fixture', owners, endpoints: [{ provider: 'mtls', owners, credentialReference: reference }] }
 }
 
 const declarations = { owners: {
@@ -132,4 +134,31 @@ test('signer source hash and work directory are deterministic while exact cleanu
   fs.appendFileSync(marker, ' ')
   assert.throws(() => cleanupRuntimeDirectory(drifted), /MARKER_MISMATCH/u)
   assert.equal(fs.existsSync(work), true)
+})
+
+test('Auth process publication keeps signer image in Stack truth and only exact signer resources in Run truth', () => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-signer-publication-'))
+  const stackKey = 'oes-local-0123456789abcdef'
+  const stackRoot = path.join(stateRoot, 'stacks', stackKey)
+  const runRoot = path.join(stackRoot, 'runs', 'task_auth', 'run_auth')
+  const baseStack = publishStackManifest(stackRoot, { lifecycle: 'REGISTERED', stackKey, devStackId: 'machine_fixture', identityKind: 'LOCAL', pools: ['dev'], resources: [], endpoints: [], leases: [], evidenceReferences: [] })
+  const baseRun = publishManifest(runRoot, { lifecycle: 'REGISTERED', profile: 'DEV', stateRoot, stackRoot, runDirectory: runRoot, stackKey, devStackId: 'machine_fixture', pool: 'dev', taskKey: 'task_auth', runId: 'run_auth', owners: ['auth-service'], resources: [], endpoints: [], stackManifestReference: baseStack.reference })
+  const context = baseRun.manifest
+  const sharedLabels = runtimeLabels(context, 'SHARED', 'execution-token-signer')
+  const runLabels = runtimeLabels(context, 'RUN', 'execution-token-signer')
+  const signer = {
+    resources: [
+      { provider: 'execution-token-signer', pool: 'dev', scope: 'SHARED', kind: 'image', name: 'signer-image', objectId: 'signer-image-id', labels: sharedLabels },
+      { provider: 'execution-token-signer', pool: 'dev', scope: 'RUN', kind: 'directory', objectId: 'signer-directory-id', labels: runLabels },
+      { provider: 'execution-token-signer', pool: 'dev', scope: 'RUN', kind: 'container', name: 'signer-container', objectId: 'signer-container-id', labels: runLabels }
+    ],
+    endpoint: { provider: 'execution-token-signer', authority: 'unix:/tmp/signer.sock', ready: true, owners: ['auth-service'], environment: {}, credentialReference: null }
+  }
+  const published = publishDevelopmentProcessManifest(baseRun.file, { signer })
+  assert.deepEqual(published.manifest.resources.map((resource) => resource.scope), ['RUN', 'RUN'])
+  assert.equal(published.manifest.stackManifestReference.generation, '000000000002')
+  assert.equal(reopenCurrentStackManifest(stackRoot).manifest.resources.some((resource) => resource.objectId === 'signer-image-id'), true)
+  assert.deepEqual(Object.keys(runLabels).sort(), ['oes.runtime.dev-stack-id', 'oes.runtime.pool', 'oes.runtime.provider', 'oes.runtime.run-id', 'oes.runtime.scope', 'oes.runtime.stack-key', 'oes.runtime.task-key', 'oes.runtime.version'])
+  const authority = reopenOperatorAuthority({ stackReferences: [published.manifest.stackManifestReference], runManifestPaths: [published.file], leasePaths: [] })
+  assert.equal(classifyRuntimeObject({ objectId: 'signer-container-id', labels: runLabels }, authority).status, 'RUN')
 })

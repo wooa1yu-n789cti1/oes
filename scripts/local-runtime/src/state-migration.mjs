@@ -110,6 +110,47 @@ function providerIdentityFiles(root) {
   return files
 }
 
+/** Derives the closed DEV logical-data universe from persisted owner and sealed Run records. */
+function persistedDevDataCarriers(oldRoot, devStackId, identityResources, inventory) {
+  const carriers = new Map()
+  const add = (carrier) => {
+    const key = `${carrier.kind}:${carrier.logicalName}`
+    const previous = carriers.get(key)
+    if (previous && fingerprint(previous) !== fingerprint(carrier)) throw new Error(`STATE_MIGRATION_DEV_DATA_CARRIER_CONFLICT key=${key}`)
+    carriers.set(key, carrier)
+  }
+  for (const [provider, kind, field] of [['postgres', 'database', 'database'], ['minio', 'bucket', 'bucket']]) {
+    const containers = identityResources.filter((identity) => identity.pool === 'dev' && identity.provider === provider && identity.kind === 'container')
+    const ownersRoot = path.join(oldRoot, 'shared', devStackId, provider, 'owners')
+    if (!fs.existsSync(ownersRoot)) continue
+    if (containers.length !== 1) throw new Error(`STATE_MIGRATION_DEV_DATA_CARRIER_CONTAINER_MISMATCH provider=${provider}`)
+    assertNoSymlink(oldRoot, ownersRoot)
+    for (const name of fs.readdirSync(ownersRoot).sort()) {
+      const file = path.join(ownersRoot, name)
+      const stat = fs.lstatSync(file)
+      if (stat.isSymbolicLink() || !stat.isFile() || !name.endsWith('.json')) throw new Error(`STATE_MIGRATION_DEV_OWNER_RECORD_INVALID provider=${provider}`)
+      if ((stat.mode & 0o777) !== 0o600) throw new Error(`STATE_MIGRATION_DEV_OWNER_RECORD_MODE_INVALID provider=${provider}`)
+      const value = readJson(file)
+      const logicalName = value[field]
+      if (!logicalName || typeof logicalName !== 'string') throw new Error(`STATE_MIGRATION_DEV_OWNER_RECORD_IDENTITY_REQUIRED provider=${provider}`)
+      add({ provider, kind, logicalName, containerName: containers[0].name, containerObjectId: containers[0].objectId })
+    }
+  }
+  for (const entry of inventory.entries.filter((candidate) => candidate.type === 'FILE' && /^runs\/[^/]+\/[^/]+\/manifest\.json$/u.test(candidate.path))) {
+    const value = readJson(path.join(oldRoot, entry.path))
+    if (![2, 3].includes(value.schemaVersion) || value.manifestFingerprint !== fingerprint(value, 'manifestFingerprint')) throw new Error(`STATE_MIGRATION_HISTORICAL_RUN_MANIFEST_INVALID path=${entry.path}`)
+    for (const resource of value.resources || []) {
+      if (resource.scope !== 'SHARED' || !['database', 'bucket'].includes(resource.kind)) continue
+      const provider = resource.kind === 'database' ? 'postgres' : 'minio'
+      const logicalName = resource.database || resource.bucket
+      const container = identityResources.find((identity) => identity.pool === 'dev' && identity.provider === provider && identity.kind === 'container' && identity.objectId === resource.containerObjectId && identity.name === resource.containerName)
+      if (!logicalName || !container) throw new Error(`STATE_MIGRATION_DEV_DATA_CARRIER_CONTAINER_MISMATCH provider=${provider}`)
+      add({ provider, kind: resource.kind, logicalName, containerName: container.name, containerObjectId: container.objectId })
+    }
+  }
+  return [...carriers.values()].sort((left, right) => `${left.kind}:${left.logicalName}`.localeCompare(`${right.kind}:${right.logicalName}`))
+}
+
 /** Requires the complete legacy-compatible SHARED V2 label identity. */
 function assertSharedV2Labels(labels, { devStackId, pool, provider, objectId }) {
   const expected = {
@@ -274,7 +315,7 @@ export function planStateLayoutMigration(inventory, { devStackId, providerSnapsh
   normalizedProviderSnapshots.forEach((snapshot, index) => collectReferences(snapshot, `$[${index}]`))
   retiredConsumerCredentialReferences.forEach((reference, index) => collectReferences(reference, `$.retiredConsumerCredentialReferences[${index}]`))
   for (const reference of absoluteReferences) if (!mappings.some((mapping) => reference.path === mapping.source || reference.path.startsWith(`${mapping.source}${path.sep}`))) throw new Error(`STATE_MIGRATION_REFERENCE_MAPPING_REQUIRED pointer=${reference.pointer}`)
-  const devDataCarriers = normalizedProviderSnapshots.filter((snapshot) => snapshot.resource?.pool === 'dev' && ['database', 'bucket'].includes(snapshot.resource.kind)).map(({ resource }) => {
+  const snapshotDevDataCarriers = normalizedProviderSnapshots.filter((snapshot) => snapshot.resource?.pool === 'dev' && ['database', 'bucket'].includes(snapshot.resource.kind)).map(({ resource }) => {
     const logicalName = resource.database || resource.bucket
     const expectedProvider = resource.kind === 'database' ? 'postgres' : 'minio'
     if (resource.provider !== expectedProvider || !logicalName || !resource.containerName || !resource.containerObjectId) throw new Error(`STATE_MIGRATION_DEV_DATA_CARRIER_IDENTITY_REQUIRED kind=${resource.kind}`)
@@ -282,8 +323,10 @@ export function planStateLayoutMigration(inventory, { devStackId, providerSnapsh
     if (!container) throw new Error(`STATE_MIGRATION_DEV_DATA_CARRIER_CONTAINER_MISMATCH kind=${resource.kind} logicalName=${logicalName}`)
     return { provider: resource.provider, kind: resource.kind, logicalName, containerName: resource.containerName, containerObjectId: resource.containerObjectId }
   }).sort((left, right) => `${left.kind}:${left.logicalName}`.localeCompare(`${right.kind}:${right.logicalName}`))
-  const carrierKeys = devDataCarriers.map((carrier) => `${carrier.kind}:${carrier.logicalName}`)
+  const carrierKeys = snapshotDevDataCarriers.map((carrier) => `${carrier.kind}:${carrier.logicalName}`)
   if (new Set(carrierKeys).size !== carrierKeys.length) throw new Error('STATE_MIGRATION_DEV_DATA_CARRIER_DUPLICATE')
+  const devDataCarriers = persistedDevDataCarriers(oldRoot, discoveredDevStackId, identityResources, inventory)
+  if (fingerprint(snapshotDevDataCarriers) !== fingerprint(devDataCarriers)) throw new Error('STATE_MIGRATION_DEV_DATA_CARRIER_SNAPSHOT_COVERAGE_MISMATCH')
   const persistentDevProviders = identityResources.filter((resource) => resource.pool === 'dev' && resource.volume && ['postgres', 'minio'].includes(resource.provider))
   for (const provider of persistentDevProviders) if (!devDataCarriers.some((carrier) => carrier.provider === provider.provider && carrier.containerObjectId === provider.objectId)) throw new Error(`STATE_MIGRATION_DEV_DATA_CARRIER_UNACCOUNTED provider=${provider.provider} objectId=${provider.objectId}`)
   const hasDevData = persistentDevProviders.length > 0 || devDataCarriers.length > 0
@@ -821,8 +864,11 @@ export function recoverStateLayout({ journalPath, verifyNewRoot = () => true, ve
       if (!fs.existsSync(journal.oldRoot) || !verifyCanonicalActivatedRoot(journal.oldRoot, journal) || !verifyNewRoot(journal.oldRoot, journal)) throw new Error('STATE_MIGRATION_COMMITTED_ROOT_INVALID')
       const activated = reopenStackManifest(journal.activatedStackManifestReference, { stackKey: journal.stackKey, devStackId: journal.devStackId })
       const current = reopenCurrentStackManifest(path.join(journal.oldRoot, 'stacks', journal.stackKey))
-      if (current.pointer.generation !== journal.activatedStackManifestReference.generation || current.pointer.sha256 !== journal.activatedStackManifestReference.sha256 || current.pointer.fingerprint !== journal.activatedStackManifestReference.fingerprint) throw new Error('STATE_MIGRATION_ACTIVATED_GENERATION_MISMATCH')
-      if (!verifyProviderMappings(journal, activated) || !verifyProviderReadiness(activated)) throw new Error('STATE_MIGRATION_COMMITTED_PROVIDER_VERIFICATION_FAILED')
+      const activatedGeneration = Number(journal.activatedStackManifestReference.generation)
+      const currentGeneration = Number(current.pointer.generation)
+      if (currentGeneration < activatedGeneration) throw new Error('STATE_MIGRATION_ACTIVATED_GENERATION_MISMATCH')
+      if (currentGeneration === activatedGeneration && (current.pointer.sha256 !== journal.activatedStackManifestReference.sha256 || current.pointer.fingerprint !== journal.activatedStackManifestReference.fingerprint)) throw new Error('STATE_MIGRATION_ACTIVATED_GENERATION_MISMATCH')
+      if (current.manifest.devStackId !== journal.devStackId || !verifyProviderMappings(journal, activated) || !verifyProviderReadiness(activated) || !verifyProviderMappings(journal, current.manifest) || !verifyProviderReadiness(current.manifest)) throw new Error('STATE_MIGRATION_COMMITTED_PROVIDER_VERIFICATION_FAILED')
       return { authority: 'NEW', state: 'COMMITTED', root: journal.oldRoot }
     }
     if (['RECOVERED_OLD', 'ROLLED_BACK'].includes(journal.state)) {

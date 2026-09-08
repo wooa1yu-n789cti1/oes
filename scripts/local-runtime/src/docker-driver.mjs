@@ -113,8 +113,8 @@ async function waitReady(check, description, timeoutMs = 120000) {
   throw new Error(`PROVIDER_READINESS_TIMEOUT provider=${description} last=${last?.message || 'not-ready'}`)
 }
 
-/** Builds the mandatory V2 identity labels for one resource. */
-function labels(context, scope, provider) {
+/** Builds the mandatory V2 identity labels for one managed runtime resource. */
+export function runtimeLabels(context, scope, provider) {
   return {
     'oes.runtime.version': '2',
     'oes.runtime.stack-key': context.stackKey,
@@ -195,7 +195,7 @@ async function ensureSharedContainer({ context, provider, image, targetPort, tar
     return { resource, created: false, portReallocated, providerDirectory }
   }
   fs.mkdirSync(providerDirectory, { recursive: true, mode: 0o700 })
-  const resourceLabels = labels(context, 'SHARED', provider)
+  const resourceLabels = runtimeLabels(context, 'SHARED', provider)
   const volume = volumeTarget ? createManagedVolume(`${name}-data`, resourceLabels) : null
   const args = sharedContainerArgs({ name, resourceLabels, image, ports, command, environment, volume, volumeTarget, mounts, tmpfs, network })
   try { docker(args, { timeout: 180000 }) } catch (error) {
@@ -220,7 +220,7 @@ function ensureSharedNetwork(context, provider) {
   }
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
   const name = sharedResourceName(context.devStackId, context.pool, provider)
-  const resourceLabels = labels(context, 'SHARED', provider)
+  const resourceLabels = runtimeLabels(context, 'SHARED', provider)
   docker(['network', 'create', ...labelArgs(resourceLabels), name])
   const resource = { provider, scope: 'SHARED', kind: 'network', name, objectId: docker(['network', 'inspect', '--format', '{{.Id}}', name]).stdout.trim(), labels: resourceLabels, cleanup: 'PRESERVE_SHARED' }
   writeAtomic(identityPath, resource)
@@ -233,7 +233,7 @@ async function createRunContainer({ context, provider, image, targetPort, target
   const name = context.profile === 'CI'
     ? `oes-v2-ci-${context.jobFingerprint}-${exactResourceToken(exactRunIdentity(context))}-${provider}`
     : `oes-v2-${exactResourceToken(exactRunIdentity(context))}-${provider}`
-  const resourceLabels = labels(context, scope, provider)
+  const resourceLabels = runtimeLabels(context, scope, provider)
   const volume = volumeTarget ? createManagedVolume(`${name}-data`, resourceLabels) : null
   const ports = targetPorts || [targetPort]
   const args = ['run', '--detach', '--name', name, ...labelArgs(resourceLabels), ...ports.flatMap((port) => ['--publish', `127.0.0.1::${port}`])]
@@ -603,7 +603,7 @@ async function provisionNacos(context, shared) {
   }
   const runScope = context.profile === 'CI' ? 'CI' : 'RUN'
   const network = context.profile === 'CI' ? `oes-v2-ci-${context.jobFingerprint}-${exactResourceToken(exactRunIdentity(context))}-nacos` : `oes-v2-${exactResourceToken(exactRunIdentity(context))}-nacos`
-  const networkLabels = labels(context, runScope, 'nacos')
+  const networkLabels = runtimeLabels(context, runScope, 'nacos')
   docker(['network', 'create', ...labelArgs(networkLabels), network])
   const rootPassword = randomSecret()
   const nacosPassword = randomSecret()

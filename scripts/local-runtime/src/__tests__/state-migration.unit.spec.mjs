@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { fingerprint, sha256, writeAtomic } from '../canonical.mjs'
+import { publishStackManifest, reopenCurrentStackManifest } from '../manifest.mjs'
 import { activateStagedState, inventoryStateLayout, migrationReplacementName, planStateLayoutMigration, recoverStateLayout, reopenJournal, rollbackCommittedState, stageStateLayoutMigration } from '../state-migration.mjs'
 import { resolveRuntimeLayout } from '../state-layout.mjs'
 import { trustedProcessEnvironment } from '../trusted-runtime-config.mjs'
@@ -28,6 +29,7 @@ function fixture({ pool = 'test', volume = null, createPlan = true } = {}) {
   writeAtomic(path.join(stateRoot, 'machine', 'dev-stack.json'), { schemaVersion: 2, devStackId: 'fixture_machine' })
   const labels = { 'oes.runtime.version': '2', 'oes.runtime.dev-stack-id': 'fixture_machine', 'oes.runtime.scope': 'SHARED', 'oes.runtime.pool': pool, 'oes.runtime.provider': 'postgres' }
   writeAtomic(path.join(provider, 'identity.json'), { provider: 'postgres', kind: 'container', scope: 'SHARED', name: 'postgres-a', objectId: 'object-a', labels, ...(volume ? { volume } : {}) })
+  if (pool === 'dev') writeAtomic(path.join(provider, 'owners', 'owner-a.json'), { database: 'service_dev', migrator: 'fixture_migrator', migratorPassword: 'fixture', runtime: 'fixture_runtime', runtimePassword: 'fixture' }, 0o600)
   writeAtomic(path.join(stateRoot, 'restore', 'restore-confirmation.json'), { kind: 'OES_DEV_RESTORE_CONFIRMATION', status: 'CONFIRMED' })
   const dockerObjects = [
     { objectId: 'object-a', name: 'postgres-a', running: false, labels, mounts: [{ Type: 'bind', Source: path.join(provider, 'data'), Destination: '/data' }, ...(volume ? [{ Type: 'volume', Name: volume.name, Destination: '/var/lib/postgresql/data' }] : [])] },
@@ -92,6 +94,13 @@ test('COMMITTED activation keeps new authority and confirmed rollback restores t
   assert.deepEqual(durability, ['RELOCATED_POINTER_DIRECTORY_SYNCED', 'MANIFEST_DIRECTORY_SYNCED', 'STACK_POINTER_DIRECTORY_SYNCED', 'STACK_PUBLICATION_REOPENED'])
   assert.throws(() => recoverStateLayout({ journalPath: staged.journalPath, verifyProviderReadiness: () => true, verifyProviderMappings: () => false }), /STATE_MIGRATION_COMMITTED_PROVIDER_VERIFICATION_FAILED/)
   assert.equal(recoverStateLayout({ journalPath: staged.journalPath, verifyProviderReadiness: () => true, verifyProviderMappings: () => true }).authority, 'NEW')
+  const activatedStackRoot = path.join(stateRoot, 'stacks', staged.layout.stackKey)
+  const current = reopenCurrentStackManifest(activatedStackRoot).manifest
+  const laterDraft = { ...current }
+  for (const key of ['schemaVersion', 'kind', 'generation', 'stackManifestFingerprint']) delete laterDraft[key]
+  const later = publishStackManifest(activatedStackRoot, laterDraft)
+  assert.equal(Number(later.manifest.generation) > Number(committed.activatedStackManifestReference.generation), true)
+  assert.equal(recoverStateLayout({ journalPath: staged.journalPath, verifyProviderReadiness: () => true, verifyProviderMappings: () => true }).authority, 'NEW')
   const rolledBack = rollbackCommittedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ROLLBACK_CONFIRMATION', committed), observeQuiescence: zeroQuiescence, providerLifecycle })
   assert.equal(rolledBack.state, 'ROLLED_BACK')
   assert.equal(fs.existsSync(path.join(stateRoot, 'machine', 'dev-stack.json')), true)
@@ -130,7 +139,7 @@ test('active leases and running old-root binds block staging before any sibling 
 test('DEV data requires an external byte-reopenable snapshot before planning', () => {
   const volumeLabels = { 'oes.runtime.version': '2', 'oes.runtime.dev-stack-id': 'fixture_machine', 'oes.runtime.scope': 'SHARED', 'oes.runtime.pool': 'dev', 'oes.runtime.provider': 'postgres' }
   const volume = { name: 'postgres-data', objectId: 'volume-a', labels: volumeLabels }
-  const { stateRoot, inventory, providerSnapshots: baseSnapshots } = fixture({ pool: 'dev', volume, createPlan: false })
+  const { stateRoot, inventory, providerSnapshots: baseSnapshots, dockerObjects } = fixture({ pool: 'dev', volume, createPlan: false })
   const providerSnapshots = [...baseSnapshots, { resource: { provider: 'postgres', kind: 'database', scope: 'SHARED', pool: 'dev', database: 'service_dev', containerName: 'postgres-a', containerObjectId: 'object-a' } }]
   assert.throws(() => planStateLayoutMigration(inventory, { providerSnapshots }), /STATE_MIGRATION_DEV_BACKUP_REFERENCE_INVALID/)
   const archive = path.join(path.dirname(stateRoot), 'service_dev.dump')
@@ -144,8 +153,9 @@ test('DEV data requires an external byte-reopenable snapshot before planning', (
   const planned = planStateLayoutMigration(inventory, { providerSnapshots, devBackupReference: reference })
   assert.equal(planned.devBackupReference.fingerprint, record.backupFingerprint)
   assert.deepEqual(planned.devDataCarriers, [{ provider: 'postgres', kind: 'database', logicalName: 'service_dev', containerName: 'postgres-a', containerObjectId: 'object-a' }])
-  const incomplete = [...providerSnapshots, { resource: { provider: 'postgres', kind: 'database', scope: 'SHARED', pool: 'dev', database: 'second_dev', containerName: 'postgres-a', containerObjectId: 'object-a' } }]
-  assert.throws(() => planStateLayoutMigration(inventory, { providerSnapshots: incomplete, devBackupReference: reference }), /STATE_MIGRATION_DEV_BACKUP_COVERAGE_MISMATCH/)
+  writeAtomic(path.join(stateRoot, 'shared', 'fixture_machine', 'postgres', 'owners', 'owner-b.json'), { database: 'second_dev', migrator: 'fixture_migrator_b', migratorPassword: 'fixture', runtime: 'fixture_runtime_b', runtimePassword: 'fixture' }, 0o600)
+  const expandedInventory = inventoryStateLayout({ stateRoot, dockerObjects })
+  assert.throws(() => planStateLayoutMigration(expandedInventory, { providerSnapshots, devBackupReference: reference }), /STATE_MIGRATION_DEV_DATA_CARRIER_SNAPSHOT_COVERAGE_MISMATCH/)
 })
 
 test('planning rejects unknown root entries and provider trees without exact snapshot coverage', () => {
