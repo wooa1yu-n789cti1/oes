@@ -77,9 +77,11 @@ async function interruptedTransactionFixture(stateRoot, taskKey, runId) {
       provisionProvider: async (provider, context) => {
         calls += 1
         if (calls === 1) {
-          const target = path.join(context.runDirectory, 'provider', 'fixture-owned.json')
+          const owner = context.providerOwners[provider][0]
+          const suffix = sha256([context.taskKey, context.runId, owner, provider].join(':')).slice(0, 12)
+          const target = path.join(context.runDirectory, 'provider', provider, 'simulation', suffix + '.json')
           writeAtomic(target, { owner: 'fixture' })
-          return { resources: [{ provider, kind: 'simulated-logical', scope: 'RUN', objectId: sha256(target), path: target, cleanup: 'DELETE_EXACT' }], endpoints: [] }
+          return { resources: [{ provider, kind: 'simulated-logical', scope: 'RUN', owner, objectId: sha256(target), path: target, cleanup: 'DELETE_EXACT' }], endpoints: [] }
         }
         process.stdout.write(JSON.stringify({ transactionPath: path.join(context.runDirectory, 'transaction.json') }) + '\\n')
         await new Promise(() => { setInterval(() => {}, 1000) })
@@ -242,6 +244,11 @@ test('transaction recovery rejects every unsealed or noncanonical authority befo
   const originalOwner = fs.readFileSync(ownerPath)
   const outsideTarget = path.join(stateRoot, 'forged-target.json')
   writeAtomic(outsideTarget, { preserve: true })
+  const siblingRunRoot = path.join(fixture.transaction.stackRoot, 'runs', 'task_victim', 'run_victim')
+  const siblingTarget = path.join(siblingRunRoot, 'provider', 'postgres', 'simulation', '0123456789ab.json')
+  writeAtomic(siblingTarget, { bytes: 'PRESERVE', owner: 'victim' })
+  const siblingAllocationTarget = path.join(path.dirname(fixture.transaction.resources[0].path), 'abcdefabcdef.json')
+  writeAtomic(siblingAllocationTarget, { bytes: 'PRESERVE', owner: 'sibling-allocation' })
   const seal = (value) => { value.transactionFingerprint = fingerprint(value, 'transactionFingerprint'); writeAtomic(fixture.transactionPath, value) }
   const cases = [
     ['noncanonical filename', () => { const source = path.join(fixture.transaction.runDirectory, 'forged-transaction.json'); fs.writeFileSync(source, originalTransaction); return source }],
@@ -251,7 +258,9 @@ test('transaction recovery rejects every unsealed or noncanonical authority befo
     ['mismatched Stack root', () => { const value = JSON.parse(originalTransaction); value.stackRoot = path.join(stateRoot, 'stacks', 'foreign-stack'); seal(value); return fixture.transactionPath }],
     ['mismatched Run root', () => { const value = JSON.parse(originalTransaction); value.runDirectory = path.dirname(value.runDirectory); seal(value); return fixture.transactionPath }],
     ['corrupt Run owner marker', () => { const marker = JSON.parse(originalOwner); marker.taskKey = 'foreign_task'; marker.markerFingerprint = fingerprint(marker, 'markerFingerprint'); writeAtomic(ownerPath, marker); return fixture.transactionPath }],
-    ['resource outside exact Stack', () => { const value = JSON.parse(originalTransaction); value.resources[0].path = outsideTarget; value.resources[0].objectId = sha256(outsideTarget); seal(value); return fixture.transactionPath }]
+    ['resource outside exact Stack', () => { const value = JSON.parse(originalTransaction); value.resources[0].path = outsideTarget; value.resources[0].objectId = sha256(outsideTarget); seal(value); return fixture.transactionPath }],
+    ['resource inside sibling Run', () => { const value = JSON.parse(originalTransaction); const logical = value.resources.find((resource) => resource.kind === 'simulated-logical'); logical.path = siblingTarget; logical.objectId = sha256(siblingTarget); seal(value); return fixture.transactionPath }],
+    ['resource uses sibling logical allocation', () => { const value = JSON.parse(originalTransaction); const logical = value.resources.find((resource) => resource.kind === 'simulated-logical'); logical.path = siblingAllocationTarget; logical.objectId = sha256(siblingAllocationTarget); seal(value); return fixture.transactionPath }]
   ]
   for (const [name, prepare] of cases) await t.test(name, () => {
     fs.writeFileSync(fixture.transactionPath, originalTransaction)
@@ -265,14 +274,18 @@ test('transaction recovery rejects every unsealed or noncanonical authority befo
     assert.equal(cleanupCalls, 0)
     assert.deepEqual(snapshotTree(stateRoot), before)
     assert.equal(fs.existsSync(outsideTarget), true)
+    assert.deepEqual(JSON.parse(fs.readFileSync(siblingTarget, 'utf8')), { bytes: 'PRESERVE', owner: 'victim' })
+    assert.deepEqual(JSON.parse(fs.readFileSync(siblingAllocationTarget, 'utf8')), { bytes: 'PRESERVE', owner: 'sibling-allocation' })
   })
   fs.rmSync(path.join(fixture.transaction.runDirectory, 'forged-transaction.json'), { force: true })
+  fs.rmSync(siblingAllocationTarget)
   fs.writeFileSync(fixture.transactionPath, originalTransaction)
   fs.writeFileSync(ownerPath, originalOwner)
   const cleanup = reconcileRuntime({ transactionPath: fixture.transactionPath, cleanupResource: cleanupSimulatedResource })
   assert.equal(cleanup.result, 'RECONCILED')
   assert.equal(fs.existsSync(fixture.transaction.runLockLease.lockDirectory), false)
   fs.rmSync(outsideTarget)
+  fs.rmSync(siblingRunRoot, { recursive: true, force: true })
 })
 
 test('transaction recovery reopens and rejects a sealed source replacement before cleanup', async () => {

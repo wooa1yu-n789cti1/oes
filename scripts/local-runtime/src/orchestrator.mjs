@@ -146,11 +146,11 @@ function reopenRunOwner(value, expectedRunDirectory) {
   return marker
 }
 
-/** Requires an allocation-transaction filesystem reference to remain inside its exact Stack. */
-function assertTransactionPath(value, selected, key) {
+/** Requires an allocation-transaction filesystem reference to remain inside its field-specific authority root. */
+function assertTransactionPath(value, selected, key, authorityRoot) {
   if (typeof selected !== 'string' || !path.isAbsolute(selected) || path.resolve(selected) !== selected) throw new Error(`RUNTIME_TRANSACTION_PATH_INVALID key=${key}`)
-  const stackRoot = path.resolve(value.stackRoot)
-  if (selected !== stackRoot && !selected.startsWith(`${stackRoot}${path.sep}`)) throw new Error(`RUNTIME_TRANSACTION_PATH_OUTSIDE_STACK key=${key}`)
+  const expectedRoot = path.resolve(authorityRoot)
+  if (selected !== expectedRoot && !selected.startsWith(`${expectedRoot}${path.sep}`)) throw new Error(`RUNTIME_TRANSACTION_PATH_OUTSIDE_AUTHORITY key=${key}`)
   assertNoSymlink(value.stateRoot, selected)
   return selected
 }
@@ -172,21 +172,52 @@ function assertTransactionResource(value, resource) {
     'simulated-logical': resource.scope === 'SHARED' ? 'PRESERVE_SHARED' : 'DELETE_EXACT'
   }
   if (!cleanupByKind[resource.kind] || resource.cleanup !== cleanupByKind[resource.kind]) throw new Error('RUNTIME_TRANSACTION_RESOURCE_CLEANUP_INVALID')
-  if (resource.path) assertTransactionPath(value, resource.path, 'resource.path')
-  for (const key of ['marker', 'ca', 'cert', 'key']) if (resource[key]) assertTransactionPath(value, resource[key], key)
+  const scopeRoot = resource.scope === 'SHARED' ? value.stackRoot : value.runDirectory
+  if (resource.path && !['simulated-provider', 'simulated-logical'].includes(resource.kind)) assertTransactionPath(value, resource.path, 'resource.path', scopeRoot)
+  for (const key of ['marker', 'ca', 'cert', 'key']) if (resource[key]) assertTransactionPath(value, resource[key], key, scopeRoot)
   for (const referenceKey of ['rootCredentialReference', 'adminCredentialReference']) {
     const reference = resource[referenceKey]
-    if (reference && (!/^[a-f0-9]{64}$/u.test(reference.sha256 || '') || assertTransactionPath(value, reference.path, `${referenceKey}.path`) !== reference.path)) throw new Error(`RUNTIME_TRANSACTION_RESOURCE_REFERENCE_INVALID key=${referenceKey}`)
+    if (reference) {
+      const sharedContainer = resource.containerScope === 'SHARED' || resource.scope === 'SHARED'
+      const expectedPath = sharedContainer
+        ? path.join(value.stackRoot, 'credentials', value.pool, resource.provider, 'bootstrap.json')
+        : path.join(value.runDirectory, 'provider', `${resource.provider}-bootstrap.json`)
+      if (!/^[a-f0-9]{64}$/u.test(reference.sha256 || '') || reference.path !== expectedPath || assertTransactionPath(value, reference.path, `${referenceKey}.path`, path.dirname(expectedPath)) !== reference.path) throw new Error(`RUNTIME_TRANSACTION_RESOURCE_REFERENCE_INVALID key=${referenceKey}`)
+    }
   }
   if (resource.files) {
-    if (resource.kind !== 'certificate' || resource.files.length !== 4 || resource.files.some((file) => !/^[a-f0-9]{64}$/u.test(file.sha256 || '') || assertTransactionPath(value, file.path, 'files.path') !== file.path)) throw new Error('RUNTIME_TRANSACTION_RESOURCE_FILES_INVALID')
+    if (resource.kind !== 'certificate' || resource.files.length !== 4 || resource.files.some((file) => !/^[a-f0-9]{64}$/u.test(file.sha256 || '') || assertTransactionPath(value, file.path, 'files.path', scopeRoot) !== file.path)) throw new Error('RUNTIME_TRANSACTION_RESOURCE_FILES_INVALID')
   }
-  if (['simulated-provider', 'simulated-logical'].includes(resource.kind) && (!resource.path || !/^[a-f0-9]{64}$/u.test(resource.objectId || ''))) throw new Error('RUNTIME_TRANSACTION_SIMULATION_RESOURCE_INVALID')
+  if (['simulated-provider', 'simulated-logical'].includes(resource.kind)) {
+    const stackHostedSimulation = resource.scope === 'SHARED' || (value.profile === 'LOCAL_INTEGRATION' && ['postgres', 'minio'].includes(resource.provider))
+    const simulationRoot = stackHostedSimulation
+      ? path.join(value.stackRoot, 'providers', value.pool, resource.provider, 'simulation')
+      : path.join(value.runDirectory, 'provider', resource.provider, 'simulation')
+    if (resource.path) assertTransactionPath(value, resource.path, 'resource.path', simulationRoot)
+    const simulationIdentity = value.profile === 'DEV' ? value.devStackId : `${value.taskKey}:${value.runId}`
+    const expectedLogicalPath = path.join(simulationRoot, `${sha256(`${simulationIdentity}:${resource.owner}:${resource.provider}`).slice(0, 12)}.json`)
+    const pathValid = resource.kind === 'simulated-provider'
+      ? resource.path === simulationRoot && resource.objectId === sha256(`${simulationRoot}:${resource.provider}`)
+      : value.plan.owners.includes(resource.owner) && resource.path === expectedLogicalPath && resource.objectId === sha256(expectedLogicalPath)
+    if (!pathValid) throw new Error('RUNTIME_TRANSACTION_SIMULATION_RESOURCE_INVALID')
+  }
+  if (resource.kind === 'certificate') {
+    const certificateRoot = resource.scope === 'SHARED'
+      ? path.join(value.stackRoot, 'credentials', value.pool, resource.provider)
+      : path.join(value.runDirectory, 'provider', resource.provider)
+    const ownerRoot = path.join(certificateRoot, resource.owner || '')
+    const expectedFiles = new Set(['key.pem', 'request.csr', 'cert.pem', 'ext.cnf'].map((name) => path.join(ownerRoot, name)))
+    if (!Array.isArray(resource.files) || !value.plan.owners.includes(resource.owner) || resource.ca !== path.join(certificateRoot, 'ca.pem') || resource.cert !== path.join(ownerRoot, 'cert.pem') || resource.key !== path.join(ownerRoot, 'key.pem') || resource.files.some((file) => !expectedFiles.delete(file.path)) || expectedFiles.size) throw new Error('RUNTIME_TRANSACTION_CERTIFICATE_PATH_INVALID')
+  }
   if (['container', 'network'].includes(resource.kind)) {
     if (typeof resource.name !== 'string' || typeof resource.objectId !== 'string' || !resource.labels || typeof resource.labels !== 'object') throw new Error('RUNTIME_TRANSACTION_DOCKER_RESOURCE_INVALID')
     const expectedLabels = { 'oes.runtime.version': '2', 'oes.runtime.stack-key': value.stackKey, 'oes.runtime.dev-stack-id': value.devStackId, 'oes.runtime.scope': resource.scope, 'oes.runtime.pool': value.pool, 'oes.runtime.provider': resource.provider }
     if (['RUN', 'CI'].includes(resource.scope)) Object.assign(expectedLabels, { 'oes.runtime.task-key': value.taskKey, 'oes.runtime.run-id': value.runId })
     for (const [key, expected] of Object.entries(expectedLabels)) if (resource.labels[key] !== expected) throw new Error(`RUNTIME_TRANSACTION_RESOURCE_LABEL_INVALID key=${key}`)
+    if (resource.kind === 'container' && resource.volume) {
+      if (typeof resource.volume !== 'object' || resource.volume.name !== `${resource.name}-data` || typeof resource.volume.objectId !== 'string' || !resource.volume.labels || typeof resource.volume.labels !== 'object') throw new Error('RUNTIME_TRANSACTION_VOLUME_INVALID')
+      for (const [key, expected] of Object.entries(expectedLabels)) if (resource.volume.labels[key] !== expected) throw new Error(`RUNTIME_TRANSACTION_VOLUME_LABEL_INVALID key=${key}`)
+    }
   }
   if (resource.kind === 'database' && (![resource.database, resource.migrator, resource.runtime, resource.containerName, resource.containerObjectId].every((entry) => typeof entry === 'string') || !resource.rootCredentialReference)) throw new Error('RUNTIME_TRANSACTION_DATABASE_RESOURCE_INVALID')
   if (resource.kind === 'bucket' && (![resource.bucket, resource.accessKey, resource.policy, resource.containerName, resource.containerObjectId].every((entry) => typeof entry === 'string') || !resource.adminCredentialReference)) throw new Error('RUNTIME_TRANSACTION_BUCKET_RESOURCE_INVALID')
@@ -236,11 +267,17 @@ function reopenAllocationTransaction(file) {
     if (resourceFingerprints.has(resourceFingerprint)) throw new Error('RUNTIME_TRANSACTION_RESOURCE_DUPLICATE')
     resourceFingerprints.add(resourceFingerprint)
   }
+  for (const resource of value.resources.filter((entry) => ['database', 'bucket', 'acl-user'].includes(entry.kind))) {
+    const container = value.resources.find((entry) => entry.kind === 'container' && entry.provider === resource.provider && entry.name === resource.containerName && entry.objectId === resource.containerObjectId && entry.scope === resource.containerScope)
+    if (!container) throw new Error('RUNTIME_TRANSACTION_ALLOCATION_CONTAINER_MISMATCH')
+  }
   for (const endpoint of value.endpoints) {
     if (!endpoint || typeof endpoint !== 'object' || !/^[a-z0-9][a-z0-9-]*$/u.test(endpoint.provider || '') || !value.plan.providers.includes(endpoint.allocationProvider || endpoint.provider) || endpoint.pool !== value.pool || !Array.isArray(endpoint.owners) || typeof endpoint.ready !== 'boolean' || typeof endpoint.authority !== 'string') throw new Error('RUNTIME_TRANSACTION_ENDPOINT_INVALID')
     if (endpoint.credentialReference) {
       if (!/^[a-f0-9]{64}$/u.test(endpoint.credentialReference.sha256 || '') || !/^[a-f0-9]{64}$/u.test(endpoint.credentialReference.fingerprint || '')) throw new Error('RUNTIME_TRANSACTION_ENDPOINT_REFERENCE_INVALID')
-      assertTransactionPath(value, endpoint.credentialReference.path, 'endpoint.credentialReference.path')
+      const expectedPath = path.join(value.profile === 'DEV' ? value.stackRoot : value.runDirectory, 'credentials', `${endpoint.provider}.json`)
+      if (endpoint.credentialReference.path !== expectedPath) throw new Error('RUNTIME_TRANSACTION_ENDPOINT_REFERENCE_PATH_INVALID')
+      assertTransactionPath(value, endpoint.credentialReference.path, 'endpoint.credentialReference.path', path.dirname(expectedPath))
     }
   }
   return value
