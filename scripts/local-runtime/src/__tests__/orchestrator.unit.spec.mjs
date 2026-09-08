@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { resolveCredentialReference } from '../credentials.mjs'
+import { logicalResourceIdentity } from '../docker-driver.mjs'
 import { environmentForOwner, resolveResources } from '../manifest.mjs'
 import { fingerprint, sha256, writeAtomic } from '../canonical.mjs'
 import { cleanupRunPrivateFiles, reconcileRuntime, startRuntime, withRuntime } from '../orchestrator.mjs'
@@ -105,6 +106,71 @@ async function interruptedTransactionFixture(stateRoot, taskKey, runId) {
     })
     child.once('error', reject)
     child.once('exit', (code) => reject(new Error(`interrupted fixture exited early code=${code} stderr=${stderr}`)))
+  })
+  child.kill('SIGKILL')
+  const terminal = await new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal, stderr })))
+  assert.equal(terminal.signal, 'SIGKILL')
+  return { ...ready, transaction: JSON.parse(fs.readFileSync(ready.transactionPath, 'utf8')) }
+}
+
+/** Leaves one production-shaped Docker logical allocation transaction behind without contacting Docker. */
+async function interruptedLogicalTransactionFixture(stateRoot, profile, provider, owner, capability, taskKey, runId) {
+  const script = `
+    import fs from 'node:fs'
+    import path from 'node:path'
+    import { sha256, writeAtomic } from './scripts/local-runtime/src/canonical.mjs'
+    import { logicalResourceIdentity, runtimeLabels } from './scripts/local-runtime/src/docker-driver.mjs'
+    import { startRuntime } from './scripts/local-runtime/src/orchestrator.mjs'
+    const profile = process.env.FIXTURE_PROFILE
+    const targetProvider = process.env.FIXTURE_PROVIDER
+    const owner = process.env.FIXTURE_OWNER
+    await startRuntime({ root: process.env.FIXTURE_ROOT, stateRoot: process.env.FIXTURE_STATE_ROOT, profile, testClass: profile === 'DEV' ? 'integration' : 'contract', owners: [owner], capabilities: [process.env.FIXTURE_CAPABILITY], taskKey: process.env.FIXTURE_TASK_KEY, runId: process.env.FIXTURE_RUN_ID, devStackId: 'fixture_machine', concurrency: 2, ciJobIdentity: profile === 'CI' ? 'fixture-ci-job' : undefined }, {
+      provisionProvider: async (provider, context) => {
+        if (provider !== targetProvider) return { resources: [], endpoints: [] }
+        const scope = profile === 'DEV' ? 'SHARED' : profile === 'CI' ? 'CI' : 'RUN'
+        const containerScope = profile === 'DEV' ? 'SHARED' : profile === 'LOCAL_INTEGRATION' && ['postgres', 'minio'].includes(provider) ? 'SHARED' : scope
+        const containerName = 'fixture-' + provider + '-' + context.runId
+        const containerObjectId = sha256(containerName)
+        const container = { provider, kind: 'container', scope: containerScope, name: containerName, objectId: containerObjectId, labels: runtimeLabels(context, containerScope, provider), cleanup: containerScope === 'SHARED' ? 'PRESERVE_SHARED' : 'DELETE_EXACT' }
+        const logical = { provider, scope, owner, ...logicalResourceIdentity(context, provider, owner), containerName, containerObjectId, containerScope, cleanup: scope === 'SHARED' ? 'PRESERVE_SHARED' : provider === 'postgres' ? 'DROP_EXACT' : provider === 'minio' ? 'DELETE_LOGICAL_EXACT' : 'DELETED_WITH_OWNED_CONTAINER' }
+        delete logical.suffix
+        delete logical.eventScope
+        if (provider === 'postgres') logical.kind = 'database'
+        if (provider === 'minio') logical.kind = 'bucket'
+        if (provider === 'redis') logical.kind = 'acl-user'
+        if (['postgres', 'minio'].includes(provider)) {
+          const referencePath = containerScope === 'SHARED' ? path.join(context.stackRoot, 'credentials', context.pool, provider, 'bootstrap.json') : path.join(context.runDirectory, 'provider', provider + '-bootstrap.json')
+          writeAtomic(referencePath, { fixture: true })
+          const reference = { path: referencePath, sha256: sha256(fs.readFileSync(referencePath)) }
+          if (provider === 'postgres') logical.rootCredentialReference = reference
+          else logical.adminCredentialReference = reference
+        }
+        return { resources: [container, logical], endpoints: [] }
+      },
+      afterProgressPublished: async ({ provider, transactionPath }) => {
+        if (provider !== targetProvider) return
+        process.stdout.write(JSON.stringify({ transactionPath }) + '\\n')
+        await new Promise(() => { setInterval(() => {}, 1000) })
+      },
+      cleanupResource: () => ({ disposition: 'NOT_APPLICABLE', exitStatus: 0 })
+    })
+  `
+  const child = spawn(process.execPath, ['--input-type=module', '--eval', script], {
+    cwd: root,
+    env: { ...process.env, FIXTURE_ROOT: root, FIXTURE_STATE_ROOT: stateRoot, FIXTURE_PROFILE: profile, FIXTURE_PROVIDER: provider, FIXTURE_OWNER: owner, FIXTURE_CAPABILITY: capability, FIXTURE_TASK_KEY: taskKey, FIXTURE_RUN_ID: runId },
+    stdio: ['ignore', 'pipe', 'pipe']
+  })
+  let output = ''
+  let stderr = ''
+  child.stderr.on('data', (chunk) => { stderr += chunk })
+  const ready = await new Promise((resolve, reject) => {
+    child.stdout.on('data', (chunk) => {
+      output += chunk
+      const newline = output.indexOf('\n')
+      if (newline !== -1) resolve(JSON.parse(output.slice(0, newline)))
+    })
+    child.once('error', reject)
+    child.once('exit', (code) => reject(new Error(`logical fixture exited early code=${code} stderr=${stderr}`)))
   })
   child.kill('SIGKILL')
   const terminal = await new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal, stderr })))
@@ -286,6 +352,63 @@ test('transaction recovery rejects every unsealed or noncanonical authority befo
   assert.equal(fs.existsSync(fixture.transaction.runLockLease.lockDirectory), false)
   fs.rmSync(outsideTarget)
   fs.rmSync(siblingRunRoot, { recursive: true, force: true })
+})
+
+test('transaction recovery rejects cross-Run database and bucket identities before cleanup', async (t) => {
+  const cases = [
+    { provider: 'postgres', owner: 'permission-service', capability: 'database', fields: ['database', 'migrator', 'runtime'] },
+    { provider: 'minio', owner: 'asset-service', capability: 'object-store', fields: ['bucket', 'accessKey', 'policy'] }
+  ]
+  for (const selected of cases) await t.test(selected.provider, async () => {
+    const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), `oes-runtime-logical-${selected.provider}-`))
+    const fixture = await interruptedLogicalTransactionFixture(stateRoot, 'LOCAL_INTEGRATION', selected.provider, selected.owner, selected.capability, `task_${selected.provider}`, `run_${selected.provider}`)
+    const original = fs.readFileSync(fixture.transactionPath)
+    const value = JSON.parse(original)
+    const logical = value.resources.find((resource) => resource.provider === selected.provider && resource.owner === selected.owner)
+    const victim = logicalResourceIdentity({ ...value, taskKey: 'task_victim', runId: 'run_victim' }, selected.provider, selected.owner)
+    for (const field of selected.fields) logical[field] = victim[field]
+    value.transactionFingerprint = fingerprint(value, 'transactionFingerprint')
+    writeAtomic(fixture.transactionPath, value)
+    const before = snapshotTree(stateRoot)
+    let cleanupCalls = 0
+    assert.throws(() => reconcileRuntime({ transactionPath: fixture.transactionPath, cleanupResource: () => { cleanupCalls += 1; return { disposition: 'DELETED_EXACT', exitStatus: 0 } } }), /RUNTIME_TRANSACTION_LOGICAL_RESOURCE_IDENTITY_INVALID/u)
+    assert.equal(cleanupCalls, 0)
+    assert.deepEqual(snapshotTree(stateRoot), before)
+
+    fs.writeFileSync(fixture.transactionPath, original)
+    const duplicate = JSON.parse(original)
+    const duplicateLogical = duplicate.resources.find((resource) => resource.provider === selected.provider && resource.owner === selected.owner)
+    duplicate.resources.push({ ...duplicateLogical, duplicateProbe: true })
+    duplicate.transactionFingerprint = fingerprint(duplicate, 'transactionFingerprint')
+    writeAtomic(fixture.transactionPath, duplicate)
+    cleanupCalls = 0
+    assert.throws(() => reconcileRuntime({ transactionPath: fixture.transactionPath, cleanupResource: () => { cleanupCalls += 1; return { disposition: 'DELETED_EXACT', exitStatus: 0 } } }), /RUNTIME_TRANSACTION_LOGICAL_RESOURCE_DUPLICATE/u)
+    assert.equal(cleanupCalls, 0)
+
+    fs.writeFileSync(fixture.transactionPath, original)
+    const cleanup = reconcileRuntime({ transactionPath: fixture.transactionPath, cleanupResource: (resource) => ({ resource, disposition: resource.cleanup === 'PRESERVE_SHARED' ? 'PRESERVED_SHARED' : 'DELETED_EXACT', exitStatus: 0 }) })
+    assert.equal(cleanup.result, 'RECONCILED')
+  })
+})
+
+test('production-shaped Redis ACL allocation reopens for DEV, LOCAL_INTEGRATION and CI recovery', async (t) => {
+  for (const profile of ['DEV', 'LOCAL_INTEGRATION', 'CI']) await t.test(profile, async () => {
+    const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), `oes-runtime-redis-${profile.toLowerCase()}-`))
+    const fixture = await interruptedLogicalTransactionFixture(stateRoot, profile, 'redis', 'auth-service', 'cache', `task_redis_${profile.toLowerCase()}`, `run_redis_${profile.toLowerCase()}`)
+    const logical = fixture.transaction.resources.find((resource) => resource.kind === 'acl-user')
+    const expected = logicalResourceIdentity(fixture.transaction, 'redis', 'auth-service')
+    assert.equal(logical.owner, 'auth-service')
+    assert.equal(logical.containerScope, profile === 'DEV' ? 'SHARED' : profile === 'CI' ? 'CI' : 'RUN')
+    assert.equal(logical.user, expected.user)
+    assert.equal(logical.namespace, expected.namespace)
+    let cleanupCalls = 0
+    const cleanup = reconcileRuntime({ transactionPath: fixture.transactionPath, cleanupResource: (resource) => { cleanupCalls += 1; return { resource, disposition: resource.cleanup === 'PRESERVE_SHARED' ? 'PRESERVED_SHARED' : 'DELETED_EXACT', exitStatus: 0 } } })
+    assert.equal(cleanup.result, 'RECONCILED')
+    assert.equal(cleanupCalls, 2)
+    assert.equal(fs.existsSync(fixture.transaction.runLockLease.lockDirectory), false)
+    assert.equal(fs.existsSync(stackLeasePath(fixture.transaction.stackRoot, fixture.transaction.taskKey, fixture.transaction.runId)), false)
+    assert.deepEqual(fs.readdirSync(path.join(stateRoot, 'semaphores', 'queue')), [])
+  })
 })
 
 test('transaction recovery reopens and rejects a sealed source replacement before cleanup', async () => {

@@ -7,7 +7,7 @@ import { loadRuntimeConfig } from './config.mjs'
 import { planRuntime } from './planner.mjs'
 import { artifactReference, publishManifest, reopenManifest, reopenStackManifest, runDirectory, updateStackManifest } from './manifest.mjs'
 import { acquireRuntimeAdmission, assertNoSymlink, resolveRuntimeLayout, runClaimLockPath } from './state-layout.mjs'
-import { cleanupDockerResource, provisionDockerProvider } from './docker-driver.mjs'
+import { cleanupDockerResource, logicalResourceIdentity, provisionDockerProvider } from './docker-driver.mjs'
 import { cleanupSimulatedResource, provisionSimulatedProvider } from './simulation-driver.mjs'
 import { removeStackLease, reopenStackLease, reopenStackLeases, stackLeasePath } from './stack-lease.mjs'
 import { sharedResourceIdentity } from './stack-resource.mjs'
@@ -219,9 +219,19 @@ function assertTransactionResource(value, resource) {
       for (const [key, expected] of Object.entries(expectedLabels)) if (resource.volume.labels[key] !== expected) throw new Error(`RUNTIME_TRANSACTION_VOLUME_LABEL_INVALID key=${key}`)
     }
   }
-  if (resource.kind === 'database' && (![resource.database, resource.migrator, resource.runtime, resource.containerName, resource.containerObjectId].every((entry) => typeof entry === 'string') || !resource.rootCredentialReference)) throw new Error('RUNTIME_TRANSACTION_DATABASE_RESOURCE_INVALID')
-  if (resource.kind === 'bucket' && (![resource.bucket, resource.accessKey, resource.policy, resource.containerName, resource.containerObjectId].every((entry) => typeof entry === 'string') || !resource.adminCredentialReference)) throw new Error('RUNTIME_TRANSACTION_BUCKET_RESOURCE_INVALID')
-  if (resource.kind === 'acl-user' && ![resource.user, resource.namespace, resource.containerName, resource.containerObjectId].every((entry) => typeof entry === 'string')) throw new Error('RUNTIME_TRANSACTION_ACL_RESOURCE_INVALID')
+  const logicalProvider = { database: 'postgres', bucket: 'minio', 'acl-user': 'redis' }[resource.kind]
+  if (logicalProvider) {
+    const allocationProvider = resource.allocationProvider || resource.provider
+    const allowedOwners = value.plan.providerOwners[logicalProvider]
+    const expectedScope = value.profile === 'DEV' ? 'SHARED' : value.profile === 'CI' ? 'CI' : 'RUN'
+    const expectedContainerScope = value.profile === 'DEV' ? 'SHARED' : value.profile === 'CI' ? 'CI' : ['postgres', 'minio'].includes(logicalProvider) ? 'SHARED' : 'RUN'
+    if (resource.provider !== logicalProvider || allocationProvider !== logicalProvider || !Array.isArray(allowedOwners) || !allowedOwners.includes(resource.owner) || resource.scope !== expectedScope || resource.containerScope !== expectedContainerScope) throw new Error('RUNTIME_TRANSACTION_LOGICAL_RESOURCE_OWNER_INVALID')
+    const expected = logicalResourceIdentity(value, logicalProvider, resource.owner)
+    const fields = resource.kind === 'database' ? ['database', 'migrator', 'runtime'] : resource.kind === 'bucket' ? ['bucket', 'accessKey', 'policy'] : ['user', 'namespace']
+    if (fields.some((field) => resource[field] !== expected[field]) || ![resource.containerName, resource.containerObjectId].every((entry) => typeof entry === 'string')) throw new Error('RUNTIME_TRANSACTION_LOGICAL_RESOURCE_IDENTITY_INVALID')
+    if (resource.kind === 'database' && !resource.rootCredentialReference) throw new Error('RUNTIME_TRANSACTION_DATABASE_RESOURCE_INVALID')
+    if (resource.kind === 'bucket' && !resource.adminCredentialReference) throw new Error('RUNTIME_TRANSACTION_BUCKET_RESOURCE_INVALID')
+  }
 }
 
 /** Seals and atomically writes mutable allocation progress after every state change. */
@@ -261,11 +271,17 @@ function reopenAllocationTransaction(file) {
   const leasePath = stackLeasePath(value.stackRoot, value.taskKey, value.runId)
   if (fs.existsSync(leasePath)) reopenStackLease(leasePath, { stackRoot: value.stackRoot, stackKey: value.stackKey, devStackId: value.devStackId, taskKey: value.taskKey, runId: value.runId })
   const resourceFingerprints = new Set()
+  const logicalOwners = new Set()
   for (const resource of value.resources) {
     assertTransactionResource(value, resource)
     const resourceFingerprint = fingerprint(resource)
     if (resourceFingerprints.has(resourceFingerprint)) throw new Error('RUNTIME_TRANSACTION_RESOURCE_DUPLICATE')
     resourceFingerprints.add(resourceFingerprint)
+    if (['database', 'bucket', 'acl-user'].includes(resource.kind)) {
+      const logicalOwner = `${resource.provider}:${resource.owner}`
+      if (logicalOwners.has(logicalOwner)) throw new Error('RUNTIME_TRANSACTION_LOGICAL_RESOURCE_DUPLICATE')
+      logicalOwners.add(logicalOwner)
+    }
   }
   for (const resource of value.resources.filter((entry) => ['database', 'bucket', 'acl-user'].includes(entry.kind))) {
     const container = value.resources.find((entry) => entry.kind === 'container' && entry.provider === resource.provider && entry.name === resource.containerName && entry.objectId === resource.containerObjectId && entry.scope === resource.containerScope)
@@ -376,6 +392,7 @@ export async function startRuntime(intent, adapters = {}) {
         transaction.resources.push(...resources)
         transaction.endpoints.push(...endpoints)
         publishAllocationTransaction(transactionPath, transaction)
+        if (adapters.afterProgressPublished) await adapters.afterProgressPublished({ provider, transactionPath, context })
         appendEvent(directory, { event: 'PROVIDER_READY', provider, resources: result.resources.map((resource) => ({ kind: resource.kind, objectId: resource.objectId, scope: resource.scope })) })
       }
       transaction.lifecycle = 'REGISTERED'

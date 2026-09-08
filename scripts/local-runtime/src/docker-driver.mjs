@@ -42,6 +42,16 @@ export function sharedResourceName(devStackId, pool, provider) {
 /** Binds every run-owned identity to its accountable task and run pair. */
 export function exactRunIdentity(context) { return `${context.taskKey}:${context.runId}` }
 
+/** Derives every provider-owned logical child identifier from one exact Stack or Run owner identity. */
+export function logicalResourceIdentity(context, provider, owner) {
+  const identity = context.profile === 'DEV' ? context.devStackId : exactRunIdentity(context)
+  const suffix = sha256([identity, owner].join(':')).slice(0, 12)
+  if (provider === 'postgres') return { suffix, database: 'oes_' + suffix + '_' + token(owner, 20).replaceAll('-', '_'), migrator: 'm_' + suffix, runtime: 'r_' + suffix }
+  if (provider === 'minio') return { suffix, bucket: 'oes-' + suffix, accessKey: 'a' + suffix, policy: 'p-' + suffix }
+  if (provider === 'redis') return { suffix, user: 'u_' + suffix, namespace: 'oes:' + suffix, eventScope: sha256(identity).slice(0, 12) }
+  throw new Error('LOGICAL_RESOURCE_PROVIDER_INVALID provider=' + provider)
+}
+
 /** Returns the exact Stack-owned provider directory for one pool and provider. */
 function sharedProviderDirectory(context, provider) { return path.join(context.stackRoot, 'providers', context.pool, provider) }
 
@@ -326,11 +336,7 @@ async function provisionPostgres(context, shared) {
   const allocations = []
   for (const owner of ownersFor(context, 'postgres')) {
     const persistent = context.profile === 'DEV'
-    const identity = persistent ? context.devStackId : exactRunIdentity(context)
-    const suffix = sha256(`${identity}:${owner}`).slice(0, 12)
-    const database = `oes_${suffix}_${token(owner, 20).replaceAll('-', '_')}`
-    const migrator = `m_${suffix}`
-    const runtime = `r_${suffix}`
+    const { suffix, database, migrator, runtime } = logicalResourceIdentity(context, 'postgres', owner)
     const ownerCredentialPath = persistent ? path.join(sharedCredentialDirectory(context, 'postgres'), 'owners', `${owner}.json`) : null
     const persisted = ownerCredentialPath && fs.existsSync(ownerCredentialPath) ? JSON.parse(fs.readFileSync(ownerCredentialPath, 'utf8')) : null
     const migratorPassword = persisted?.migratorPassword || randomSecret()
@@ -350,7 +356,7 @@ async function provisionPostgres(context, shared) {
     const runtimeUrl = `postgresql://${runtime}:${encodeURIComponent(runtimePassword)}@127.0.0.1:${port}/${database}?schema=public`
     ownerEnvironments[owner] = { DATABASE_URL: runtimeUrl }
     migratorEnvironments[owner] = { DATABASE_URL: migratorUrl }
-    allocations.push({ provider: 'postgres', kind: 'database', scope: persistent ? 'SHARED' : context.profile === 'CI' ? 'CI' : 'RUN', database, migrator, runtime, containerName: container.name, containerObjectId: container.objectId, containerScope: container.scope, rootCredentialReference, cleanup: persistent ? 'PRESERVE_SHARED' : 'DROP_EXACT' })
+    allocations.push({ provider: 'postgres', kind: 'database', scope: persistent ? 'SHARED' : context.profile === 'CI' ? 'CI' : 'RUN', owner, database, migrator, runtime, containerName: container.name, containerObjectId: container.objectId, containerScope: container.scope, rootCredentialReference, cleanup: persistent ? 'PRESERVE_SHARED' : 'DROP_EXACT' })
   }
   const reference = writeCredentialBundle(runtimeCredentialRoot(context), 'postgres', ownerEnvironments)
   writeMigratorCredentialBundle(context, migratorEnvironments)
@@ -390,21 +396,17 @@ async function provisionMinio(context, shared) {
   for (const owner of ownersFor(context, 'minio')) {
     if (owner !== 'asset-service') throw new Error(`MINIO_OWNER_DENIED owner=${owner}`)
     const persistent = context.profile === 'DEV'
-    const identity = persistent ? context.devStackId : exactRunIdentity(context)
-    const suffix = sha256(`${identity}:${owner}`).slice(0, 12)
-    const bucket = `oes-${suffix}`
-    const accessKey = `a${suffix}`
+    const { suffix, bucket, accessKey, policy } = logicalResourceIdentity(context, 'minio', owner)
     const ownerCredentialPath = persistent ? path.join(sharedCredentialDirectory(context, 'minio'), 'owners', `${owner}.json`) : null
     const persisted = ownerCredentialPath && fs.existsSync(ownerCredentialPath) ? JSON.parse(fs.readFileSync(ownerCredentialPath, 'utf8')) : null
     const secretKey = persisted?.secretKey || randomSecret()
     if (ownerCredentialPath && !persisted) writeAtomic(ownerCredentialPath, { bucket, accessKey, secretKey }, 0o600)
-    const policy = `p-${suffix}`
     const policyPath = path.join(context.runDirectory, 'provider', `minio-policy-${suffix}.json`)
     writeAtomic(policyPath, { Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: ['s3:GetBucketLocation', 's3:ListBucket'], Resource: [`arn:aws:s3:::${bucket}`] }, { Effect: 'Allow', Action: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject'], Resource: [`arn:aws:s3:::${bucket}/*`] }] })
     const script = `mc alias set -- local http://127.0.0.1:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null && mc mb --ignore-existing local/${bucket} >/dev/null && mc admin user add -- local ${accessKey} "$MINIO_USER_SECRET" >/dev/null && (mc admin policy info local ${policy} >/dev/null 2>&1 || mc admin policy create local ${policy} /policy.json >/dev/null) && mc admin policy attach local ${policy} --user ${accessKey} >/dev/null`
     docker(['run', '--rm', '--network', `container:${container.name}`, '--env', `MINIO_ROOT_USER=${rootUser}`, '--env', `MINIO_ROOT_PASSWORD=${rootPassword}`, '--env', `MINIO_USER_SECRET=${secretKey}`, '--volume', `${policyPath}:/policy.json:ro`, '--entrypoint', 'sh', IMAGES.minioClient, '-ec', script], { timeout: 120000 })
     ownerEnvironments[owner] = { ASSET_S3_ENDPOINT: endpoint, ASSET_S3_ACCESS_KEY_ID: accessKey, ASSET_S3_SECRET_ACCESS_KEY: secretKey, ASSET_S3_BUCKET: bucket, ASSET_S3_FORCE_PATH_STYLE: 'true' }
-    allocations.push({ provider: 'minio', kind: 'bucket', scope: persistent ? 'SHARED' : context.profile === 'CI' ? 'CI' : 'RUN', bucket, accessKey, policy, containerName: container.name, containerObjectId: container.objectId, containerScope: container.scope, adminCredentialReference, cleanup: persistent ? 'PRESERVE_SHARED' : 'DELETE_LOGICAL_EXACT' })
+    allocations.push({ provider: 'minio', kind: 'bucket', scope: persistent ? 'SHARED' : context.profile === 'CI' ? 'CI' : 'RUN', owner, bucket, accessKey, policy, containerName: container.name, containerObjectId: container.objectId, containerScope: container.scope, adminCredentialReference, cleanup: persistent ? 'PRESERVE_SHARED' : 'DELETE_LOGICAL_EXACT' })
   }
   const reference = writeCredentialBundle(runtimeCredentialRoot(context), 'minio', ownerEnvironments)
   return { resources: [container, ...allocations], endpoints: [{ provider: 'minio', authority: `docker:${container.objectId}:9000/tcp`, host: '127.0.0.1', port, ready: true, owners: Object.keys(ownerEnvironments), environment: { ASSET_S3_ENDPOINT: endpoint }, credentialReference: reference }] }
@@ -422,19 +424,15 @@ async function provisionRedis(context, shared) {
   const ownerEnvironments = {}
   const allocations = []
   for (const owner of ownersFor(context, 'redis')) {
-    const identity = shared ? context.devStackId : exactRunIdentity(context)
-    const suffix = sha256(`${identity}:${owner}`).slice(0, 12)
-    const eventScope = sha256(identity).slice(0, 12)
-    const user = `u_${suffix}`
+    const { suffix, user, namespace, eventScope } = logicalResourceIdentity(context, 'redis', owner)
     const ownerCredentialPath = shared ? path.join(sharedCredentialDirectory(context, 'redis'), 'owners', `${owner}.json`) : null
     const persisted = ownerCredentialPath && fs.existsSync(ownerCredentialPath) ? JSON.parse(fs.readFileSync(ownerCredentialPath, 'utf8')) : null
     const password = persisted?.password || randomSecret()
-    const namespace = `oes:${suffix}`
     const terminalDeviceUnavailableChannel = `oes:${eventScope}:events:terminal-device.unavailable`
     if (ownerCredentialPath && !persisted) writeAtomic(ownerCredentialPath, { user, password, namespace }, 0o600)
     docker(['exec', container.name, 'redis-cli', '-a', adminPassword, 'ACL', 'SETUSER', user, 'resetkeys', 'resetchannels', 'on', `>${password}`, `~${namespace}:*`, `&${terminalDeviceUnavailableChannel}`, '+@read', '+@write', '+ping', '+publish', '+subscribe', '+unsubscribe', '-@admin', '-@dangerous'])
     ownerEnvironments[owner] = { REDIS_HOST: '127.0.0.1', REDIS_PORT: String(port), REDIS_USERNAME: user, REDIS_PASSWORD: password, OES_REDIS_NAMESPACE: namespace, TERMINAL_DEVICE_UNAVAILABLE_REDIS_CHANNEL: terminalDeviceUnavailableChannel }
-    allocations.push({ provider: 'redis', kind: 'acl-user', scope: shared ? 'SHARED' : context.profile === 'CI' ? 'CI' : 'RUN', user, namespace, containerName: container.name, containerObjectId: container.objectId, cleanup: shared ? 'PRESERVE_SHARED' : 'DELETED_WITH_OWNED_CONTAINER' })
+    allocations.push({ provider: 'redis', kind: 'acl-user', scope: shared ? 'SHARED' : context.profile === 'CI' ? 'CI' : 'RUN', owner, user, namespace, containerName: container.name, containerObjectId: container.objectId, containerScope: container.scope, cleanup: shared ? 'PRESERVE_SHARED' : 'DELETED_WITH_OWNED_CONTAINER' })
   }
   const reference = writeCredentialBundle(runtimeCredentialRoot(context), 'redis', ownerEnvironments)
   return { resources: [container, ...allocations], endpoints: [{ provider: 'redis', authority: `docker:${container.objectId}:6379/tcp`, host: '127.0.0.1', port, ready: true, owners: ownersFor(context, 'redis'), environment: { REDIS_HOST: '127.0.0.1', REDIS_PORT: String(port) }, credentialReference: reference }] }
