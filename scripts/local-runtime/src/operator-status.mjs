@@ -1,7 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { fingerprint, readJson, sha256, writeAtomic } from './canonical.mjs'
+import { fingerprint, sha256, writeAtomic } from './canonical.mjs'
 import { reopenManifest, reopenStackManifest } from './manifest.mjs'
+import { reopenStackLeases } from './stack-lease.mjs'
 
 const REQUIRED = ['oes.runtime.version', 'oes.runtime.stack-key', 'oes.runtime.dev-stack-id', 'oes.runtime.scope', 'oes.runtime.pool', 'oes.runtime.provider']
 
@@ -20,24 +21,22 @@ export function reopenOperatorAuthority({ stackReferences = [], runManifestPaths
     if (cleanup.kind !== 'OES_RUNTIME_RUN_CLEANUP' || cleanup.stackKey !== run.stackKey || cleanup.taskKey !== run.taskKey || cleanup.runId !== run.runId || cleanup.sourceFingerprint !== run.manifestFingerprint || cleanup.recordFingerprint !== fingerprint(cleanup, 'recordFingerprint')) throw new Error(`OPERATOR_TERMINAL_CLEANUP_INVALID path=${cleanupPath}`)
     return { ...run, terminalCleanup: { path: cleanupPath, sha256: sha256(bytes), fingerprint: cleanup.recordFingerprint, result: cleanup.result } }
   })
-  const stackRoots = new Set([
-    ...stackReferences.map((reference) => path.dirname(path.dirname(path.resolve(reference.path)))),
-    ...runs.map((run) => path.resolve(run.stackRoot))
-  ])
-  const discoveredLeasePaths = [...stackRoots].flatMap((stackRoot) => {
-    const leasesRoot = path.join(stackRoot, 'leases')
-    return fs.existsSync(leasesRoot) ? fs.readdirSync(leasesRoot).filter((name) => name.endsWith('.json')).sort().map((name) => path.join(leasesRoot, name)) : []
-  }).sort()
+  const stackIdentities = new Map()
+  const registerStack = (stackRoot, stackKey, devStackId) => {
+    const root = path.resolve(stackRoot)
+    const previous = stackIdentities.get(root)
+    if (previous && (previous.stackKey !== stackKey || previous.devStackId !== devStackId)) throw new Error(`OPERATOR_STACK_IDENTITY_CONFLICT path=${root}`)
+    stackIdentities.set(root, { stackRoot: root, stackKey, devStackId })
+  }
+  stackReferences.forEach((reference, index) => registerStack(path.dirname(path.dirname(path.resolve(reference.path))), stacks[index].stackKey, stacks[index].devStackId))
+  runs.forEach((run) => registerStack(run.stackRoot, run.stackKey, run.devStackId))
+  const discoveredLeases = [...stackIdentities.values()].flatMap((identity) => reopenStackLeases(identity.stackRoot, identity))
+  const discoveredLeasePaths = discoveredLeases.map((lease) => lease.path).sort()
   const suppliedLeasePaths = leasePaths.map((file) => path.resolve(file)).sort()
   const missing = discoveredLeasePaths.filter((file) => !suppliedLeasePaths.includes(file))
   const unexpected = suppliedLeasePaths.filter((file) => !discoveredLeasePaths.includes(file))
   if (new Set(suppliedLeasePaths).size !== suppliedLeasePaths.length || missing.length || unexpected.length) throw new Error(`OPERATOR_LEASE_AUTHORITY_INCOMPLETE missing=${missing.join(',')} unexpected=${unexpected.join(',')}`)
-  const leases = discoveredLeasePaths.map((file) => {
-    const bytes = fs.readFileSync(file)
-    const value = readJson(file)
-    if (value.kind !== 'OES_RUNTIME_STACK_LEASE' || value.leaseFingerprint !== fingerprint(value, 'leaseFingerprint')) throw new Error(`OPERATOR_LEASE_INVALID path=${file}`)
-    return { ...value, path: file, sha256: sha256(bytes) }
-  })
+  const leases = discoveredLeases.sort((left, right) => left.path.localeCompare(right.path))
   return { stacks, runs, leases }
 }
 

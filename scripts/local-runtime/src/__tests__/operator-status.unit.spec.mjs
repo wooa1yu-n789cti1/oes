@@ -56,3 +56,14 @@ test('operator projection distinguishes SHARED, RUN, CI, LEGACY, and UNKNOWN thr
   assert.equal(failedCleanup.terminalStatus, 'FAILED')
   assert.equal(failedCleanup.action, 'PRESERVE')
 })
+
+test('operator authority rejects a self-fingerprinted lease for a foreign developer Stack', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-operator-foreign-lease-'))
+  const stackKey = 'oes-local-0123456789abcdef'
+  const stackRoot = path.join(root, 'stacks', stackKey)
+  const stack = publishStackManifest(stackRoot, { lifecycle: 'REGISTERED', stackKey, devStackId: 'fixture_machine', resources: [], endpoints: [], leases: [] })
+  const leaseRaw = { schemaVersion: 3, kind: 'OES_RUNTIME_STACK_LEASE', stackKey, devStackId: 'foreign_machine', taskKey: 'task_a', runId: 'run_a' }
+  const leasePath = path.join(stackRoot, 'leases', 'task_a--run_a.json')
+  writeAtomic(leasePath, { ...leaseRaw, leaseFingerprint: fingerprint(leaseRaw) })
+  assert.throws(() => reopenOperatorAuthority({ stackReferences: [stack.reference], leasePaths: [leasePath] }), /STACK_LEASE_IDENTITY_MISMATCH key=devStackId/)
+})

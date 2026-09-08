@@ -2,13 +2,14 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { acquireExclusiveLease, acquireFifoSlot, releaseExclusiveLease, releaseFifoIdentity } from './locks.mjs'
-import { fingerprint, readJson, redact, sha256, writeAtomic } from './canonical.mjs'
+import { canonicalJson, fingerprint, readJson, redact, sha256, writeAtomic } from './canonical.mjs'
 import { loadRuntimeConfig } from './config.mjs'
 import { planRuntime } from './planner.mjs'
 import { artifactReference, publishManifest, reopenManifest, reopenStackManifest, runDirectory, updateStackManifest } from './manifest.mjs'
 import { acquireRuntimeAdmission, resolveRuntimeLayout } from './state-layout.mjs'
 import { cleanupDockerResource, provisionDockerProvider } from './docker-driver.mjs'
 import { cleanupSimulatedResource, provisionSimulatedProvider } from './simulation-driver.mjs'
+import { removeStackLease, reopenStackLeases, stackLeasePath } from './stack-lease.mjs'
 
 const ID = /^[a-z0-9][a-z0-9_-]{1,79}$/u
 
@@ -27,25 +28,46 @@ function appendEvent(directory, event) {
 }
 
 /** Returns value-free references for every exact active Stack lease. */
-function activeLeaseReferences(stackRoot) {
-  const leasesRoot = path.join(stackRoot, 'leases')
-  if (!fs.existsSync(leasesRoot)) return []
-  return fs.readdirSync(leasesRoot).filter((entry) => entry.endsWith('.json')).sort().map((entry) => {
-    const file = path.join(leasesRoot, entry)
-    const value = readJson(file)
-    if (value.schemaVersion !== 3 || value.kind !== 'OES_RUNTIME_STACK_LEASE' || value.stackKey !== path.basename(stackRoot) || value.leaseFingerprint !== fingerprint(value, 'leaseFingerprint')) throw new Error(`STACK_LEASE_INVALID path=${file}`)
-    return { ...artifactReference(file, value, 'OES_RUNTIME_STACK_LEASE'), lifecycle: 'ACTIVE' }
-  })
+function activeLeaseReferences(context) {
+  return reopenStackLeases(context.stackRoot, { stackKey: context.stackKey, devStackId: context.devStackId }).map((lease) => ({ ...artifactReference(lease.path, lease, 'OES_RUNTIME_STACK_LEASE'), lifecycle: 'ACTIVE' }))
 }
 
 /** Derives shared-provider reference count from exact Stack lease files. */
-function sharedLeaseCount(stackRoot) { return activeLeaseReferences(stackRoot).length }
+function sharedLeaseCount(context) { return activeLeaseReferences(context).length }
+
+const SHARED_RESOURCE_IDENTITIES = {
+  container: 'name',
+  network: 'name',
+  volume: 'name',
+  image: 'name',
+  database: 'database',
+  bucket: 'bucket',
+  'acl-user': 'user',
+  certificate: 'owner',
+  'simulated-provider': 'name',
+  'simulated-logical': 'owner'
+}
+
+/** Produces one collision-free semantic identity for each supported shared resource kind. */
+function sharedResourceIdentity(resource) {
+  const field = SHARED_RESOURCE_IDENTITIES[resource.kind]
+  const pool = resource.pool || resource.labels?.['oes.runtime.pool']
+  if (resource.scope !== 'SHARED' || !resource.provider || !pool || !field || typeof resource[field] !== 'string' || !resource[field]) throw new Error(`STACK_SHARED_RESOURCE_IDENTITY_INVALID provider=${resource.provider || 'UNKNOWN'} kind=${resource.kind || 'UNKNOWN'}`)
+  return canonicalJson([resource.provider, pool, resource.kind, field, resource[field]])
+}
 
 /** Merges shared resource truth by exact semantic identity without copying it to Runs. */
 function mergedSharedResources(previous, additions) {
   const output = new Map()
-  const key = (value) => [value.provider, value.kind, value.name || value.database || value.bucket || value.owner || value.objectId].join(':')
-  for (const value of [...previous, ...additions]) output.set(key(value), value)
+  for (const [source, resources] of [['previous', previous], ['additions', additions]]) {
+    const seen = new Set()
+    for (const value of resources) {
+      const key = sharedResourceIdentity(value)
+      if (seen.has(key)) throw new Error(`STACK_SHARED_RESOURCE_DUPLICATE source=${source} identity=${key}`)
+      seen.add(key)
+      output.set(key, value)
+    }
+  }
   return [...output.values()]
 }
 
@@ -71,7 +93,7 @@ export function publishStackState(context, resources = [], endpoints = []) {
       jobFingerprint: context.jobFingerprint,
       resources: mergedResources,
       endpoints: [...endpointMap.values()],
-      leases: activeLeaseReferences(context.stackRoot),
+      leases: activeLeaseReferences(context),
       evidenceReferences: previous.evidenceReferences || []
     }
   })
@@ -146,7 +168,8 @@ export async function startRuntime(intent, adapters = {}) {
     const pool = intent.profile === 'DEV' ? 'dev' : intent.profile === 'CI' ? 'ci' : 'test'
     const context = { root, stateRoot: config.stateRoot, stackRoot: layout.stackRoot, runDirectory: directory, profile: intent.profile, pool, taskKey, runId, stackKey: layout.stackKey, devStackId: layout.devStackId, identityKind: layout.identityKind, jobFingerprint: layout.jobFingerprint, jobIdentity: layout.jobIdentity, owners: plan.owners, capabilities: plan.capabilities, providerOwners: plan.providerOwners }
     const releaseSlot = plan.realInfrastructure ? await acquireFifoSlot(config.stateRoot, config.concurrency, { stackKey: layout.stackKey, taskKey, runId, runDirectory: directory }) : () => {}
-    leasePath = path.join(layout.leasesRoot, `${taskKey}--${runId}.json`)
+    leasePath = stackLeasePath(layout.stackRoot, taskKey, runId)
+    if (fs.existsSync(leasePath)) throw new Error(`STACK_LEASE_ALREADY_EXISTS path=${leasePath}`)
     const leaseRaw = { schemaVersion: 3, kind: 'OES_RUNTIME_STACK_LEASE', stackKey: layout.stackKey, devStackId: layout.devStackId, taskKey, runId, profile: intent.profile, planFingerprint: plan.planFingerprint, pid: process.pid, createdAt: new Date().toISOString() }
     writeAtomic(leasePath, { ...leaseRaw, leaseFingerprint: fingerprint(leaseRaw) })
     const transaction = { schemaVersion: 3, kind: 'OES_RUNTIME_ALLOCATION_TRANSACTION', lifecycle: 'ALLOCATING', ...context, plan, config: redact(config), devLockLease: devLock.lease, resources: [], endpoints: [] }
@@ -174,7 +197,7 @@ export async function startRuntime(intent, adapters = {}) {
         resources: runResources,
         endpoints: runEndpoints,
         stackManifestReference: stackPublished.reference,
-        sharedLeaseCount: sharedLeaseCount(layout.stackRoot),
+        sharedLeaseCount: sharedLeaseCount(context),
         evidenceReference: { type: 'OES_RUNTIME_RUN_EVENTS', path: path.join(directory, 'events.ndjson') }
       }
       const published = publishManifest(directory, runDraft)
@@ -193,14 +216,14 @@ export async function startRuntime(intent, adapters = {}) {
         ? { resource: { kind: 'run-private-files', scope: 'RUN', runDirectory: context.runDirectory }, disposition: 'PRESERVED_DEPENDENT_CLEANUP_FAILURE', exitStatus: 1 }
         : cleanupRunPrivateFiles(context))
       writeAtomic(path.join(directory, 'failed-cleanup.json'), { schemaVersion: 3, taskKey, runId, cleanupResults: redact(cleanupResults), primaryFailure: primary.message })
-      fs.rmSync(leasePath, { force: true })
+      if (fs.existsSync(leasePath)) removeStackLease(leasePath, { stackRoot: context.stackRoot, stackKey: context.stackKey, devStackId: context.devStackId, taskKey, runId })
       if (fs.existsSync(path.join(context.stackRoot, 'current-manifest.json'))) publishStackState(context)
       releaseSlot()
       throw primary
     }
   } catch (error) {
     admission.release()
-    if (leasePath) fs.rmSync(leasePath, { force: true })
+    if (leasePath && fs.existsSync(leasePath)) removeStackLease(leasePath, { stackRoot: layout.stackRoot, stackKey: layout.stackKey, devStackId: layout.devStackId, taskKey, runId })
     devLock.release()
     throw error
   }
@@ -220,13 +243,13 @@ export function reconcileRuntime({ manifestPath, transactionPath, cleanupResourc
     ? { resource: { kind: 'run-private-files', scope: 'RUN', runDirectory: directory }, disposition: 'PRESERVED_DEPENDENT_CLEANUP_FAILURE', exitStatus: 1 }
     : cleanupRunPrivateFiles(context))
   const failures = cleanupResults.filter((result) => result.exitStatus !== 0)
-  const leasePath = path.join(value.stackRoot, 'leases', `${value.taskKey}--${value.runId}.json`)
-  fs.rmSync(leasePath, { force: true })
+  const leasePath = stackLeasePath(value.stackRoot, value.taskKey, value.runId)
+  if (fs.existsSync(leasePath)) removeStackLease(leasePath, { stackRoot: value.stackRoot, stackKey: value.stackKey, devStackId: value.devStackId, taskKey: value.taskKey, runId: value.runId })
   releaseSlot()
   releaseFifoIdentity(value.stateRoot, value.taskKey, value.runId)
   if (releaseDevLock) releaseDevLock()
   else if (value.devLockLease) releaseExclusiveLease(value.devLockLease)
-  const record = { schemaVersion: 3, kind: 'OES_RUNTIME_RUN_CLEANUP', stackKey: value.stackKey, taskKey: value.taskKey, runId: value.runId, sourceFingerprint: value.manifestFingerprint || fingerprint(value), cleanupResults: redact(cleanupResults), sharedLeaseCount: sharedLeaseCount(value.stackRoot), result: failures.length ? 'PRESERVED_WITH_FINDINGS' : 'RECONCILED' }
+  const record = { schemaVersion: 3, kind: 'OES_RUNTIME_RUN_CLEANUP', stackKey: value.stackKey, taskKey: value.taskKey, runId: value.runId, sourceFingerprint: value.manifestFingerprint || fingerprint(value), cleanupResults: redact(cleanupResults), sharedLeaseCount: sharedLeaseCount(context), result: failures.length ? 'PRESERVED_WITH_FINDINGS' : 'RECONCILED' }
   record.recordFingerprint = fingerprint(record)
   writeAtomic(path.join(directory, 'cleanup.json'), record)
   appendEvent(directory, { event: 'RUN_RECONCILED', result: record.result, sharedLeaseCount: record.sharedLeaseCount })

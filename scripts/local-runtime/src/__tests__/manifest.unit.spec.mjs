@@ -8,6 +8,7 @@ import { fingerprint, writeAtomic } from '../canonical.mjs'
 import { writeCredentialBundle, resolveCredentialReference } from '../credentials.mjs'
 import { environmentForOwner, publishManifest, publishStackManifest, reopenCurrentStackManifest, reopenManifest } from '../manifest.mjs'
 import { publishStackState } from '../orchestrator.mjs'
+import { reopenStackLease } from '../stack-lease.mjs'
 
 test('manifest publication is readiness-gated, atomic and value-free', () => {
   const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-runtime-manifest-'))
@@ -47,7 +48,7 @@ test('concurrent Stack publishers allocate distinct immutable generations', asyn
   for (const generation of generations) assert.equal(fs.existsSync(path.join(stackRoot, 'manifests', `${generation}.json`)), true)
 })
 
-test('concurrent Stack state updates preserve both semantic additions and the complete active lease set', async () => {
+test('concurrent same-provider Stack updates preserve both Redis ACL users and the complete active lease set', async () => {
   const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-runtime-stack-update-concurrent-'))
   const stackKey = 'oes-local-0123456789abcdef'
   const stackRoot = path.join(stateRoot, 'stacks', stackKey)
@@ -57,12 +58,10 @@ test('concurrent Stack state updates preserve both semantic additions and the co
     writeAtomic(path.join(stackRoot, 'leases', `task_${side}--run_${side}.json`), { ...raw, leaseFingerprint: fingerprint(raw) })
   }
   const moduleUrl = new URL('../orchestrator.mjs', import.meta.url).href
-  const run = (side, provider) => new Promise((resolve, reject) => {
+  const run = (side) => new Promise((resolve, reject) => {
     const context = { stackRoot, stackKey, devStackId: 'machine_a', identityKind: 'LOCAL', profile: 'DEV', pool: 'dev' }
-    const resource = provider === 'postgres'
-      ? { provider, pool: 'dev', scope: 'SHARED', kind: 'database', database: `db_${side}`, objectId: `object_${side}` }
-      : { provider, pool: 'dev', scope: 'SHARED', kind: 'bucket', bucket: `bucket_${side}`, objectId: `object_${side}` }
-    const endpoint = { provider, pool: 'dev', ready: true, authority: `fixture:${side}`, owners: [], environment: {} }
+    const resource = { provider: 'redis', pool: 'dev', scope: 'SHARED', kind: 'acl-user', user: `u_${side}`, namespace: `oes:${side}`, objectId: `object_${side}` }
+    const endpoint = { provider: 'redis', pool: 'dev', ready: true, authority: `fixture:${side}`, owners: [], environment: {} }
     const script = `import { publishStackState } from ${JSON.stringify(moduleUrl)}; const result = publishStackState(${JSON.stringify(context)}, [${JSON.stringify(resource)}], [${JSON.stringify(endpoint)}]); process.stdout.write(result.manifest.generation)`
     const child = spawn(process.execPath, ['--input-type=module', '--eval', script], { stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = '', stderr = ''
@@ -71,11 +70,12 @@ test('concurrent Stack state updates preserve both semantic additions and the co
     child.on('error', reject)
     child.on('close', (code) => code === 0 ? resolve(stdout) : reject(new Error(`publisher exit=${code} stderr=${stderr}`)))
   })
-  const generations = await Promise.all([run('a', 'postgres'), run('b', 'minio')])
+  const generations = await Promise.all([run('a'), run('b')])
   assert.equal(new Set(generations).size, 2)
   const current = reopenCurrentStackManifest(stackRoot).manifest
   assert.deepEqual(current.resources.map((resource) => resource.objectId).sort(), ['object_a', 'object_b'])
-  assert.deepEqual(current.endpoints.map((endpoint) => endpoint.provider).sort(), ['minio', 'postgres'])
+  assert.deepEqual(current.resources.map((resource) => resource.user).sort(), ['u_a', 'u_b'])
+  assert.deepEqual(current.endpoints.map((endpoint) => endpoint.provider), ['redis'])
   assert.deepEqual(current.leases.map((lease) => lease.lifecycle), ['ACTIVE', 'ACTIVE'])
 })
 
@@ -85,5 +85,37 @@ test('Stack publication rejects a corrupted active lease instead of referencing 
   const stackRoot = path.join(stateRoot, 'stacks', stackKey)
   const lease = { schemaVersion: 3, kind: 'OES_RUNTIME_STACK_LEASE', stackKey, devStackId: 'machine_a', taskKey: 'task_a', runId: 'run_a', leaseFingerprint: 'corrupt' }
   writeAtomic(path.join(stackRoot, 'leases', 'task_a--run_a.json'), lease)
-  assert.throws(() => publishStackState({ stackRoot, stackKey, devStackId: 'machine_a', identityKind: 'LOCAL', profile: 'DEV', pool: 'dev' }), /STACK_LEASE_INVALID/)
+  assert.throws(() => publishStackState({ stackRoot, stackKey, devStackId: 'machine_a', identityKind: 'LOCAL', profile: 'DEV', pool: 'dev' }), /STACK_LEASE_FINGERPRINT_MISMATCH/)
+})
+
+test('one Stack update preserves distinct Redis ACL users and rejects duplicate semantic identities', () => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-runtime-stack-resource-identity-'))
+  const stackKey = 'oes-local-0123456789abcdef'
+  const stackRoot = path.join(stateRoot, 'stacks', stackKey)
+  const context = { stackRoot, stackKey, devStackId: 'machine_a', identityKind: 'LOCAL', profile: 'DEV', pool: 'dev' }
+  const acl = (user, objectId) => ({ provider: 'redis', pool: 'dev', scope: 'SHARED', kind: 'acl-user', user, namespace: `oes:${user}`, objectId })
+  const published = publishStackState(context, [acl('u_alpha', 'object_a'), acl('u_beta', 'object_b')])
+  assert.deepEqual(published.manifest.resources.map((resource) => resource.user), ['u_alpha', 'u_beta'])
+  assert.throws(() => publishStackState(context, [acl('u_alpha', 'replacement_a'), acl('u_alpha', 'replacement_b')]), /STACK_SHARED_RESOURCE_DUPLICATE/)
+})
+
+test('exact Stack lease reopen rejects foreign identity, noncanonical path, and invalid task or run keys', () => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-runtime-stack-lease-semantics-'))
+  const stackKey = 'oes-local-0123456789abcdef'
+  const stackRoot = path.join(stateRoot, 'stacks', stackKey)
+  const writeLease = (file, overrides = {}) => {
+    const raw = { schemaVersion: 3, kind: 'OES_RUNTIME_STACK_LEASE', stackKey, devStackId: 'machine_a', taskKey: 'task_a', runId: 'run_a', ...overrides }
+    writeAtomic(file, { ...raw, leaseFingerprint: fingerprint(raw) })
+  }
+  const expected = { stackRoot, stackKey, devStackId: 'machine_a' }
+  const canonical = path.join(stackRoot, 'leases', 'task_a--run_a.json')
+  writeLease(canonical, { devStackId: 'machine_foreign' })
+  assert.throws(() => reopenStackLease(canonical, expected), /STACK_LEASE_IDENTITY_MISMATCH key=devStackId/)
+  writeLease(path.join(stackRoot, 'leases', 'noncanonical.json'))
+  assert.throws(() => reopenStackLease(path.join(stackRoot, 'leases', 'noncanonical.json'), expected), /STACK_LEASE_PATH_MISMATCH/)
+  writeLease(path.join(stackRoot, 'leases', 'x--run_a.json'), { taskKey: 'x' })
+  assert.throws(() => reopenStackLease(path.join(stackRoot, 'leases', 'x--run_a.json'), expected), /STATE_PATH_KEY_INVALID key=taskKey/)
+  const outside = path.join(stateRoot, 'outside', 'task_a--run_a.json')
+  writeLease(outside)
+  assert.throws(() => reopenStackLease(outside, expected), /STATE_PATH_ESCAPE/)
 })
