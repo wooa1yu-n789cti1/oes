@@ -6,6 +6,7 @@ import test from 'node:test'
 import { fingerprint, writeAtomic } from '../canonical.mjs'
 import { publishManifest, publishStackManifest } from '../manifest.mjs'
 import { applyOperatorReconciliation, classifyRuntimeObject, planOperatorReconciliation, reopenOperatorAuthority } from '../operator-status.mjs'
+import { stackLeasePath } from '../stack-lease.mjs'
 
 function labels(scope, extra = {}) {
   return { 'oes.runtime.version': '2', 'oes.runtime.stack-key': 'oes-local-0123456789abcdef', 'oes.runtime.dev-stack-id': 'fixture_machine', 'oes.runtime.scope': scope, 'oes.runtime.pool': scope === 'CI' ? 'ci' : 'test', 'oes.runtime.provider': 'postgres', ...extra }
@@ -23,7 +24,7 @@ test('operator projection distinguishes SHARED, RUN, CI, LEGACY, and UNKNOWN thr
   const cleanupRaw = { schemaVersion: 3, kind: 'OES_RUNTIME_RUN_CLEANUP', stackKey, taskKey: 'task_ci', runId: 'run_ci', sourceFingerprint: ci.manifest.manifestFingerprint, cleanupResults: [], sharedLeaseCount: 0, result: 'RECONCILED' }
   writeAtomic(path.join(ciRoot, 'cleanup.json'), { ...cleanupRaw, recordFingerprint: fingerprint(cleanupRaw) })
   const leaseRaw = { schemaVersion: 3, kind: 'OES_RUNTIME_STACK_LEASE', stackKey, devStackId: 'fixture_machine', taskKey: 'task_a', runId: 'run_a' }
-  const leasePath = path.join(stackRoot, 'leases', 'task_a--run_a.json')
+  const leasePath = stackLeasePath(stackRoot, 'task_a', 'run_a')
   writeAtomic(leasePath, { ...leaseRaw, leaseFingerprint: fingerprint(leaseRaw) })
   assert.throws(() => reopenOperatorAuthority({ stackReferences: [stack.reference], runManifestPaths: [run.file, ci.file], leasePaths: [] }), /OPERATOR_LEASE_AUTHORITY_INCOMPLETE/)
   const authority = reopenOperatorAuthority({ stackReferences: [stack.reference], runManifestPaths: [run.file, ci.file], leasePaths: [leasePath] })
@@ -63,7 +64,7 @@ test('operator authority rejects a self-fingerprinted lease for a foreign develo
   const stackRoot = path.join(root, 'stacks', stackKey)
   const stack = publishStackManifest(stackRoot, { lifecycle: 'REGISTERED', stackKey, devStackId: 'fixture_machine', resources: [], endpoints: [], leases: [] })
   const leaseRaw = { schemaVersion: 3, kind: 'OES_RUNTIME_STACK_LEASE', stackKey, devStackId: 'foreign_machine', taskKey: 'task_a', runId: 'run_a' }
-  const leasePath = path.join(stackRoot, 'leases', 'task_a--run_a.json')
+  const leasePath = stackLeasePath(stackRoot, 'task_a', 'run_a')
   writeAtomic(leasePath, { ...leaseRaw, leaseFingerprint: fingerprint(leaseRaw) })
   assert.throws(() => reopenOperatorAuthority({ stackReferences: [stack.reference], leasePaths: [leasePath] }), /STACK_LEASE_IDENTITY_MISMATCH key=devStackId/)
 })

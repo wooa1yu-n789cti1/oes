@@ -169,6 +169,14 @@ test('planning rejects unknown root entries and provider trees without exact sna
   assert.throws(() => planStateLayoutMigration(uncovered.inventory, { providerSnapshots: uncovered.providerSnapshots.map(({ resource }) => ({ resource })) }), /STATE_MIGRATION_PROVIDER_ENDPOINT_COVERAGE_REQUIRED/)
 })
 
+test('migration planning preserves distinct Redis ACL users through the shared Stack identity contract', () => {
+  const migrated = fixture()
+  const acl = (user, objectId) => ({ resource: { provider: 'redis', kind: 'acl-user', scope: 'SHARED', pool: 'test', user, namespace: `oes:${user}`, objectId } })
+  const plan = planStateLayoutMigration(migrated.inventory, { providerSnapshots: [...migrated.providerSnapshots, acl('user_alpha', 'acl-alpha'), acl('user_beta', 'acl-beta')] })
+  assert.deepEqual(plan.providerSnapshots.filter((snapshot) => snapshot.resource?.kind === 'acl-user').map((snapshot) => snapshot.resource.user), ['user_alpha', 'user_beta'])
+  assert.throws(() => planStateLayoutMigration(migrated.inventory, { providerSnapshots: [...migrated.providerSnapshots, acl('user_alpha', 'acl-alpha'), acl('user_alpha', 'acl-beta')] }), /STATE_MIGRATION_PROVIDER_RESOURCE_DUPLICATE/)
+})
+
 test('inventory preserves non-bind Docker objects and planning requires their exact coverage', () => {
   const base = fixture()
   const labels = base.providerSnapshots[0].resource.labels

@@ -2,7 +2,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { acquireExclusiveLease, acquireFifoSlot, releaseExclusiveLease, releaseFifoIdentity } from './locks.mjs'
-import { canonicalJson, fingerprint, readJson, redact, sha256, writeAtomic } from './canonical.mjs'
+import { fingerprint, readJson, redact, sha256, writeAtomic } from './canonical.mjs'
 import { loadRuntimeConfig } from './config.mjs'
 import { planRuntime } from './planner.mjs'
 import { artifactReference, publishManifest, reopenManifest, reopenStackManifest, runDirectory, updateStackManifest } from './manifest.mjs'
@@ -10,6 +10,7 @@ import { acquireRuntimeAdmission, resolveRuntimeLayout } from './state-layout.mj
 import { cleanupDockerResource, provisionDockerProvider } from './docker-driver.mjs'
 import { cleanupSimulatedResource, provisionSimulatedProvider } from './simulation-driver.mjs'
 import { removeStackLease, reopenStackLeases, stackLeasePath } from './stack-lease.mjs'
+import { sharedResourceIdentity } from './stack-resource.mjs'
 
 const ID = /^[a-z0-9][a-z0-9_-]{1,79}$/u
 
@@ -34,27 +35,6 @@ function activeLeaseReferences(context) {
 
 /** Derives shared-provider reference count from exact Stack lease files. */
 function sharedLeaseCount(context) { return activeLeaseReferences(context).length }
-
-const SHARED_RESOURCE_IDENTITIES = {
-  container: 'name',
-  network: 'name',
-  volume: 'name',
-  image: 'name',
-  database: 'database',
-  bucket: 'bucket',
-  'acl-user': 'user',
-  certificate: 'owner',
-  'simulated-provider': 'name',
-  'simulated-logical': 'owner'
-}
-
-/** Produces one collision-free semantic identity for each supported shared resource kind. */
-function sharedResourceIdentity(resource) {
-  const field = SHARED_RESOURCE_IDENTITIES[resource.kind]
-  const pool = resource.pool || resource.labels?.['oes.runtime.pool']
-  if (resource.scope !== 'SHARED' || !resource.provider || !pool || !field || typeof resource[field] !== 'string' || !resource[field]) throw new Error(`STACK_SHARED_RESOURCE_IDENTITY_INVALID provider=${resource.provider || 'UNKNOWN'} kind=${resource.kind || 'UNKNOWN'}`)
-  return canonicalJson([resource.provider, pool, resource.kind, field, resource[field]])
-}
 
 /** Merges shared resource truth by exact semantic identity without copying it to Runs. */
 function mergedSharedResources(previous, additions) {
@@ -144,6 +124,19 @@ export function cleanupRunPrivateFiles(context) {
   return { resource: { kind: 'run-private-files', scope: 'RUN', runDirectory: expectedRunDirectory }, disposition: deleted.length ? 'DELETED_EXACT' : 'ALREADY_ABSENT', deleted, exitStatus: 0 }
 }
 
+/** Removes an owner-only Run directory created by an allocation that failed before transaction publication. */
+function removeIncompleteRunOwner(context) {
+  const expectedRunDirectory = path.resolve(runDirectory(context.stateRoot, context.stackKey, context.taskKey, context.runId))
+  if (path.resolve(context.runDirectory) !== expectedRunDirectory) throw new Error('RUN_INCOMPLETE_DIRECTORY_IDENTITY_MISMATCH')
+  const markerPath = path.join(expectedRunDirectory, 'run-owner.json')
+  const marker = readJson(markerPath)
+  if (marker.markerFingerprint !== fingerprint(marker, 'markerFingerprint') || marker.path !== expectedRunDirectory || marker.stackKey !== context.stackKey || marker.taskKey !== context.taskKey || marker.runId !== context.runId) throw new Error('RUN_INCOMPLETE_OWNER_MARKER_MISMATCH')
+  const entries = fs.readdirSync(expectedRunDirectory)
+  if (entries.length !== 1 || entries[0] !== 'run-owner.json') throw new Error(`RUN_INCOMPLETE_RESIDUE_PRESERVED path=${expectedRunDirectory}`)
+  fs.unlinkSync(markerPath)
+  fs.rmdirSync(expectedRunDirectory)
+}
+
 /** Starts one exact runtime allocation and publishes Stack then Run authority only after readiness. */
 export async function startRuntime(intent, adapters = {}) {
   const root = path.resolve(intent.root)
@@ -155,26 +148,38 @@ export async function startRuntime(intent, adapters = {}) {
   let layout
   let devLock = { lease: null, release: () => {} }
   let leasePath
+  let leaseOwned = false
+  let releaseSlot = () => {}
+  let slotAcquired = false
+  let context
+  let runOwnerCreated = false
+  let transactionPublished = false
   try {
     layout = await resolveRuntimeLayout({ stateRoot: config.stateRoot, profile: intent.profile, taskKey, runId, explicitDevStackId: intent.devStackId, identitySeed: intent.identitySeed, ciSeed: intent.ciSeed, hostBinding: intent.hostBinding, ciJobIdentity: intent.ciJobIdentity })
     devLock = intent.profile === 'DEV'
       ? await acquireExclusiveLease(path.join(config.stateRoot, 'locks', 'stacks', `${layout.stackKey}.lock`), { kind: 'DEV_STACK', stackKey: layout.stackKey, devStackId: layout.devStackId, taskKey, runId }, { timeoutMs: intent.devLockTimeoutMs || 30000 })
       : devLock
     const directory = layout.runRoot
+    leasePath = stackLeasePath(layout.stackRoot, taskKey, runId)
+    if (fs.existsSync(leasePath)) throw new Error(`STACK_LEASE_ALREADY_EXISTS path=${leasePath}`)
     if (fs.existsSync(path.join(directory, 'manifest.json'))) throw new Error(`RUNTIME_RUN_ALREADY_REGISTERED taskKey=${taskKey} runId=${runId}`)
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
     const markerRaw = { schemaVersion: 3, kind: 'OES_RUNTIME_RUN_OWNER', path: directory, stackKey: layout.stackKey, taskKey, runId }
     writeAtomic(path.join(directory, 'run-owner.json'), { ...markerRaw, markerFingerprint: fingerprint(markerRaw) })
+    runOwnerCreated = true
     const pool = intent.profile === 'DEV' ? 'dev' : intent.profile === 'CI' ? 'ci' : 'test'
-    const context = { root, stateRoot: config.stateRoot, stackRoot: layout.stackRoot, runDirectory: directory, profile: intent.profile, pool, taskKey, runId, stackKey: layout.stackKey, devStackId: layout.devStackId, identityKind: layout.identityKind, jobFingerprint: layout.jobFingerprint, jobIdentity: layout.jobIdentity, owners: plan.owners, capabilities: plan.capabilities, providerOwners: plan.providerOwners }
-    const releaseSlot = plan.realInfrastructure ? await acquireFifoSlot(config.stateRoot, config.concurrency, { stackKey: layout.stackKey, taskKey, runId, runDirectory: directory }) : () => {}
-    leasePath = stackLeasePath(layout.stackRoot, taskKey, runId)
-    if (fs.existsSync(leasePath)) throw new Error(`STACK_LEASE_ALREADY_EXISTS path=${leasePath}`)
+    context = { root, stateRoot: config.stateRoot, stackRoot: layout.stackRoot, runDirectory: directory, profile: intent.profile, pool, taskKey, runId, stackKey: layout.stackKey, devStackId: layout.devStackId, identityKind: layout.identityKind, jobFingerprint: layout.jobFingerprint, jobIdentity: layout.jobIdentity, owners: plan.owners, capabilities: plan.capabilities, providerOwners: plan.providerOwners }
+    if (plan.realInfrastructure) {
+      releaseSlot = await acquireFifoSlot(config.stateRoot, config.concurrency, { stackKey: layout.stackKey, taskKey, runId, runDirectory: directory })
+      slotAcquired = true
+    }
     const leaseRaw = { schemaVersion: 3, kind: 'OES_RUNTIME_STACK_LEASE', stackKey: layout.stackKey, devStackId: layout.devStackId, taskKey, runId, profile: intent.profile, planFingerprint: plan.planFingerprint, pid: process.pid, createdAt: new Date().toISOString() }
     writeAtomic(leasePath, { ...leaseRaw, leaseFingerprint: fingerprint(leaseRaw) })
+    leaseOwned = true
     const transaction = { schemaVersion: 3, kind: 'OES_RUNTIME_ALLOCATION_TRANSACTION', lifecycle: 'ALLOCATING', ...context, plan, config: redact(config), devLockLease: devLock.lease, resources: [], endpoints: [] }
     const transactionPath = path.join(directory, 'transaction.json')
     writeAtomic(transactionPath, transaction)
+    transactionPublished = true
     appendEvent(directory, { event: 'ALLOCATION_STARTED', stackKey: layout.stackKey, taskKey, runId, profile: intent.profile, planFingerprint: plan.planFingerprint })
     admission.release()
     const provision = adapters.provisionProvider || (intent.driver === 'simulation' ? provisionSimulatedProvider : provisionDockerProvider)
@@ -223,8 +228,18 @@ export async function startRuntime(intent, adapters = {}) {
     }
   } catch (error) {
     admission.release()
-    if (leasePath && fs.existsSync(leasePath)) removeStackLease(leasePath, { stackRoot: layout.stackRoot, stackKey: layout.stackKey, devStackId: layout.devStackId, taskKey, runId })
+    const cleanupErrors = []
+    if (leaseOwned && leasePath && fs.existsSync(leasePath)) {
+      try { removeStackLease(leasePath, { stackRoot: layout.stackRoot, stackKey: layout.stackKey, devStackId: layout.devStackId, taskKey, runId }) } catch (cleanupError) { cleanupErrors.push(cleanupError) }
+    }
+    if (slotAcquired) {
+      try { releaseSlot(); releaseFifoIdentity(config.stateRoot, taskKey, runId) } catch (cleanupError) { cleanupErrors.push(cleanupError) }
+    }
+    if (runOwnerCreated && !transactionPublished && context) {
+      try { removeIncompleteRunOwner(context) } catch (cleanupError) { cleanupErrors.push(cleanupError) }
+    }
     devLock.release()
+    if (cleanupErrors.length) throw new AggregateError([error, ...cleanupErrors], 'RUNTIME_START_AND_PARTIAL_CLEANUP_FAILED')
     throw error
   }
 }

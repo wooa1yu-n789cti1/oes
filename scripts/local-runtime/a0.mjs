@@ -9,6 +9,7 @@ import { environmentForOwner, reopenManifest, resolveResources } from './src/man
 import { reconcileRuntime, startRuntime, withRuntime } from './src/orchestrator.mjs'
 import { cleanupDockerResource, observeDockerResourceResidue, provisionDockerProvider } from './src/docker-driver.mjs'
 import { cleanupSimulatedResource, provisionSimulatedProvider } from './src/simulation-driver.mjs'
+import { stackLeasePath } from './src/stack-lease.mjs'
 
 const root = path.resolve(import.meta.dirname, '../..')
 const IMAGES = Object.freeze({
@@ -98,7 +99,7 @@ function listFiles(root) {
 function observeRunResidue({ stateRoot, driver, manifest }) {
   const runDirectory = manifest.runDirectory
   const privateFiles = ['provider', 'credentials', 'orchestration'].flatMap((name) => listFiles(path.join(runDirectory, name))).map((file) => path.relative(runDirectory, file))
-  const leasePath = path.join(manifest.stackRoot, 'leases', `${manifest.taskKey}--${manifest.runId}.json`)
+  const leasePath = stackLeasePath(manifest.stackRoot, manifest.taskKey, manifest.runId)
   const queue = path.join(stateRoot, 'semaphores', 'queue')
   const fifoTickets = fs.existsSync(queue) ? fs.readdirSync(queue).filter((entry) => entry.endsWith('.json')).filter((entry) => {
     try { const value = JSON.parse(fs.readFileSync(path.join(queue, entry), 'utf8')); return value.taskKey === manifest.taskKey && value.runId === manifest.runId } catch { return false }

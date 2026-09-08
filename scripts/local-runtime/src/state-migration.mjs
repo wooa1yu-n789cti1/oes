@@ -5,6 +5,7 @@ import { fingerprint, readJson, sha256, writeAtomic } from './canonical.mjs'
 import { sharedResourceName } from './docker-driver.mjs'
 import { publishStackManifest, reopenCurrentStackManifest, reopenStackManifest } from './manifest.mjs'
 import { acquireMigrationBarrier, activeRuntimeAdmissions, assertNoSymlink, exactPathKey, resolveRuntimeLayout } from './state-layout.mjs'
+import { sharedResourceIdentity } from './stack-resource.mjs'
 import { runChecked } from './process.mjs'
 
 /** Recursively inventories one state root without following symlinks. */
@@ -253,7 +254,7 @@ export function planStateLayoutMigration(inventory, { devStackId, providerSnapsh
     seenEndpoints.set(key, observed)
     return snapshot
   }).filter((snapshot) => snapshot.resource || snapshot.endpoint)
-  const resourceKeys = normalizedProviderSnapshots.filter((snapshot) => snapshot.resource).map((snapshot) => `${snapshot.resource.provider}:${snapshot.resource.pool}:${snapshot.resource.kind}:${snapshot.resource.objectId || snapshot.resource.name || snapshot.resource.database || snapshot.resource.bucket || snapshot.resource.owner}`)
+  const resourceKeys = normalizedProviderSnapshots.filter((snapshot) => snapshot.resource).map((snapshot) => sharedResourceIdentity(snapshot.resource))
   const endpointKeys = normalizedProviderSnapshots.filter((snapshot) => snapshot.endpoint).map((snapshot) => `${snapshot.endpoint.provider}:${snapshot.endpoint.pool}`)
   if (new Set(resourceKeys).size !== resourceKeys.length) throw new Error('STATE_MIGRATION_PROVIDER_RESOURCE_DUPLICATE')
   if (new Set(endpointKeys).size !== endpointKeys.length) throw new Error('STATE_MIGRATION_PROVIDER_ENDPOINT_DUPLICATE')

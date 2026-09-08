@@ -6,9 +6,10 @@ import test from 'node:test'
 import { resolveCredentialReference } from '../credentials.mjs'
 import { environmentForOwner, resolveResources } from '../manifest.mjs'
 import { fingerprint, writeAtomic } from '../canonical.mjs'
-import { cleanupRunPrivateFiles, startRuntime, withRuntime } from '../orchestrator.mjs'
+import { cleanupRunPrivateFiles, reconcileRuntime, startRuntime, withRuntime } from '../orchestrator.mjs'
 import { cleanupSimulatedResource } from '../simulation-driver.mjs'
-import { acquireMigrationBarrier } from '../state-layout.mjs'
+import { acquireMigrationBarrier, resolveRuntimeLayout } from '../state-layout.mjs'
+import { stackLeasePath } from '../stack-lease.mjs'
 
 const root = path.resolve(import.meta.dirname, '../../../..')
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -47,6 +48,33 @@ test('real-resource FIFO semaphore limits concurrent runs to two', async () => {
   let maximum = 0
   await Promise.all(['a', 'b', 'c'].map((suffix) => withRuntime(intent(stateRoot, `task_${suffix}`, `run_${suffix}`), async () => { active += 1; maximum = Math.max(maximum, active); await delay(80); active -= 1 })))
   assert.equal(maximum, 2)
+})
+
+test('delimiter-bearing task and run identities allocate distinct leases and reconcile without FIFO residue', async () => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-runtime-lease-injective-'))
+  const first = await startRuntime(intent(stateRoot, 'aa--bb', 'cc'))
+  const second = await startRuntime(intent(stateRoot, 'aa', 'bb--cc'))
+  assert.notEqual(stackLeasePath(first.context.stackRoot, 'aa--bb', 'cc'), stackLeasePath(second.context.stackRoot, 'aa', 'bb--cc'))
+  assert.equal(fs.readdirSync(path.join(first.context.stackRoot, 'leases')).filter((entry) => entry.endsWith('.json')).length, 2)
+  reconcileRuntime({ manifestPath: first.file, cleanupResource: first.cleanup, releaseSlot: first.releaseSlot, releaseDevLock: first.releaseDevLock })
+  reconcileRuntime({ manifestPath: second.file, cleanupResource: second.cleanup, releaseSlot: second.releaseSlot, releaseDevLock: second.releaseDevLock })
+  assert.deepEqual(fs.readdirSync(path.join(first.context.stackRoot, 'leases')), [])
+  assert.deepEqual(fs.readdirSync(path.join(stateRoot, 'semaphores', 'queue')), [])
+})
+
+test('pre-transaction lease publication failure removes its FIFO ticket and owner-only Run directory', async () => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-runtime-partial-start-'))
+  const taskKey = 'task_partial'
+  const runId = 'run_partial'
+  const layout = await resolveRuntimeLayout({ stateRoot, profile: 'LOCAL_INTEGRATION', taskKey, runId, explicitDevStackId: 'fixture_machine' })
+  assert.deepEqual(fs.readdirSync(path.join(layout.stackRoot, 'leases')), [])
+  fs.rmdirSync(path.join(layout.stackRoot, 'leases'))
+  fs.writeFileSync(path.join(layout.stackRoot, 'leases'), 'blocked')
+  await assert.rejects(startRuntime(intent(stateRoot, taskKey, runId)), /EEXIST|ENOTDIR/u)
+  assert.equal(fs.existsSync(layout.runRoot), false)
+  const queue = path.join(stateRoot, 'semaphores', 'queue')
+  const tickets = fs.existsSync(queue) ? fs.readdirSync(queue).filter((entry) => entry.endsWith('.json')) : []
+  assert.deepEqual(tickets, [])
 })
 
 test('DEV devStack lease admits only one complete stack for the full process lifetime', async () => {

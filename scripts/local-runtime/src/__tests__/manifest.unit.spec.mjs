@@ -8,7 +8,7 @@ import { fingerprint, writeAtomic } from '../canonical.mjs'
 import { writeCredentialBundle, resolveCredentialReference } from '../credentials.mjs'
 import { environmentForOwner, publishManifest, publishStackManifest, reopenCurrentStackManifest, reopenManifest } from '../manifest.mjs'
 import { publishStackState } from '../orchestrator.mjs'
-import { reopenStackLease } from '../stack-lease.mjs'
+import { reopenStackLease, stackLeasePath } from '../stack-lease.mjs'
 
 test('manifest publication is readiness-gated, atomic and value-free', () => {
   const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-runtime-manifest-'))
@@ -55,7 +55,7 @@ test('concurrent same-provider Stack updates preserve both Redis ACL users and t
   publishStackManifest(stackRoot, { lifecycle: 'REGISTERED', stackKey, devStackId: 'machine_a', identityKind: 'LOCAL', pools: ['dev'], resources: [], endpoints: [], leases: [], evidenceReferences: [] })
   for (const side of ['a', 'b']) {
     const raw = { schemaVersion: 3, kind: 'OES_RUNTIME_STACK_LEASE', stackKey, devStackId: 'machine_a', taskKey: `task_${side}`, runId: `run_${side}` }
-    writeAtomic(path.join(stackRoot, 'leases', `task_${side}--run_${side}.json`), { ...raw, leaseFingerprint: fingerprint(raw) })
+    writeAtomic(stackLeasePath(stackRoot, `task_${side}`, `run_${side}`), { ...raw, leaseFingerprint: fingerprint(raw) })
   }
   const moduleUrl = new URL('../orchestrator.mjs', import.meta.url).href
   const run = (side) => new Promise((resolve, reject) => {
@@ -84,7 +84,7 @@ test('Stack publication rejects a corrupted active lease instead of referencing 
   const stackKey = 'oes-local-0123456789abcdef'
   const stackRoot = path.join(stateRoot, 'stacks', stackKey)
   const lease = { schemaVersion: 3, kind: 'OES_RUNTIME_STACK_LEASE', stackKey, devStackId: 'machine_a', taskKey: 'task_a', runId: 'run_a', leaseFingerprint: 'corrupt' }
-  writeAtomic(path.join(stackRoot, 'leases', 'task_a--run_a.json'), lease)
+  writeAtomic(stackLeasePath(stackRoot, 'task_a', 'run_a'), lease)
   assert.throws(() => publishStackState({ stackRoot, stackKey, devStackId: 'machine_a', identityKind: 'LOCAL', profile: 'DEV', pool: 'dev' }), /STACK_LEASE_FINGERPRINT_MISMATCH/)
 })
 
@@ -108,7 +108,7 @@ test('exact Stack lease reopen rejects foreign identity, noncanonical path, and 
     writeAtomic(file, { ...raw, leaseFingerprint: fingerprint(raw) })
   }
   const expected = { stackRoot, stackKey, devStackId: 'machine_a' }
-  const canonical = path.join(stackRoot, 'leases', 'task_a--run_a.json')
+  const canonical = stackLeasePath(stackRoot, 'task_a', 'run_a')
   writeLease(canonical, { devStackId: 'machine_foreign' })
   assert.throws(() => reopenStackLease(canonical, expected), /STACK_LEASE_IDENTITY_MISMATCH key=devStackId/)
   writeLease(path.join(stackRoot, 'leases', 'noncanonical.json'))
@@ -118,4 +118,9 @@ test('exact Stack lease reopen rejects foreign identity, noncanonical path, and 
   const outside = path.join(stateRoot, 'outside', 'task_a--run_a.json')
   writeLease(outside)
   assert.throws(() => reopenStackLease(outside, expected), /STATE_PATH_ESCAPE/)
+})
+
+test('Stack lease filenames are injective for delimiter-bearing task and run identities', () => {
+  const stackRoot = path.join(os.tmpdir(), 'stacks', 'oes-local-0123456789abcdef')
+  assert.notEqual(stackLeasePath(stackRoot, 'aa--bb', 'cc'), stackLeasePath(stackRoot, 'aa', 'bb--cc'))
 })

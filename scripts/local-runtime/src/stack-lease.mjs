@@ -3,13 +3,18 @@ import path from 'node:path'
 import { fingerprint, readJson, sha256 } from './canonical.mjs'
 import { assertNoSymlink, exactPathKey } from './state-layout.mjs'
 
+/** Encodes one task/run identity pair into an injective canonical lease filename. */
+export function stackLeaseFileName(taskKey, runId) {
+  exactPathKey(taskKey, 'taskKey')
+  exactPathKey(runId, 'runId')
+  return `${taskKey.length}-${taskKey}--${runId.length}-${runId}.json`
+}
+
 /** Returns the canonical Stack lease file for one exact task/run identity pair. */
 export function stackLeasePath(stackRoot, taskKey, runId) {
   const root = path.resolve(stackRoot)
   exactPathKey(path.basename(root), 'stackKey')
-  exactPathKey(taskKey, 'taskKey')
-  exactPathKey(runId, 'runId')
-  return path.join(root, 'leases', `${taskKey}--${runId}.json`)
+  return path.join(root, 'leases', stackLeaseFileName(taskKey, runId))
 }
 
 /** Reopens one Stack lease only when its bytes, identities, and canonical path all agree. */
