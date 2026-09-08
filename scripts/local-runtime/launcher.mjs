@@ -134,7 +134,7 @@ export async function main(argv = process.argv.slice(2)) {
       process.removeListener('SIGINT', interrupt)
       process.removeListener('SIGTERM', interrupt)
       if (processes) await stopDevelopmentProcesses(processes.children)
-      if (started) reconcileRuntime({ manifestPath: started.file, cleanupResource: started.cleanup, releaseSlot: started.releaseSlot, releaseDevLock: started.releaseDevLock })
+      if (started) reconcileRuntime({ manifestPath: started.file, cleanupResource: started.cleanup, releaseSlot: started.releaseSlot, releaseRunLock: started.releaseRunLock, releaseDevLock: started.releaseDevLock })
     }
     return
   }

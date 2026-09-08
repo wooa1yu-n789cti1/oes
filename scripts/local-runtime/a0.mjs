@@ -167,7 +167,7 @@ async function startPair({ stateRoot, driver, batch, round }) {
   const settled = await Promise.allSettled(['a', 'b'].map((side) => startRuntime({ ...base, runId: `a0_${batch}_${round}_${side}` })))
   const failed = settled.find((item) => item.status === 'rejected')
   if (failed) {
-    for (const item of settled) if (item.status === 'fulfilled') reconcileRuntime({ manifestPath: item.value.file, cleanupResource: item.value.cleanup, releaseSlot: item.value.releaseSlot })
+    for (const item of settled) if (item.status === 'fulfilled') reconcileRuntime({ manifestPath: item.value.file, cleanupResource: item.value.cleanup, releaseSlot: item.value.releaseSlot, releaseRunLock: item.value.releaseRunLock })
     throw failed.reason
   }
   return settled.map((item) => item.value)
@@ -260,7 +260,7 @@ function verifyRunBStillLive(b, commandLog) {
 async function providerSmoke({ capability, owner, runId, stateRoot, driver }) {
   const started = await startRuntime({ root, profile: 'LOCAL_INTEGRATION', testClass: 'contract', owners: [owner], capabilities: [capability], taskKey: 'local_runtime_a0', runId, stateRoot, driver })
   const reopened = reopenManifest(started.file, { taskKey: 'local_runtime_a0', runId })
-  const cleanup = reconcileRuntime({ manifestPath: started.file, cleanupResource: started.cleanup, releaseSlot: started.releaseSlot })
+  const cleanup = reconcileRuntime({ manifestPath: started.file, cleanupResource: started.cleanup, releaseSlot: started.releaseSlot, releaseRunLock: started.releaseRunLock })
   return { runId, manifestPath: started.file, manifestFingerprint: reopened.manifestFingerprint, providers: reopened.endpoints.map((entry) => entry.provider), cleanup }
 }
 
@@ -283,7 +283,7 @@ async function runFull({ stateRoot, driver, batch, output }) {
   const all = []
   const cleanup = (started, reason) => {
     if (!started || reconciled.has(started.file)) return null
-    const record = reconcileRuntime({ manifestPath: started.file, cleanupResource: started.cleanup, releaseSlot: started.releaseSlot })
+    const record = reconcileRuntime({ manifestPath: started.file, cleanupResource: started.cleanup, releaseSlot: started.releaseSlot, releaseRunLock: started.releaseRunLock })
     reconciled.add(started.file)
     return { reason, manifestPath: started.file, record }
   }

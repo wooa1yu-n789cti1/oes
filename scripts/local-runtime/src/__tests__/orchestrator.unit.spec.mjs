@@ -8,7 +8,7 @@ import { environmentForOwner, resolveResources } from '../manifest.mjs'
 import { fingerprint, writeAtomic } from '../canonical.mjs'
 import { cleanupRunPrivateFiles, reconcileRuntime, startRuntime, withRuntime } from '../orchestrator.mjs'
 import { cleanupSimulatedResource } from '../simulation-driver.mjs'
-import { acquireMigrationBarrier, resolveRuntimeLayout } from '../state-layout.mjs'
+import { acquireMigrationBarrier, activeRuntimeAdmissions, resolveRuntimeLayout } from '../state-layout.mjs'
 import { stackLeasePath } from '../stack-lease.mjs'
 
 const root = path.resolve(import.meta.dirname, '../../../..')
@@ -56,9 +56,43 @@ test('delimiter-bearing task and run identities allocate distinct leases and rec
   const second = await startRuntime(intent(stateRoot, 'aa', 'bb--cc'))
   assert.notEqual(stackLeasePath(first.context.stackRoot, 'aa--bb', 'cc'), stackLeasePath(second.context.stackRoot, 'aa', 'bb--cc'))
   assert.equal(fs.readdirSync(path.join(first.context.stackRoot, 'leases')).filter((entry) => entry.endsWith('.json')).length, 2)
-  reconcileRuntime({ manifestPath: first.file, cleanupResource: first.cleanup, releaseSlot: first.releaseSlot, releaseDevLock: first.releaseDevLock })
-  reconcileRuntime({ manifestPath: second.file, cleanupResource: second.cleanup, releaseSlot: second.releaseSlot, releaseDevLock: second.releaseDevLock })
+  reconcileRuntime({ manifestPath: first.file, cleanupResource: first.cleanup, releaseSlot: first.releaseSlot, releaseRunLock: first.releaseRunLock, releaseDevLock: first.releaseDevLock })
+  reconcileRuntime({ manifestPath: second.file, cleanupResource: second.cleanup, releaseSlot: second.releaseSlot, releaseRunLock: second.releaseRunLock, releaseDevLock: second.releaseDevLock })
   assert.deepEqual(fs.readdirSync(path.join(first.context.stackRoot, 'leases')), [])
+  assert.deepEqual(fs.readdirSync(path.join(stateRoot, 'semaphores', 'queue')), [])
+})
+
+test('one atomic Run claim rejects a concurrent duplicate before provider mutation without altering the winner', async () => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-runtime-run-claim-'))
+  let announceFirst
+  let releaseFirst
+  const firstEntered = new Promise((resolve) => { announceFirst = resolve })
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve })
+  let firstProviderCalls = 0
+  let secondProviderCalls = 0
+  const cleanupResource = () => ({ disposition: 'NOT_APPLICABLE', exitStatus: 0 })
+  const firstStart = startRuntime({ ...intent(stateRoot, 'same_task', 'same_run'), runLockTimeoutMs: 1000 }, {
+    provisionProvider: async () => {
+      firstProviderCalls += 1
+      if (firstProviderCalls === 1) { announceFirst(); await firstGate }
+      return { resources: [], endpoints: [] }
+    },
+    cleanupResource
+  })
+  await firstEntered
+  await assert.rejects(startRuntime({ ...intent(stateRoot, 'same_task', 'same_run'), runLockTimeoutMs: 100 }, {
+    provisionProvider: async () => { secondProviderCalls += 1; return { resources: [], endpoints: [] } },
+    cleanupResource
+  }), /RUNTIME_LOCK_TIMEOUT/u)
+  assert.equal(secondProviderCalls, 0)
+  releaseFirst()
+  const winner = await firstStart
+  assert.equal(firstProviderCalls > 0, true)
+  assert.equal(fs.existsSync(winner.file), true)
+  assert.equal(fs.existsSync(stackLeasePath(winner.context.stackRoot, 'same_task', 'same_run')), true)
+  assert.equal(fs.readdirSync(path.join(stateRoot, 'semaphores', 'queue')).filter((entry) => entry.endsWith('.json')).length, 1)
+  reconcileRuntime({ manifestPath: winner.file, cleanupResource: winner.cleanup, releaseSlot: winner.releaseSlot, releaseRunLock: winner.releaseRunLock, releaseDevLock: winner.releaseDevLock })
+  assert.deepEqual(fs.readdirSync(path.join(winner.context.stackRoot, 'leases')), [])
   assert.deepEqual(fs.readdirSync(path.join(stateRoot, 'semaphores', 'queue')), [])
 })
 
@@ -67,14 +101,36 @@ test('pre-transaction lease publication failure removes its FIFO ticket and owne
   const taskKey = 'task_partial'
   const runId = 'run_partial'
   const layout = await resolveRuntimeLayout({ stateRoot, profile: 'LOCAL_INTEGRATION', taskKey, runId, explicitDevStackId: 'fixture_machine' })
-  assert.deepEqual(fs.readdirSync(path.join(layout.stackRoot, 'leases')), [])
+  const queue = path.join(stateRoot, 'semaphores', 'queue')
+  const blocker = path.join(queue, '0000000000000000-blocker.json')
+  writeAtomic(blocker, { pid: process.pid, taskKey: 'blocker_task', runId: 'blocker_run', runDirectory: stateRoot })
+  let providerCalls = 0
+  const starting = startRuntime({ ...intent(stateRoot, taskKey, runId), concurrency: 1 }, {
+    provisionProvider: async () => { providerCalls += 1; return { resources: [], endpoints: [] } },
+    cleanupResource: () => ({ disposition: 'NOT_APPLICABLE', exitStatus: 0 })
+  })
+  let targetTickets = []
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    targetTickets = fs.readdirSync(queue).filter((entry) => entry.endsWith('.json')).filter((entry) => {
+      const value = JSON.parse(fs.readFileSync(path.join(queue, entry), 'utf8'))
+      return value.taskKey === taskKey && value.runId === runId
+    })
+    if (fs.existsSync(path.join(layout.runRoot, 'run-owner.json')) && targetTickets.length === 1) break
+    await delay(10)
+  }
+  assert.equal(fs.existsSync(path.join(layout.runRoot, 'run-owner.json')), true)
+  assert.equal(targetTickets.length, 1)
   fs.rmdirSync(path.join(layout.stackRoot, 'leases'))
   fs.writeFileSync(path.join(layout.stackRoot, 'leases'), 'blocked')
-  await assert.rejects(startRuntime(intent(stateRoot, taskKey, runId)), /EEXIST|ENOTDIR/u)
+  fs.unlinkSync(blocker)
+  await assert.rejects(starting, /EEXIST|ENOTDIR/u)
+  assert.equal(providerCalls, 0)
   assert.equal(fs.existsSync(layout.runRoot), false)
-  const queue = path.join(stateRoot, 'semaphores', 'queue')
   const tickets = fs.existsSync(queue) ? fs.readdirSync(queue).filter((entry) => entry.endsWith('.json')) : []
   assert.deepEqual(tickets, [])
+  assert.deepEqual(activeRuntimeAdmissions(stateRoot), [])
+  assert.equal(fs.existsSync(path.join(stateRoot, 'locks', 'runs', layout.stackKey, taskKey, `${runId}.lock`)), false)
+  assert.equal(fs.readFileSync(path.join(layout.stackRoot, 'leases'), 'utf8'), 'blocked')
 })
 
 test('DEV devStack lease admits only one complete stack for the full process lifetime', async () => {

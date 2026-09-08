@@ -80,6 +80,14 @@ export function stackPaths(stateRoot, stackKey, taskKey, runId) {
   }
 }
 
+/** Returns the machine-global exclusive claim path for one exact Stack/Run identity. */
+export function runClaimLockPath(stateRoot, stackKey, taskKey, runId) {
+  exactPathKey(stackKey, 'stackKey')
+  exactPathKey(taskKey, 'taskKey')
+  exactPathKey(runId, 'runId')
+  return assertNoSymlink(stateRoot, path.join(path.resolve(stateRoot), 'locks', 'runs', stackKey, taskKey, `${runId}.lock`))
+}
+
 /** Returns the parent-owned paths that serialize allocation admission with root migration. */
 export function migrationControlPaths(stateRoot) {
   const root = path.resolve(stateRoot)

@@ -6,7 +6,7 @@ import { fingerprint, readJson, redact, sha256, writeAtomic } from './canonical.
 import { loadRuntimeConfig } from './config.mjs'
 import { planRuntime } from './planner.mjs'
 import { artifactReference, publishManifest, reopenManifest, reopenStackManifest, runDirectory, updateStackManifest } from './manifest.mjs'
-import { acquireRuntimeAdmission, resolveRuntimeLayout } from './state-layout.mjs'
+import { acquireRuntimeAdmission, resolveRuntimeLayout, runClaimLockPath } from './state-layout.mjs'
 import { cleanupDockerResource, provisionDockerProvider } from './docker-driver.mjs'
 import { cleanupSimulatedResource, provisionSimulatedProvider } from './simulation-driver.mjs'
 import { removeStackLease, reopenStackLeases, stackLeasePath } from './stack-lease.mjs'
@@ -146,6 +146,7 @@ export async function startRuntime(intent, adapters = {}) {
   const plan = planRuntime({ root, profile: intent.profile, testClass: intent.testClass, owners: intent.owners, capabilities: intent.capabilities })
   const admission = await acquireRuntimeAdmission(config.stateRoot, { taskKey, runId, profile: intent.profile }, { timeoutMs: intent.admissionTimeoutMs || 30000 })
   let layout
+  let runLock = { lease: null, release: () => {} }
   let devLock = { lease: null, release: () => {} }
   let leasePath
   let leaseOwned = false
@@ -156,13 +157,14 @@ export async function startRuntime(intent, adapters = {}) {
   let transactionPublished = false
   try {
     layout = await resolveRuntimeLayout({ stateRoot: config.stateRoot, profile: intent.profile, taskKey, runId, explicitDevStackId: intent.devStackId, identitySeed: intent.identitySeed, ciSeed: intent.ciSeed, hostBinding: intent.hostBinding, ciJobIdentity: intent.ciJobIdentity })
+    runLock = await acquireExclusiveLease(runClaimLockPath(config.stateRoot, layout.stackKey, taskKey, runId), { kind: 'RUN', stackKey: layout.stackKey, devStackId: layout.devStackId, taskKey, runId }, { timeoutMs: intent.runLockTimeoutMs || 30000 })
     devLock = intent.profile === 'DEV'
       ? await acquireExclusiveLease(path.join(config.stateRoot, 'locks', 'stacks', `${layout.stackKey}.lock`), { kind: 'DEV_STACK', stackKey: layout.stackKey, devStackId: layout.devStackId, taskKey, runId }, { timeoutMs: intent.devLockTimeoutMs || 30000 })
       : devLock
     const directory = layout.runRoot
     leasePath = stackLeasePath(layout.stackRoot, taskKey, runId)
     if (fs.existsSync(leasePath)) throw new Error(`STACK_LEASE_ALREADY_EXISTS path=${leasePath}`)
-    if (fs.existsSync(path.join(directory, 'manifest.json'))) throw new Error(`RUNTIME_RUN_ALREADY_REGISTERED taskKey=${taskKey} runId=${runId}`)
+    if (['manifest.json', 'transaction.json', 'failed-cleanup.json', 'cleanup.json'].some((name) => fs.existsSync(path.join(directory, name)))) throw new Error(`RUNTIME_RUN_ALREADY_REGISTERED taskKey=${taskKey} runId=${runId}`)
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
     const markerRaw = { schemaVersion: 3, kind: 'OES_RUNTIME_RUN_OWNER', path: directory, stackKey: layout.stackKey, taskKey, runId }
     writeAtomic(path.join(directory, 'run-owner.json'), { ...markerRaw, markerFingerprint: fingerprint(markerRaw) })
@@ -176,7 +178,7 @@ export async function startRuntime(intent, adapters = {}) {
     const leaseRaw = { schemaVersion: 3, kind: 'OES_RUNTIME_STACK_LEASE', stackKey: layout.stackKey, devStackId: layout.devStackId, taskKey, runId, profile: intent.profile, planFingerprint: plan.planFingerprint, pid: process.pid, createdAt: new Date().toISOString() }
     writeAtomic(leasePath, { ...leaseRaw, leaseFingerprint: fingerprint(leaseRaw) })
     leaseOwned = true
-    const transaction = { schemaVersion: 3, kind: 'OES_RUNTIME_ALLOCATION_TRANSACTION', lifecycle: 'ALLOCATING', ...context, plan, config: redact(config), devLockLease: devLock.lease, resources: [], endpoints: [] }
+    const transaction = { schemaVersion: 3, kind: 'OES_RUNTIME_ALLOCATION_TRANSACTION', lifecycle: 'ALLOCATING', ...context, plan, config: redact(config), runLockLease: runLock.lease, devLockLease: devLock.lease, resources: [], endpoints: [] }
     const transactionPath = path.join(directory, 'transaction.json')
     writeAtomic(transactionPath, transaction)
     transactionPublished = true
@@ -208,7 +210,7 @@ export async function startRuntime(intent, adapters = {}) {
       const published = publishManifest(directory, runDraft)
       fs.rmSync(transactionPath)
       appendEvent(directory, { event: 'MANIFEST_PUBLISHED', stackGeneration: stackPublished.manifest.generation, manifestFingerprint: published.manifest.manifestFingerprint, manifestSha256: published.sha256 })
-      return { ...published, releaseSlot, releaseDevLock: devLock.release, cleanup, context }
+      return { ...published, releaseSlot, releaseRunLock: runLock.release, releaseDevLock: devLock.release, cleanup, context }
     } catch (primary) {
       transaction.lifecycle = 'RECONCILING_AFTER_FAILURE'
       writeAtomic(transactionPath, transaction)
@@ -239,13 +241,14 @@ export async function startRuntime(intent, adapters = {}) {
       try { removeIncompleteRunOwner(context) } catch (cleanupError) { cleanupErrors.push(cleanupError) }
     }
     devLock.release()
+    runLock.release()
     if (cleanupErrors.length) throw new AggregateError([error, ...cleanupErrors], 'RUNTIME_START_AND_PARTIAL_CLEANUP_FAILED')
     throw error
   }
 }
 
 /** Reconciles a registered or interrupted Run using only exact Run/Stack manifest truth. */
-export function reconcileRuntime({ manifestPath, transactionPath, cleanupResource, releaseSlot = () => {}, releaseDevLock }) {
+export function reconcileRuntime({ manifestPath, transactionPath, cleanupResource, releaseSlot = () => {}, releaseRunLock, releaseDevLock }) {
   const source = manifestPath || transactionPath
   if (!source || !fs.existsSync(source)) throw new Error(`RUNTIME_RECONCILE_SOURCE_MISSING path=${source}`)
   const value = manifestPath ? reopenManifest(manifestPath) : readJson(transactionPath)
@@ -264,6 +267,8 @@ export function reconcileRuntime({ manifestPath, transactionPath, cleanupResourc
   releaseFifoIdentity(value.stateRoot, value.taskKey, value.runId)
   if (releaseDevLock) releaseDevLock()
   else if (value.devLockLease) releaseExclusiveLease(value.devLockLease)
+  if (releaseRunLock) releaseRunLock()
+  else if (value.runLockLease) releaseExclusiveLease(value.runLockLease)
   const record = { schemaVersion: 3, kind: 'OES_RUNTIME_RUN_CLEANUP', stackKey: value.stackKey, taskKey: value.taskKey, runId: value.runId, sourceFingerprint: value.manifestFingerprint || fingerprint(value), cleanupResults: redact(cleanupResults), sharedLeaseCount: sharedLeaseCount(context), result: failures.length ? 'PRESERVED_WITH_FINDINGS' : 'RECONCILED' }
   record.recordFingerprint = fingerprint(record)
   writeAtomic(path.join(directory, 'cleanup.json'), record)
@@ -280,7 +285,7 @@ export async function withRuntime(intent, callback, adapters = {}) {
   const started = await startRuntime(intent, adapters)
   let primary
   try { return await callback(started.manifest, started.file) } catch (error) { primary = error; throw error } finally {
-    try { reconcileRuntime({ manifestPath: started.file, cleanupResource: started.cleanup, releaseSlot: started.releaseSlot, releaseDevLock: started.releaseDevLock }) } catch (cleanupError) {
+    try { reconcileRuntime({ manifestPath: started.file, cleanupResource: started.cleanup, releaseSlot: started.releaseSlot, releaseRunLock: started.releaseRunLock, releaseDevLock: started.releaseDevLock }) } catch (cleanupError) {
       if (primary) throw new AggregateError([primary, cleanupError], 'RUNTIME_EXECUTION_AND_RECONCILIATION_FAILED')
       throw cleanupError
     }

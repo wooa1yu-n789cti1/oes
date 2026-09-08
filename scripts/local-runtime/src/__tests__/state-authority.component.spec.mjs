@@ -16,5 +16,5 @@ test('component publishes Stack authority before its reference-only Run consumer
   assert.equal(stack.manifest.stackKey, run.stackKey)
   assert.equal(run.resources.some((resource) => resource.scope === 'SHARED'), false)
   assert.equal(run.endpoints.find((endpoint) => endpoint.provider === 'postgres').source, 'STACK')
-  reconcileRuntime({ manifestPath: started.file, cleanupResource: started.cleanup, releaseSlot: started.releaseSlot })
+  reconcileRuntime({ manifestPath: started.file, cleanupResource: started.cleanup, releaseSlot: started.releaseSlot, releaseRunLock: started.releaseRunLock })
 })
