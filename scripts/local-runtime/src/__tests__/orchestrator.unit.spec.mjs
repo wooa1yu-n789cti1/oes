@@ -6,7 +6,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { resolveCredentialReference } from '../credentials.mjs'
 import { environmentForOwner, resolveResources } from '../manifest.mjs'
-import { fingerprint, writeAtomic } from '../canonical.mjs'
+import { fingerprint, sha256, writeAtomic } from '../canonical.mjs'
 import { cleanupRunPrivateFiles, reconcileRuntime, startRuntime, withRuntime } from '../orchestrator.mjs'
 import { cleanupSimulatedResource } from '../simulation-driver.mjs'
 import { acquireMigrationBarrier, activeRuntimeAdmissions, resolveRuntimeLayout } from '../state-layout.mjs'
@@ -64,6 +64,50 @@ function spawnRuntimeOwner(stateRoot, taskKey, runId, waitForCleanup) {
   })
   const exited = new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal, stderr: errorOutput })))
   return { child, ready, exited }
+}
+
+/** Leaves one sealed allocation transaction behind after its first owned resource publication. */
+async function interruptedTransactionFixture(stateRoot, taskKey, runId) {
+  const script = `
+    import path from 'node:path'
+    import { sha256, writeAtomic } from './scripts/local-runtime/src/canonical.mjs'
+    import { startRuntime } from './scripts/local-runtime/src/orchestrator.mjs'
+    let calls = 0
+    await startRuntime({ root: process.env.FIXTURE_ROOT, stateRoot: process.env.FIXTURE_STATE_ROOT, profile: 'LOCAL_INTEGRATION', testClass: 'integration', owners: ['auth-service'], capabilities: ['cache', 'network-trust'], taskKey: process.env.FIXTURE_TASK_KEY, runId: process.env.FIXTURE_RUN_ID, devStackId: 'fixture_machine', driver: 'simulation', concurrency: 2 }, {
+      provisionProvider: async (provider, context) => {
+        calls += 1
+        if (calls === 1) {
+          const target = path.join(context.runDirectory, 'provider', 'fixture-owned.json')
+          writeAtomic(target, { owner: 'fixture' })
+          return { resources: [{ provider, kind: 'simulated-logical', scope: 'RUN', objectId: sha256(target), path: target, cleanup: 'DELETE_EXACT' }], endpoints: [] }
+        }
+        process.stdout.write(JSON.stringify({ transactionPath: path.join(context.runDirectory, 'transaction.json') }) + '\\n')
+        await new Promise(() => { setInterval(() => {}, 1000) })
+      },
+      cleanupResource: () => ({ disposition: 'NOT_APPLICABLE', exitStatus: 0 })
+    })
+  `
+  const child = spawn(process.execPath, ['--input-type=module', '--eval', script], {
+    cwd: root,
+    env: { ...process.env, FIXTURE_ROOT: root, FIXTURE_STATE_ROOT: stateRoot, FIXTURE_TASK_KEY: taskKey, FIXTURE_RUN_ID: runId },
+    stdio: ['ignore', 'pipe', 'pipe']
+  })
+  let output = ''
+  let stderr = ''
+  child.stderr.on('data', (chunk) => { stderr += chunk })
+  const ready = await new Promise((resolve, reject) => {
+    child.stdout.on('data', (chunk) => {
+      output += chunk
+      const newline = output.indexOf('\n')
+      if (newline !== -1) resolve(JSON.parse(output.slice(0, newline)))
+    })
+    child.once('error', reject)
+    child.once('exit', (code) => reject(new Error(`interrupted fixture exited early code=${code} stderr=${stderr}`)))
+  })
+  child.kill('SIGKILL')
+  const terminal = await new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal, stderr })))
+  assert.equal(terminal.signal, 'SIGKILL')
+  return { ...ready, transaction: JSON.parse(fs.readFileSync(ready.transactionPath, 'utf8')) }
 }
 
 test('two runs share physical TEST provider but receive isolated logical allocations and credentials', async () => {
@@ -188,6 +232,92 @@ test('standalone reconciliation atomically claims and cleans one stale foreign R
   assert.equal(fs.existsSync(stackLeasePath(manifest.stackRoot, manifest.taskKey, manifest.runId)), false)
   assert.deepEqual(fs.readdirSync(path.join(stateRoot, 'semaphores', 'queue')), [])
   for (const resource of manifest.resources.filter((entry) => entry.path && entry.cleanup !== 'PRESERVE_SHARED')) assert.equal(fs.existsSync(resource.path), false)
+})
+
+test('transaction recovery rejects every unsealed or noncanonical authority before any mutation', async (t) => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-runtime-transaction-authority-'))
+  const fixture = await interruptedTransactionFixture(stateRoot, 'task_authority', 'run_authority')
+  const originalTransaction = fs.readFileSync(fixture.transactionPath)
+  const ownerPath = path.join(fixture.transaction.runDirectory, 'run-owner.json')
+  const originalOwner = fs.readFileSync(ownerPath)
+  const outsideTarget = path.join(stateRoot, 'forged-target.json')
+  writeAtomic(outsideTarget, { preserve: true })
+  const seal = (value) => { value.transactionFingerprint = fingerprint(value, 'transactionFingerprint'); writeAtomic(fixture.transactionPath, value) }
+  const cases = [
+    ['noncanonical filename', () => { const source = path.join(fixture.transaction.runDirectory, 'forged-transaction.json'); fs.writeFileSync(source, originalTransaction); return source }],
+    ['wrong kind', () => { const value = JSON.parse(originalTransaction); value.kind = 'NOT_A_RUNTIME_TRANSACTION'; seal(value); return fixture.transactionPath }],
+    ['wrong schema', () => { const value = JSON.parse(originalTransaction); value.schemaVersion = 2; seal(value); return fixture.transactionPath }],
+    ['wrong transaction fingerprint', () => { const value = JSON.parse(originalTransaction); value.transactionFingerprint = '0'.repeat(64); writeAtomic(fixture.transactionPath, value); return fixture.transactionPath }],
+    ['mismatched Stack root', () => { const value = JSON.parse(originalTransaction); value.stackRoot = path.join(stateRoot, 'stacks', 'foreign-stack'); seal(value); return fixture.transactionPath }],
+    ['mismatched Run root', () => { const value = JSON.parse(originalTransaction); value.runDirectory = path.dirname(value.runDirectory); seal(value); return fixture.transactionPath }],
+    ['corrupt Run owner marker', () => { const marker = JSON.parse(originalOwner); marker.taskKey = 'foreign_task'; marker.markerFingerprint = fingerprint(marker, 'markerFingerprint'); writeAtomic(ownerPath, marker); return fixture.transactionPath }],
+    ['resource outside exact Stack', () => { const value = JSON.parse(originalTransaction); value.resources[0].path = outsideTarget; value.resources[0].objectId = sha256(outsideTarget); seal(value); return fixture.transactionPath }]
+  ]
+  for (const [name, prepare] of cases) await t.test(name, () => {
+    fs.writeFileSync(fixture.transactionPath, originalTransaction)
+    fs.writeFileSync(ownerPath, originalOwner)
+    const noncanonical = path.join(fixture.transaction.runDirectory, 'forged-transaction.json')
+    fs.rmSync(noncanonical, { force: true })
+    const source = prepare()
+    const before = snapshotTree(stateRoot)
+    let cleanupCalls = 0
+    assert.throws(() => reconcileRuntime({ transactionPath: source, cleanupResource: (resource) => { cleanupCalls += 1; return cleanupSimulatedResource(resource) } }), /RUNTIME_/u)
+    assert.equal(cleanupCalls, 0)
+    assert.deepEqual(snapshotTree(stateRoot), before)
+    assert.equal(fs.existsSync(outsideTarget), true)
+  })
+  fs.rmSync(path.join(fixture.transaction.runDirectory, 'forged-transaction.json'), { force: true })
+  fs.writeFileSync(fixture.transactionPath, originalTransaction)
+  fs.writeFileSync(ownerPath, originalOwner)
+  const cleanup = reconcileRuntime({ transactionPath: fixture.transactionPath, cleanupResource: cleanupSimulatedResource })
+  assert.equal(cleanup.result, 'RECONCILED')
+  assert.equal(fs.existsSync(fixture.transaction.runLockLease.lockDirectory), false)
+  fs.rmSync(outsideTarget)
+})
+
+test('transaction recovery reopens and rejects a sealed source replacement before cleanup', async () => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-runtime-transaction-replace-'))
+  const fixture = await interruptedTransactionFixture(stateRoot, 'task_replace', 'run_replace')
+  const originalTransaction = fs.readFileSync(fixture.transactionPath)
+  const leasePath = stackLeasePath(fixture.transaction.stackRoot, fixture.transaction.taskKey, fixture.transaction.runId)
+  const leaseBytes = fs.readFileSync(leasePath)
+  const fifoBefore = snapshotTree(path.join(stateRoot, 'semaphores', 'queue'))
+  const resourcePath = fixture.transaction.resources[0].path
+  const resourceBytes = fs.readFileSync(resourcePath)
+  const watcherScript = `
+    import fs from 'node:fs'
+    import { fingerprint, writeAtomic } from './scripts/local-runtime/src/canonical.mjs'
+    process.stdout.write('READY\\n')
+    while (fs.existsSync(process.env.FIXTURE_CLAIM_OWNER)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1)
+    const value = JSON.parse(fs.readFileSync(process.env.FIXTURE_TRANSACTION, 'utf8'))
+    value.replacementProbe = 'sealed-after-initial-reopen'
+    value.transactionFingerprint = fingerprint(value, 'transactionFingerprint')
+    writeAtomic(process.env.FIXTURE_TRANSACTION, value)
+  `
+  const watcher = spawn(process.execPath, ['--input-type=module', '--eval', watcherScript], {
+    cwd: root,
+    env: { ...process.env, FIXTURE_CLAIM_OWNER: path.join(fixture.transaction.runLockLease.lockDirectory, 'owner.json'), FIXTURE_TRANSACTION: fixture.transactionPath },
+    stdio: ['ignore', 'pipe', 'pipe']
+  })
+  let stderr = ''
+  watcher.stderr.on('data', (chunk) => { stderr += chunk })
+  await new Promise((resolve, reject) => {
+    watcher.stdout.once('data', (chunk) => { if (chunk.toString() === 'READY\n') resolve(); else reject(new Error(`watcher output=${chunk}`)) })
+    watcher.once('error', reject)
+  })
+  const watcherExited = new Promise((resolve) => watcher.once('exit', (code, signal) => resolve({ code, signal })))
+  let cleanupCalls = 0
+  assert.throws(() => reconcileRuntime({ transactionPath: fixture.transactionPath, cleanupResource: (resource) => { cleanupCalls += 1; return cleanupSimulatedResource(resource) } }), /RUNTIME_RECONCILE_SOURCE_CHANGED/u)
+  assert.deepEqual(await watcherExited, { code: 0, signal: null })
+  assert.equal(stderr, '')
+  assert.equal(cleanupCalls, 0)
+  assert.deepEqual(fs.readFileSync(leasePath), leaseBytes)
+  assert.deepEqual(snapshotTree(path.join(stateRoot, 'semaphores', 'queue')), fifoBefore)
+  assert.deepEqual(fs.readFileSync(resourcePath), resourceBytes)
+  assert.equal(fs.existsSync(fixture.transaction.runLockLease.lockDirectory), false)
+  fs.writeFileSync(fixture.transactionPath, originalTransaction)
+  const cleanup = reconcileRuntime({ transactionPath: fixture.transactionPath, cleanupResource: cleanupSimulatedResource })
+  assert.equal(cleanup.result, 'RECONCILED')
 })
 
 test('pre-transaction lease publication failure removes its FIFO ticket and owner-only Run directory', async () => {

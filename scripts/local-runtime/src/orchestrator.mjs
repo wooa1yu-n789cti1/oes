@@ -6,10 +6,10 @@ import { fingerprint, readJson, redact, sha256, writeAtomic } from './canonical.
 import { loadRuntimeConfig } from './config.mjs'
 import { planRuntime } from './planner.mjs'
 import { artifactReference, publishManifest, reopenManifest, reopenStackManifest, runDirectory, updateStackManifest } from './manifest.mjs'
-import { acquireRuntimeAdmission, resolveRuntimeLayout, runClaimLockPath } from './state-layout.mjs'
+import { acquireRuntimeAdmission, assertNoSymlink, resolveRuntimeLayout, runClaimLockPath } from './state-layout.mjs'
 import { cleanupDockerResource, provisionDockerProvider } from './docker-driver.mjs'
 import { cleanupSimulatedResource, provisionSimulatedProvider } from './simulation-driver.mjs'
-import { removeStackLease, reopenStackLeases, stackLeasePath } from './stack-lease.mjs'
+import { removeStackLease, reopenStackLease, reopenStackLeases, stackLeasePath } from './stack-lease.mjs'
 import { sharedResourceIdentity } from './stack-resource.mjs'
 
 const ID = /^[a-z0-9][a-z0-9_-]{1,79}$/u
@@ -137,6 +137,115 @@ function removeIncompleteRunOwner(context) {
   fs.rmdirSync(expectedRunDirectory)
 }
 
+/** Reopens the exact marker that authorizes one canonical Run directory. */
+function reopenRunOwner(value, expectedRunDirectory) {
+  const markerPath = path.join(expectedRunDirectory, 'run-owner.json')
+  const marker = readJson(markerPath)
+  if (marker.schemaVersion !== 3 || marker.kind !== 'OES_RUNTIME_RUN_OWNER' || marker.markerFingerprint !== fingerprint(marker, 'markerFingerprint')) throw new Error('RUNTIME_RUN_OWNER_MARKER_INVALID')
+  if (marker.path !== expectedRunDirectory || marker.stackKey !== value.stackKey || marker.taskKey !== value.taskKey || marker.runId !== value.runId) throw new Error('RUNTIME_RUN_OWNER_MARKER_MISMATCH')
+  return marker
+}
+
+/** Requires an allocation-transaction filesystem reference to remain inside its exact Stack. */
+function assertTransactionPath(value, selected, key) {
+  if (typeof selected !== 'string' || !path.isAbsolute(selected) || path.resolve(selected) !== selected) throw new Error(`RUNTIME_TRANSACTION_PATH_INVALID key=${key}`)
+  const stackRoot = path.resolve(value.stackRoot)
+  if (selected !== stackRoot && !selected.startsWith(`${stackRoot}${path.sep}`)) throw new Error(`RUNTIME_TRANSACTION_PATH_OUTSIDE_STACK key=${key}`)
+  assertNoSymlink(value.stateRoot, selected)
+  return selected
+}
+
+/** Validates one closed-world allocation resource before a recovery adapter can observe it. */
+function assertTransactionResource(value, resource) {
+  if (!resource || typeof resource !== 'object' || Array.isArray(resource)) throw new Error('RUNTIME_TRANSACTION_RESOURCE_INVALID')
+  if (!/^[a-z0-9][a-z0-9-]*$/u.test(resource.provider || '') || !value.plan.providers.includes(resource.allocationProvider || resource.provider)) throw new Error('RUNTIME_TRANSACTION_RESOURCE_PROVIDER_INVALID')
+  if (!['SHARED', 'RUN', 'CI'].includes(resource.scope) || resource.pool !== value.pool) throw new Error('RUNTIME_TRANSACTION_RESOURCE_SCOPE_INVALID')
+  if ((value.profile === 'DEV' && resource.scope !== 'SHARED') || (value.profile === 'CI' && resource.scope !== 'CI')) throw new Error('RUNTIME_TRANSACTION_RESOURCE_PROFILE_SCOPE_INVALID')
+  const cleanupByKind = {
+    container: resource.scope === 'SHARED' ? 'PRESERVE_SHARED' : 'DELETE_EXACT',
+    network: resource.scope === 'SHARED' ? 'PRESERVE_SHARED' : 'DELETE_EXACT',
+    database: resource.scope === 'SHARED' ? 'PRESERVE_SHARED' : 'DROP_EXACT',
+    bucket: resource.scope === 'SHARED' ? 'PRESERVE_SHARED' : 'DELETE_LOGICAL_EXACT',
+    'acl-user': resource.scope === 'SHARED' ? 'PRESERVE_SHARED' : 'DELETED_WITH_OWNED_CONTAINER',
+    certificate: resource.scope === 'SHARED' ? 'PRESERVE_SHARED' : 'DELETE_FILES_EXACT',
+    'simulated-provider': resource.scope === 'SHARED' ? 'PRESERVE_SHARED' : 'DELETE_EXACT',
+    'simulated-logical': resource.scope === 'SHARED' ? 'PRESERVE_SHARED' : 'DELETE_EXACT'
+  }
+  if (!cleanupByKind[resource.kind] || resource.cleanup !== cleanupByKind[resource.kind]) throw new Error('RUNTIME_TRANSACTION_RESOURCE_CLEANUP_INVALID')
+  if (resource.path) assertTransactionPath(value, resource.path, 'resource.path')
+  for (const key of ['marker', 'ca', 'cert', 'key']) if (resource[key]) assertTransactionPath(value, resource[key], key)
+  for (const referenceKey of ['rootCredentialReference', 'adminCredentialReference']) {
+    const reference = resource[referenceKey]
+    if (reference && (!/^[a-f0-9]{64}$/u.test(reference.sha256 || '') || assertTransactionPath(value, reference.path, `${referenceKey}.path`) !== reference.path)) throw new Error(`RUNTIME_TRANSACTION_RESOURCE_REFERENCE_INVALID key=${referenceKey}`)
+  }
+  if (resource.files) {
+    if (resource.kind !== 'certificate' || resource.files.length !== 4 || resource.files.some((file) => !/^[a-f0-9]{64}$/u.test(file.sha256 || '') || assertTransactionPath(value, file.path, 'files.path') !== file.path)) throw new Error('RUNTIME_TRANSACTION_RESOURCE_FILES_INVALID')
+  }
+  if (['simulated-provider', 'simulated-logical'].includes(resource.kind) && (!resource.path || !/^[a-f0-9]{64}$/u.test(resource.objectId || ''))) throw new Error('RUNTIME_TRANSACTION_SIMULATION_RESOURCE_INVALID')
+  if (['container', 'network'].includes(resource.kind)) {
+    if (typeof resource.name !== 'string' || typeof resource.objectId !== 'string' || !resource.labels || typeof resource.labels !== 'object') throw new Error('RUNTIME_TRANSACTION_DOCKER_RESOURCE_INVALID')
+    const expectedLabels = { 'oes.runtime.version': '2', 'oes.runtime.stack-key': value.stackKey, 'oes.runtime.dev-stack-id': value.devStackId, 'oes.runtime.scope': resource.scope, 'oes.runtime.pool': value.pool, 'oes.runtime.provider': resource.provider }
+    if (['RUN', 'CI'].includes(resource.scope)) Object.assign(expectedLabels, { 'oes.runtime.task-key': value.taskKey, 'oes.runtime.run-id': value.runId })
+    for (const [key, expected] of Object.entries(expectedLabels)) if (resource.labels[key] !== expected) throw new Error(`RUNTIME_TRANSACTION_RESOURCE_LABEL_INVALID key=${key}`)
+  }
+  if (resource.kind === 'database' && (![resource.database, resource.migrator, resource.runtime, resource.containerName, resource.containerObjectId].every((entry) => typeof entry === 'string') || !resource.rootCredentialReference)) throw new Error('RUNTIME_TRANSACTION_DATABASE_RESOURCE_INVALID')
+  if (resource.kind === 'bucket' && (![resource.bucket, resource.accessKey, resource.policy, resource.containerName, resource.containerObjectId].every((entry) => typeof entry === 'string') || !resource.adminCredentialReference)) throw new Error('RUNTIME_TRANSACTION_BUCKET_RESOURCE_INVALID')
+  if (resource.kind === 'acl-user' && ![resource.user, resource.namespace, resource.containerName, resource.containerObjectId].every((entry) => typeof entry === 'string')) throw new Error('RUNTIME_TRANSACTION_ACL_RESOURCE_INVALID')
+}
+
+/** Seals and atomically writes mutable allocation progress after every state change. */
+function publishAllocationTransaction(file, transaction) {
+  transaction.transactionFingerprint = fingerprint(transaction, 'transactionFingerprint')
+  writeAtomic(file, transaction)
+  return transaction
+}
+
+/** Reopens one sealed allocation transaction only from its canonical Run authority path. */
+function reopenAllocationTransaction(file) {
+  const absolute = path.resolve(file)
+  const value = readJson(absolute)
+  if (value.schemaVersion !== 3 || value.kind !== 'OES_RUNTIME_ALLOCATION_TRANSACTION' || !['ALLOCATING', 'RECONCILING_AFTER_FAILURE'].includes(value.lifecycle) || value.transactionFingerprint !== fingerprint(value, 'transactionFingerprint')) throw new Error(`RUNTIME_TRANSACTION_FINGERPRINT_MISMATCH path=${absolute}`)
+  if (!path.isAbsolute(value.stateRoot || '') || path.resolve(value.stateRoot) !== value.stateRoot || !path.isAbsolute(value.stackRoot || '') || path.resolve(value.stackRoot) !== value.stackRoot) throw new Error('RUNTIME_TRANSACTION_ROOT_INVALID')
+  const expectedPool = value.profile === 'DEV' ? 'dev' : value.profile === 'CI' ? 'ci' : value.profile === 'LOCAL_INTEGRATION' ? 'test' : null
+  if (!expectedPool || value.pool !== expectedPool) throw new Error('RUNTIME_TRANSACTION_PROFILE_POOL_INVALID')
+  exactId(value.devStackId, 'devStackId')
+  const expectedRunDirectory = runDirectory(value.stateRoot, value.stackKey, value.taskKey, value.runId)
+  const expectedStackRoot = path.dirname(path.dirname(path.dirname(expectedRunDirectory)))
+  if (value.stackRoot !== expectedStackRoot || value.runDirectory !== expectedRunDirectory || absolute !== path.join(expectedRunDirectory, 'transaction.json')) throw new Error('RUNTIME_TRANSACTION_DIRECTORY_MISMATCH')
+  assertNoSymlink(value.stateRoot, absolute)
+  reopenRunOwner(value, expectedRunDirectory)
+  const stack = readJson(path.join(expectedStackRoot, 'stack.json'))
+  if (stack.schemaVersion !== 3 || stack.kind !== 'OES_RUNTIME_STACK' || stack.stackFingerprint !== fingerprint(stack, 'stackFingerprint') || stack.stackKey !== value.stackKey || stack.devStackId !== value.devStackId) throw new Error('RUNTIME_TRANSACTION_STACK_MISMATCH')
+  if (!value.plan || value.plan.schemaVersion !== 2 || value.plan.profile !== value.profile || value.plan.planFingerprint !== fingerprint(value.plan, 'planFingerprint') || !Array.isArray(value.plan.providers) || new Set(value.plan.providers).size !== value.plan.providers.length || value.plan.providers.some((provider) => !/^[a-z0-9][a-z0-9-]*$/u.test(provider)) || !Array.isArray(value.plan.owners) || !Array.isArray(value.plan.capabilities) || !value.plan.providerOwners || typeof value.plan.providerOwners !== 'object' || Array.isArray(value.plan.providerOwners)) throw new Error('RUNTIME_TRANSACTION_PLAN_INVALID')
+  if (fingerprint(value.owners) !== fingerprint(value.plan.owners) || fingerprint(value.capabilities) !== fingerprint(value.plan.capabilities) || fingerprint(value.providerOwners) !== fingerprint(value.plan.providerOwners)) throw new Error('RUNTIME_TRANSACTION_PLAN_CONTEXT_MISMATCH')
+  if (!Array.isArray(value.resources) || !Array.isArray(value.endpoints)) throw new Error('RUNTIME_TRANSACTION_PROGRESS_INVALID')
+  const claimPath = runClaimLockPath(value.stateRoot, value.stackKey, value.taskKey, value.runId)
+  const claimOwner = value.runLockLease?.owner
+  if (value.runLockLease?.lockDirectory !== claimPath || !claimOwner || claimOwner.kind !== 'RUN' || claimOwner.stackKey !== value.stackKey || claimOwner.devStackId !== value.devStackId || claimOwner.taskKey !== value.taskKey || claimOwner.runId !== value.runId || !Number.isInteger(claimOwner.pid) || typeof claimOwner.leaseId !== 'string') throw new Error('RUNTIME_TRANSACTION_RUN_CLAIM_INVALID')
+  if (value.profile === 'DEV') {
+    const devOwner = value.devLockLease?.owner
+    const devPath = path.join(value.stateRoot, 'locks', 'stacks', `${value.stackKey}.lock`)
+    if (value.devLockLease?.lockDirectory !== devPath || !devOwner || devOwner.kind !== 'DEV_STACK' || devOwner.stackKey !== value.stackKey || devOwner.devStackId !== value.devStackId || devOwner.taskKey !== value.taskKey || devOwner.runId !== value.runId || !Number.isInteger(devOwner.pid) || typeof devOwner.leaseId !== 'string') throw new Error('RUNTIME_TRANSACTION_DEV_CLAIM_INVALID')
+  } else if (value.devLockLease !== null) throw new Error('RUNTIME_TRANSACTION_DEV_CLAIM_UNEXPECTED')
+  const leasePath = stackLeasePath(value.stackRoot, value.taskKey, value.runId)
+  if (fs.existsSync(leasePath)) reopenStackLease(leasePath, { stackRoot: value.stackRoot, stackKey: value.stackKey, devStackId: value.devStackId, taskKey: value.taskKey, runId: value.runId })
+  const resourceFingerprints = new Set()
+  for (const resource of value.resources) {
+    assertTransactionResource(value, resource)
+    const resourceFingerprint = fingerprint(resource)
+    if (resourceFingerprints.has(resourceFingerprint)) throw new Error('RUNTIME_TRANSACTION_RESOURCE_DUPLICATE')
+    resourceFingerprints.add(resourceFingerprint)
+  }
+  for (const endpoint of value.endpoints) {
+    if (!endpoint || typeof endpoint !== 'object' || !/^[a-z0-9][a-z0-9-]*$/u.test(endpoint.provider || '') || !value.plan.providers.includes(endpoint.allocationProvider || endpoint.provider) || endpoint.pool !== value.pool || !Array.isArray(endpoint.owners) || typeof endpoint.ready !== 'boolean' || typeof endpoint.authority !== 'string') throw new Error('RUNTIME_TRANSACTION_ENDPOINT_INVALID')
+    if (endpoint.credentialReference) {
+      if (!/^[a-f0-9]{64}$/u.test(endpoint.credentialReference.sha256 || '') || !/^[a-f0-9]{64}$/u.test(endpoint.credentialReference.fingerprint || '')) throw new Error('RUNTIME_TRANSACTION_ENDPOINT_REFERENCE_INVALID')
+      assertTransactionPath(value, endpoint.credentialReference.path, 'endpoint.credentialReference.path')
+    }
+  }
+  return value
+}
+
 /** Reopens and validates the exact machine-global Run claim recorded by one Run source. */
 function reopenRunClaim(value) {
   const lockDirectory = runClaimLockPath(value.stateRoot, value.stackKey, value.taskKey, value.runId)
@@ -216,7 +325,7 @@ export async function startRuntime(intent, adapters = {}) {
     leaseOwned = true
     const transaction = { schemaVersion: 3, kind: 'OES_RUNTIME_ALLOCATION_TRANSACTION', lifecycle: 'ALLOCATING', ...context, plan, config: redact(config), runLockLease: runLock.lease, devLockLease: devLock.lease, resources: [], endpoints: [] }
     const transactionPath = path.join(directory, 'transaction.json')
-    writeAtomic(transactionPath, transaction)
+    publishAllocationTransaction(transactionPath, transaction)
     transactionPublished = true
     appendEvent(directory, { event: 'ALLOCATION_STARTED', stackKey: layout.stackKey, taskKey, runId, profile: intent.profile, planFingerprint: plan.planFingerprint })
     admission.release()
@@ -229,7 +338,7 @@ export async function startRuntime(intent, adapters = {}) {
         const endpoints = result.endpoints.map((endpoint) => ({ ...endpoint, pool: endpoint.pool || context.pool, allocationProvider: provider }))
         transaction.resources.push(...resources)
         transaction.endpoints.push(...endpoints)
-        writeAtomic(transactionPath, transaction)
+        publishAllocationTransaction(transactionPath, transaction)
         appendEvent(directory, { event: 'PROVIDER_READY', provider, resources: result.resources.map((resource) => ({ kind: resource.kind, objectId: resource.objectId, scope: resource.scope })) })
       }
       transaction.lifecycle = 'REGISTERED'
@@ -243,13 +352,14 @@ export async function startRuntime(intent, adapters = {}) {
         sharedLeaseCount: sharedLeaseCount(context),
         evidenceReference: { type: 'OES_RUNTIME_RUN_EVENTS', path: path.join(directory, 'events.ndjson') }
       }
+      delete runDraft.transactionFingerprint
       const published = publishManifest(directory, runDraft)
       fs.rmSync(transactionPath)
       appendEvent(directory, { event: 'MANIFEST_PUBLISHED', stackGeneration: stackPublished.manifest.generation, manifestFingerprint: published.manifest.manifestFingerprint, manifestSha256: published.sha256 })
       return { ...published, releaseSlot, releaseRunLock: runLock.release, releaseDevLock: devLock.release, cleanup, context }
     } catch (primary) {
       transaction.lifecycle = 'RECONCILING_AFTER_FAILURE'
-      writeAtomic(transactionPath, transaction)
+      publishAllocationTransaction(transactionPath, transaction)
       const readyProviders = new Set(transaction.endpoints.filter((endpoint) => endpoint.ready && endpoint.authority).map((endpoint) => endpoint.allocationProvider || endpoint.provider))
       const readySharedResources = transaction.resources.filter((resource) => resource.scope === 'SHARED' && readyProviders.has(resource.allocationProvider || resource.provider))
       if (readySharedResources.length) publishStackState(context, readySharedResources, transaction.endpoints.filter((endpoint) => readyProviders.has(endpoint.allocationProvider || endpoint.provider)))
@@ -285,13 +395,16 @@ export async function startRuntime(intent, adapters = {}) {
 
 /** Reconciles a registered or interrupted Run using only exact Run/Stack manifest truth. */
 export function reconcileRuntime({ manifestPath, transactionPath, cleanupResource, releaseSlot = () => {}, releaseRunLock, releaseDevLock }) {
+  if (Boolean(manifestPath) === Boolean(transactionPath)) throw new Error('RUNTIME_RECONCILE_EXACTLY_ONE_SOURCE_REQUIRED')
   const source = manifestPath || transactionPath
-  if (!source || !fs.existsSync(source)) throw new Error(`RUNTIME_RECONCILE_SOURCE_MISSING path=${source}`)
-  const initial = manifestPath ? reopenManifest(manifestPath) : readJson(transactionPath)
+  if (!fs.existsSync(source)) throw new Error(`RUNTIME_RECONCILE_SOURCE_MISSING path=${source}`)
+  const reopenSource = manifestPath ? reopenManifest : reopenAllocationTransaction
+  const initial = reopenSource(source)
   const runClaim = claimRunForReconciliation(initial, releaseRunLock)
   try {
-    const value = manifestPath ? reopenManifest(manifestPath) : readJson(transactionPath)
+    const value = reopenSource(source)
     assertReconciliationIdentity(initial, value)
+    if ((initial.manifestFingerprint || initial.transactionFingerprint) !== (value.manifestFingerprint || value.transactionFingerprint)) throw new Error('RUNTIME_RECONCILE_SOURCE_CHANGED')
     const directory = path.dirname(source)
     const context = { root: value.root, stateRoot: value.stateRoot, stackRoot: value.stackRoot, runDirectory: directory, profile: value.profile, pool: value.pool, taskKey: value.taskKey, runId: value.runId, stackKey: value.stackKey, devStackId: value.devStackId, identityKind: value.identityKind, jobFingerprint: value.jobFingerprint, jobIdentity: value.jobIdentity, owners: value.owners || value.plan.owners, capabilities: value.capabilities || value.plan.capabilities, providerOwners: value.providerOwners || value.plan.providerOwners }
     const cleanup = cleanupResource || cleanupDockerResource
