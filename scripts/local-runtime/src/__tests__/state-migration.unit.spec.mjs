@@ -68,18 +68,23 @@ test('Linux keeps /host_mnt literal while retaining ordinary bind-source behavio
   const base = fixture({ createPlan: false })
   const direct = path.join(base.stateRoot, 'shared', 'fixture_machine', 'postgres', 'data')
   const alias = `/host_mnt${direct}`
-  const dockerObjects = [{ ...base.dockerObjects[0], mounts: [{ Type: 'bind', Source: direct, Destination: '/direct' }, { Type: 'bind', Source: alias, Destination: '/literal-host-mnt' }] }]
+  const dockerObjects = [{ ...base.dockerObjects[0], mounts: [{ Type: 'bind', Source: `${direct}/`, Destination: '/direct' }, { Type: 'bind', Source: alias, Destination: '/literal-host-mnt' }] }]
   const inventory = inventoryStateLayout({ stateRoot: base.stateRoot, dockerObjects, hostPlatform: 'linux' })
   assert.equal(canonicalHostBindSource(alias, { platform: 'linux' }), path.resolve(alias))
   assert.deepEqual(inventory.binds.map((bind) => bind.destination), ['/direct'])
+  assert.equal(inventory.dockerObjects[0].mounts.find((mount) => mount.Destination === '/direct').SourceRepresentation, 'HOST_PATH')
   assert.equal(inventory.dockerObjects[0].mounts.find((mount) => mount.Destination === '/literal-host-mnt').Source, path.resolve(alias))
+  assert.equal(inventory.dockerObjects[0].mounts.find((mount) => mount.Destination === '/literal-host-mnt').SourceRepresentation, 'HOST_PATH')
 })
 
 test('Darwin ambiguous or unmappable host-mount aliases fail closed with the raw source', () => {
-  for (const source of ['/host_mnt', '/host_mnt/Users/../private', `/host_mnt${path.join(os.tmpdir(), `oes-missing-${crypto.randomUUID()}`)}`]) {
+  const base = fixture({ createPlan: false })
+  const existing = path.join(base.stateRoot, 'shared', 'fixture_machine', 'postgres')
+  for (const source of ['/host_mnt', '/host_mnt/', '/host_mnt/Users/../private', `/host_mnt${existing}/`, `/host_mnt${path.join(os.tmpdir(), `oes-missing-${crypto.randomUUID()}`)}`]) {
     assert.throws(() => canonicalHostBindSource(source, { platform: 'darwin', requireExisting: true }), (error) => /STATE_MIGRATION_BIND_SOURCE_(?:AMBIGUOUS|UNMAPPABLE)/u.test(error.message) && error.message.includes(JSON.stringify(source)))
   }
-  const base = fixture({ createPlan: false })
+  const canonical = canonicalHostBindSource(`/host_mnt${existing}`, { platform: 'darwin', requireExisting: true })
+  assert.equal(canonicalHostBindSource(canonical, { platform: 'darwin', requireExisting: true }), canonical)
   const dockerObjects = [{ ...base.dockerObjects[0], mounts: [{ Type: 'bind', Source: '/host_mnt/Users/../private', Destination: '/data' }] }]
   assert.throws(() => inventoryStateLayout({ stateRoot: base.stateRoot, dockerObjects, hostPlatform: 'darwin' }), /rawSource="\/host_mnt\/Users\/\.\.\/private"/u)
 })

@@ -10,14 +10,18 @@ import { runChecked } from './process.mjs'
 
 const DOCKER_DESKTOP_HOST_MOUNT_ROOT = '/host_mnt'
 
+/** Identifies Docker Desktop's Darwin-only host-mount source representation. */
+function isDockerDesktopHostMountSource(source, platform = process.platform) {
+  return platform === 'darwin' && typeof source === 'string' && (source === DOCKER_DESKTOP_HOST_MOUNT_ROOT || source.startsWith(`${DOCKER_DESKTOP_HOST_MOUNT_ROOT}/`))
+}
+
 /** Canonicalizes one Docker bind source to its exact host path without broadening Linux matching. */
 export function canonicalHostBindSource(source, { platform = process.platform, requireExisting = false } = {}) {
   if (typeof source !== 'string' || source.length === 0) throw new Error(`STATE_MIGRATION_BIND_SOURCE_INVALID rawSource=${JSON.stringify(source)}`)
-  if (platform !== 'darwin' || (source !== DOCKER_DESKTOP_HOST_MOUNT_ROOT && !source.startsWith(`${DOCKER_DESKTOP_HOST_MOUNT_ROOT}/`))) return path.resolve(source)
-  if (source === DOCKER_DESKTOP_HOST_MOUNT_ROOT) throw new Error(`STATE_MIGRATION_BIND_SOURCE_UNMAPPABLE rawSource=${JSON.stringify(source)}`)
-  const canonicalAlias = path.posix.normalize(source)
+  if (!isDockerDesktopHostMountSource(source, platform)) return path.resolve(source)
+  if (source === DOCKER_DESKTOP_HOST_MOUNT_ROOT || source === `${DOCKER_DESKTOP_HOST_MOUNT_ROOT}/`) throw new Error(`STATE_MIGRATION_BIND_SOURCE_UNMAPPABLE rawSource=${JSON.stringify(source)}`)
   const hostSource = source.slice(DOCKER_DESKTOP_HOST_MOUNT_ROOT.length)
-  if (canonicalAlias !== source || !path.posix.isAbsolute(hostSource) || path.posix.normalize(hostSource) !== hostSource) throw new Error(`STATE_MIGRATION_BIND_SOURCE_AMBIGUOUS rawSource=${JSON.stringify(source)}`)
+  if (path.posix.resolve(source) !== source || !path.posix.isAbsolute(hostSource) || path.posix.resolve(hostSource) !== hostSource) throw new Error(`STATE_MIGRATION_BIND_SOURCE_AMBIGUOUS rawSource=${JSON.stringify(source)}`)
   if (fs.existsSync(source)) throw new Error(`STATE_MIGRATION_BIND_SOURCE_AMBIGUOUS rawSource=${JSON.stringify(source)}`)
   if (requireExisting && !fs.existsSync(hostSource)) throw new Error(`STATE_MIGRATION_BIND_SOURCE_UNMAPPABLE rawSource=${JSON.stringify(source)}`)
   return hostSource
@@ -82,8 +86,9 @@ export function inventoryStateLayout({ stateRoot, dockerObjects = [], hostPlatfo
       mounts: (object.mounts || object.Mounts || []).map((mount) => {
         if (mount.Type !== 'bind') return { Type: mount.Type, Source: mount.Source ? path.resolve(mount.Source) : undefined, Destination: mount.Destination, Name: mount.Name, RW: mount.RW }
         const rawSource = mount.Source
+        const sourceRepresentation = isDockerDesktopHostMountSource(rawSource, hostPlatform) ? 'DOCKER_DESKTOP_HOST_MNT' : 'HOST_PATH'
         const source = canonicalHostBindSource(rawSource, { platform: hostPlatform, requireExisting: requireBindSourceExisting })
-        return { Type: mount.Type, Source: source, RawSource: rawSource, SourceRepresentation: source === rawSource ? 'HOST_PATH' : 'DOCKER_DESKTOP_HOST_MNT', Destination: mount.Destination, Name: mount.Name, RW: mount.RW }
+        return { Type: mount.Type, Source: source, RawSource: rawSource, SourceRepresentation: sourceRepresentation, Destination: mount.Destination, Name: mount.Name, RW: mount.RW }
       }).sort((left, right) => `${left.Type}:${left.Source || left.Name}:${left.Destination}`.localeCompare(`${right.Type}:${right.Source || right.Name}:${right.Destination}`))
     }
   }).sort((left, right) => `${left.type}:${left.objectId}`.localeCompare(`${right.type}:${right.objectId}`))
