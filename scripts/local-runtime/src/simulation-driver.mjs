@@ -8,10 +8,11 @@ let nextPort = 31000
 /** Provisions deterministic filesystem-backed providers for orchestration fault tests. */
 export async function provisionSimulatedProvider(provider, context) {
   const shared = context.profile === 'DEV' || (context.profile === 'LOCAL_INTEGRATION' && ['postgres', 'minio'].includes(provider))
-  const resourceRoot = shared ? path.join(context.stateRoot, 'simulation', 'shared', context.devStackId, provider) : path.join(context.runDirectory, 'simulation', provider)
+  const resourceRoot = shared ? path.join(context.stackRoot, 'providers', context.pool, provider, 'simulation') : path.join(context.runDirectory, 'provider', provider, 'simulation')
   fs.mkdirSync(resourceRoot, { recursive: true, mode: 0o700 })
   const objectId = sha256(`${resourceRoot}:${provider}`).padEnd(64, '0').slice(0, 64)
-  const physical = { provider, kind: 'simulated-provider', scope: shared ? 'SHARED' : 'RUN', name: path.basename(resourceRoot), objectId, path: resourceRoot, cleanup: shared ? 'PRESERVE_SHARED' : 'DELETE_EXACT' }
+  const runScope = context.profile === 'CI' ? 'CI' : 'RUN'
+  const physical = { provider, kind: 'simulated-provider', scope: shared ? 'SHARED' : runScope, name: `${context.pool}-${provider}`, objectId, path: resourceRoot, cleanup: shared ? 'PRESERVE_SHARED' : 'DELETE_EXACT' }
   const allocations = []
   const ownerEnvironments = {}
   const providerOwners = context.providerOwners?.[provider] || context.owners
@@ -20,10 +21,10 @@ export async function provisionSimulatedProvider(provider, context) {
     const suffix = sha256(`${persistent ? context.devStackId : `${context.taskKey}:${context.runId}`}:${owner}:${provider}`).slice(0, 12)
     const allocationPath = path.join(resourceRoot, `${suffix}.json`)
     writeAtomic(allocationPath, { provider, owner, taskKey: context.taskKey, runId: context.runId })
-    allocations.push({ provider, kind: 'simulated-logical', scope: persistent ? 'SHARED' : 'RUN', owner, objectId: sha256(allocationPath), path: allocationPath, cleanup: persistent ? 'PRESERVE_SHARED' : 'DELETE_EXACT' })
+    allocations.push({ provider, kind: 'simulated-logical', scope: persistent ? 'SHARED' : runScope, owner, objectId: sha256(allocationPath), path: allocationPath, cleanup: persistent ? 'PRESERVE_SHARED' : 'DELETE_EXACT' })
     ownerEnvironments[owner] = { [`OES_${provider.toUpperCase().replaceAll('-', '_')}_CREDENTIAL`]: `secret-${suffix}` }
   }
-  const reference = writeCredentialBundle(context.runDirectory, provider, ownerEnvironments)
+  const reference = writeCredentialBundle(context.profile === 'DEV' ? context.stackRoot : context.runDirectory, provider, ownerEnvironments)
   const port = nextPort++
   return { resources: [physical, ...allocations], endpoints: [{ provider, authority: `simulation:${objectId}`, host: '127.0.0.1', port, ready: true, owners: providerOwners, environment: { [`OES_${provider.toUpperCase().replaceAll('-', '_')}_ENDPOINT`]: `http://127.0.0.1:${port}` }, credentialReference: reference }] }
 }

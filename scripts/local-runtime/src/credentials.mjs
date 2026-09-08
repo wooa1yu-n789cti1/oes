@@ -11,6 +11,31 @@ export function writeCredentialBundle(runDirectory, provider, ownerEnvironments)
   return { path: file, sha256: sha256(fs.readFileSync(file)), fingerprint: value.credentialFingerprint }
 }
 
+/** Writes a launcher-private migrator bundle outside all business-process credential references. */
+export function writeMigratorCredentialBundle(context, ownerEnvironments) {
+  const directory = context.profile === 'DEV'
+    ? path.join(context.stackRoot, 'credentials', 'launcher')
+    : path.join(context.runDirectory, 'orchestration')
+  const raw = { schemaVersion: 3, kind: 'OES_RUNTIME_LAUNCHER_MIGRATOR_CREDENTIAL', provider: 'postgres', ownerEnvironments }
+  const value = { ...raw, credentialFingerprint: fingerprint(raw) }
+  const file = path.join(directory, 'postgres-migrators.json')
+  writeAtomic(file, value, 0o600)
+  return { path: file, sha256: sha256(fs.readFileSync(file)), fingerprint: value.credentialFingerprint }
+}
+
+/** Resolves launcher-only migrator authority from its deterministic private location. */
+export function resolveMigratorCredential(manifest, owner) {
+  const file = manifest.profile === 'DEV'
+    ? path.join(manifest.stackRoot, 'credentials', 'launcher', 'postgres-migrators.json')
+    : path.join(manifest.runDirectory, 'orchestration', 'postgres-migrators.json')
+  const bytes = fs.readFileSync(file)
+  const value = JSON.parse(bytes.toString('utf8'))
+  if (value.schemaVersion !== 3 || value.kind !== 'OES_RUNTIME_LAUNCHER_MIGRATOR_CREDENTIAL' || value.provider !== 'postgres' || value.credentialFingerprint !== fingerprint(value, 'credentialFingerprint')) throw new Error(`MIGRATOR_CREDENTIAL_FINGERPRINT_MISMATCH path=${file}`)
+  const environment = value.ownerEnvironments[owner]
+  if (!environment?.DATABASE_URL || Object.keys(environment).some((key) => key !== 'DATABASE_URL')) throw new Error(`MIGRATOR_CREDENTIAL_OWNER_DENIED owner=${owner}`)
+  return environment
+}
+
 /** Reopens one credential reference and exposes only the exact requesting owner's values. */
 export function resolveCredentialReference(reference, owner) {
   const bytes = fs.readFileSync(reference.path)

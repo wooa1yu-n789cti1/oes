@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
+import { resolveEndpoint } from './manifest.mjs'
 import path from 'node:path'
 import { validate, WORKLOAD_POLICY_VERSION } from '../../local/workload-policy-profile.mjs'
 import { writeAtomic } from './canonical.mjs'
@@ -78,7 +79,7 @@ export function selectorEnvironment(owner, selectors) {
 
 /** Creates or reopens the DEV notification payload key outside the repository. */
 function notificationPayloadKey(manifest) {
-  const file = path.join(manifest.stateRoot, 'shared', manifest.devStackId, 'process-runtime', 'notification-delivery-payload.key')
+  const file = path.join(manifest.stackRoot, 'credentials', 'process-runtime', 'notification-delivery-payload.key')
   if (!fs.existsSync(file)) writeAtomic(file, crypto.randomBytes(32).toString('base64'), 0o600)
   const value = fs.readFileSync(file, 'utf8')
   if (!value.trim() || (fs.statSync(file).mode & 0o077) !== 0) throw new Error('NOTIFICATION_PAYLOAD_KEY_INVALID')
@@ -127,7 +128,8 @@ export function trustedProcessEnvironment({ root, manifest, owner, issuerPort, s
 
 /** Resolves the owner-specific CA from the sealed mTLS credential reference. */
 function environmentCaPath(manifest, owner) {
-  const endpoint = manifest.endpoints.find((entry) => entry.provider === 'mtls' && entry.owners.includes(owner))
+  const endpoint = resolveEndpoint(manifest, 'mtls')
+  if (endpoint && !endpoint.owners.includes(owner)) throw new Error(`MTLS_CREDENTIAL_REFERENCE_MISSING owner=${owner}`)
   if (!endpoint?.credentialReference?.path) throw new Error(`MTLS_CREDENTIAL_REFERENCE_MISSING owner=${owner}`)
   const bundle = JSON.parse(fs.readFileSync(endpoint.credentialReference.path, 'utf8'))
   const caPath = bundle.ownerEnvironments?.[owner]?.OES_GRPC_TLS_CA_PATH

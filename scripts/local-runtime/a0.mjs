@@ -2,12 +2,14 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
 import { fingerprint, writeAtomic } from './src/canonical.mjs'
 import { resolveCredentialReference } from './src/credentials.mjs'
-import { environmentForOwner, reopenManifest } from './src/manifest.mjs'
+import { environmentForOwner, reopenManifest, resolveResources } from './src/manifest.mjs'
 import { reconcileRuntime, startRuntime, withRuntime } from './src/orchestrator.mjs'
 import { cleanupDockerResource, observeDockerResourceResidue, provisionDockerProvider } from './src/docker-driver.mjs'
 import { cleanupSimulatedResource, provisionSimulatedProvider } from './src/simulation-driver.mjs'
+import { stackLeasePath } from './src/stack-lease.mjs'
 
 const root = path.resolve(import.meta.dirname, '../..')
 const IMAGES = Object.freeze({
@@ -15,13 +17,21 @@ const IMAGES = Object.freeze({
   natsBox: 'natsio/nats-box:0.14.5@sha256:0784ab710aefaf6ef037ed797ee7dcde613c6ad208c4dbff1945fc7c1b5b5375'
 })
 
-/** Parses A0's small explicit option surface. */
-function options(argv) {
+/** Parses A0's small explicit option surface, including pnpm's standalone separator. */
+export function parseA0Options(argv) {
   const output = {}
-  for (let index = 0; index < argv.length; index += 1) if (argv[index].startsWith('--')) {
-    const [key, inline] = argv[index].slice(2).split('=', 2)
+  const allowed = new Set(['driver', 'scenario', 'batch', 'state-root', 'output'])
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index]
+    if (token === '--') continue
+    if (!token.startsWith('--')) throw new Error(`A0_ARGUMENT_INVALID value=${token}`)
+    const [key, inline] = token.slice(2).split('=', 2)
+    const following = argv[index + 1]
+    if (!key || inline === '' || (inline === undefined && (!following || following.startsWith('--')))) throw new Error(`A0_OPTION_VALUE_REQUIRED option=${token}`)
     output[key] = inline ?? argv[++index]
   }
+  const unknown = Object.keys(output).filter((key) => !allowed.has(key))
+  if (unknown.length) throw new Error(`A0_OPTION_INVALID options=${unknown.join(',')}`)
   return output
 }
 
@@ -29,7 +39,15 @@ function options(argv) {
 function invariant(value, name) { if (!value) throw new Error(`A0_INVARIANT_FAILED name=${name}`) }
 
 /** Returns provider resource records without credential material. */
-function resources(manifest, provider, kind) { return manifest.resources.filter((resource) => resource.provider === provider && (!kind || resource.kind === kind)) }
+function resources(manifest, provider, kind) { return resolveResources(manifest, { includeStack: true }).filter((resource) => resource.provider === provider && (!kind || resource.kind === kind)) }
+
+/** Locates one exact Run directory beneath the single matching Stack. */
+function findRunDirectory(stateRoot, taskKey, runId) {
+  const stacks = path.join(stateRoot, 'stacks')
+  const matches = fs.existsSync(stacks) ? fs.readdirSync(stacks).map((stackKey) => path.join(stacks, stackKey, 'runs', taskKey, runId)).filter((candidate) => fs.existsSync(candidate)) : []
+  if (matches.length !== 1) throw new Error(`A0_RUN_DIRECTORY_NOT_EXACT taskKey=${taskKey} runId=${runId}`)
+  return matches[0]
+}
 
 /** Returns one provider's physical resource across Docker and simulation drivers. */
 function physicalResource(manifest, provider) { return resources(manifest, provider).find((resource) => ['container', 'simulated-provider'].includes(resource.kind)) }
@@ -79,10 +97,10 @@ function listFiles(root) {
 
 /** Reopens every run-owned residue surface after reconciliation. */
 function observeRunResidue({ stateRoot, driver, manifest }) {
-  const runDirectory = path.join(stateRoot, 'runs', manifest.taskKey, manifest.runId)
-  const privateFiles = ['provider', 'credentials'].flatMap((name) => listFiles(path.join(runDirectory, name))).map((file) => path.relative(runDirectory, file))
-  const leasePath = path.join(stateRoot, 'leases', manifest.devStackId, `${manifest.taskKey}--${manifest.runId}.json`)
-  const queue = path.join(stateRoot, 'semaphore', 'queue')
+  const runDirectory = manifest.runDirectory
+  const privateFiles = ['provider', 'credentials', 'orchestration'].flatMap((name) => listFiles(path.join(runDirectory, name))).map((file) => path.relative(runDirectory, file))
+  const leasePath = stackLeasePath(manifest.stackRoot, manifest.taskKey, manifest.runId)
+  const queue = path.join(stateRoot, 'semaphores', 'queue')
   const fifoTickets = fs.existsSync(queue) ? fs.readdirSync(queue).filter((entry) => entry.endsWith('.json')).filter((entry) => {
     try { const value = JSON.parse(fs.readFileSync(path.join(queue, entry), 'utf8')); return value.taskKey === manifest.taskKey && value.runId === manifest.runId } catch { return false }
   }) : []
@@ -96,7 +114,7 @@ function observeRunResidue({ stateRoot, driver, manifest }) {
     invariant(result.status === 0, `residue-${kind}-inspection-${manifest.runId}`)
     dockerObjects.push({ kind, objectIds: result.stdout.trim().split(/\s+/u).filter(Boolean), exitStatus: result.status, stdout: result.stdout, stderr: result.stderr })
   }
-  const logicalResources = manifest.resources.filter((resource) => resource.scope === 'RUN').map((resource) => driver === 'docker'
+  const logicalResources = manifest.resources.filter((resource) => ['RUN', 'CI'].includes(resource.scope)).map((resource) => driver === 'docker'
     ? observeDockerResourceResidue(resource)
     : { key: `${resource.provider}:${resource.kind}:${resource.objectId}`, applicable: true, present: Boolean(resource.path && fs.existsSync(resource.path)), observation: resource.path || 'NO_FILESYSTEM_SURFACE' })
   const normalCleanupPath = path.join(runDirectory, 'cleanup.json')
@@ -132,7 +150,7 @@ async function rollbackDrill({ stateRoot, driver, batch }) {
     })
   } catch (error) { primaryFailureObserved = /A0_ROLLBACK_SENTINEL/u.test(String(error)) }
   invariant(primaryFailureObserved, 'rollback-primary-failure-preserved')
-  const runDirectory = path.join(stateRoot, 'runs', 'local_runtime_a0', runId)
+  const runDirectory = findRunDirectory(stateRoot, 'local_runtime_a0', runId)
   const transactionPath = path.join(runDirectory, 'transaction.json')
   const failedCleanupPath = path.join(runDirectory, 'failed-cleanup.json')
   const transaction = JSON.parse(fs.readFileSync(transactionPath, 'utf8'))
@@ -149,7 +167,7 @@ async function startPair({ stateRoot, driver, batch, round }) {
   const settled = await Promise.allSettled(['a', 'b'].map((side) => startRuntime({ ...base, runId: `a0_${batch}_${round}_${side}` })))
   const failed = settled.find((item) => item.status === 'rejected')
   if (failed) {
-    for (const item of settled) if (item.status === 'fulfilled') reconcileRuntime({ manifestPath: item.value.file, cleanupResource: item.value.cleanup, releaseSlot: item.value.releaseSlot })
+    for (const item of settled) if (item.status === 'fulfilled') reconcileRuntime({ manifestPath: item.value.file, cleanupResource: item.value.cleanup, releaseSlot: item.value.releaseSlot, releaseRunLock: item.value.releaseRunLock })
     throw failed.reason
   }
   return settled.map((item) => item.value)
@@ -221,7 +239,7 @@ function verifyDenials(a, b, commandLog) {
 
 /** Asserts B remains live and authorized after A's exact reconciliation. */
 function verifyRunBStillLive(b, commandLog) {
-  for (const resource of b.manifest.resources.filter((entry) => entry.kind === 'container' && entry.scope === 'RUN')) {
+  for (const resource of b.manifest.resources.filter((entry) => entry.kind === 'container' && ['RUN', 'CI'].includes(entry.scope))) {
     const result = spawnSync('docker', ['inspect', '--format', '{{.State.Running}}', resource.objectId], { encoding: 'utf8' })
     invariant(result.status === 0 && result.stdout.trim() === 'true', `run-b-live-${resource.provider}`)
   }
@@ -242,7 +260,7 @@ function verifyRunBStillLive(b, commandLog) {
 async function providerSmoke({ capability, owner, runId, stateRoot, driver }) {
   const started = await startRuntime({ root, profile: 'LOCAL_INTEGRATION', testClass: 'contract', owners: [owner], capabilities: [capability], taskKey: 'local_runtime_a0', runId, stateRoot, driver })
   const reopened = reopenManifest(started.file, { taskKey: 'local_runtime_a0', runId })
-  const cleanup = reconcileRuntime({ manifestPath: started.file, cleanupResource: started.cleanup, releaseSlot: started.releaseSlot })
+  const cleanup = reconcileRuntime({ manifestPath: started.file, cleanupResource: started.cleanup, releaseSlot: started.releaseSlot, releaseRunLock: started.releaseRunLock })
   return { runId, manifestPath: started.file, manifestFingerprint: reopened.manifestFingerprint, providers: reopened.endpoints.map((entry) => entry.provider), cleanup }
 }
 
@@ -265,7 +283,7 @@ async function runFull({ stateRoot, driver, batch, output }) {
   const all = []
   const cleanup = (started, reason) => {
     if (!started || reconciled.has(started.file)) return null
-    const record = reconcileRuntime({ manifestPath: started.file, cleanupResource: started.cleanup, releaseSlot: started.releaseSlot })
+    const record = reconcileRuntime({ manifestPath: started.file, cleanupResource: started.cleanup, releaseSlot: started.releaseSlot, releaseRunLock: started.releaseRunLock })
     reconciled.add(started.file)
     return { reason, manifestPath: started.file, record }
   }
@@ -293,15 +311,17 @@ async function runFull({ stateRoot, driver, batch, output }) {
       await withRuntime({ root, profile: 'LOCAL_INTEGRATION', testClass: 'integration', owners: ['auth-service'], capabilities: ['cache', 'network-trust'], taskKey: 'local_runtime_a0', runId: abnormalRunId, stateRoot, driver }, async () => { throw new Error('A0_ABNORMAL_SENTINEL') })
     } catch (error) { abnormalObserved = /A0_ABNORMAL_SENTINEL/u.test(String(error)) }
     invariant(abnormalObserved, 'abnormal-primary-failure-preserved')
-    const abnormalCleanup = JSON.parse(fs.readFileSync(path.join(stateRoot, 'runs', 'local_runtime_a0', abnormalRunId, 'cleanup.json'), 'utf8'))
+    const abnormalRunDirectory = findRunDirectory(stateRoot, 'local_runtime_a0', abnormalRunId)
+    const abnormalCleanup = JSON.parse(fs.readFileSync(path.join(abnormalRunDirectory, 'cleanup.json'), 'utf8'))
     invariant(abnormalCleanup.result === 'RECONCILED', 'abnormal-exact-cleanup')
 
     const nacos = await providerSmoke({ capability: 'nacos-specific', owner: 'api-gateway', runId: `a0_${batch}_nacos`, stateRoot, driver })
     const otel = await providerSmoke({ capability: 'trace-specific', owner: 'api-gateway', runId: `a0_${batch}_otel`, stateRoot, driver })
 
-    const ci = await startRuntime({ root, profile: 'CI', testClass: 'integration', owners: ['asset-service', 'auth-service'], capabilities: ['object-store', 'cache', 'events', 'network-trust'], taskKey: 'local_runtime_a0', runId: `a0_${batch}_ci`, stateRoot, driver })
+    const ciStateRoot = `${stateRoot}-ci-${batch}`
+    const ci = await startRuntime({ root, profile: 'CI', testClass: 'integration', owners: ['asset-service', 'auth-service'], capabilities: ['object-store', 'cache', 'events', 'network-trust'], taskKey: 'local_runtime_a0', runId: `a0_${batch}_ci`, stateRoot: ciStateRoot, driver })
     all.push(ci)
-    invariant(ci.manifest.resources.filter((entry) => entry.kind === 'container').every((entry) => entry.scope === 'RUN'), 'ci-job-private-physical-scope')
+    invariant(ci.manifest.resources.filter((entry) => entry.kind === 'container').every((entry) => entry.scope === 'CI'), 'ci-job-private-physical-scope')
     const ciCleanup = cleanup(ci, 'ci-job-private-reproduction')
 
     const [a2, b2] = await startPair({ stateRoot, driver, batch, round: 'r2' })
@@ -317,14 +337,14 @@ async function runFull({ stateRoot, driver, batch, output }) {
     const reconciledManifests = [
       a1Manifest,
       b1Manifest,
-      reopenManifest(path.join(stateRoot, 'runs', 'local_runtime_a0', abnormalRunId, 'manifest.json'), { taskKey: 'local_runtime_a0', runId: abnormalRunId }),
+      reopenManifest(path.join(abnormalRunDirectory, 'manifest.json'), { taskKey: 'local_runtime_a0', runId: abnormalRunId }),
       reopenManifest(nacos.manifestPath, { taskKey: 'local_runtime_a0', runId: nacos.runId }),
       reopenManifest(otel.manifestPath, { taskKey: 'local_runtime_a0', runId: otel.runId }),
       ci.manifest,
       a2.manifest,
       b2.manifest
     ]
-    const residue = reconciledManifests.map((manifest) => observeRunResidue({ stateRoot, driver, manifest }))
+    const residue = reconciledManifests.map((manifest) => observeRunResidue({ stateRoot: manifest.profile === 'CI' ? ciStateRoot : stateRoot, driver, manifest }))
     const raw = {
       schemaVersion: 2,
       kind: 'OES_LOCAL_RUNTIME_A0',
@@ -359,8 +379,9 @@ async function runFull({ stateRoot, driver, batch, output }) {
 
 /** Selects a shortcut or complete A0 execution and prints its exact report reference. */
 async function main(argv = process.argv.slice(2)) {
-  const input = options(argv)
+  const input = parseA0Options(argv)
   const driver = input.driver || 'docker'
+  if (!['docker', 'simulation'].includes(driver)) throw new Error(`A0_DRIVER_INVALID driver=${driver}`)
   const scenario = input.scenario || 'full'
   const batch = input.batch || Date.now().toString(36)
   const stateRoot = path.resolve(input['state-root'] || path.join(process.env.HOME, '.local/state/oes/runtime-v2-a0'))
@@ -369,4 +390,4 @@ async function main(argv = process.argv.slice(2)) {
   process.stdout.write(`${JSON.stringify({ status: 'A0_PASSED', scenario, driver, output, reportFingerprint: report.reportFingerprint, exitStatus: report.exitStatus }, null, 2)}\n`)
 }
 
-main().catch((error) => { process.stderr.write(`${error.stack || error.message || error}\n`); process.exitCode = 1 })
+if (import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((error) => { process.stderr.write(`${error.stack || error.message || error}\n`); process.exitCode = 1 })

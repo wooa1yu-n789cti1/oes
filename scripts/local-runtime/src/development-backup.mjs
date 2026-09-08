@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fingerprint, sha256, writeAtomic } from './canonical.mjs'
-import { reopenManifest } from './manifest.mjs'
+import { reopenManifest, resolveResources } from './manifest.mjs'
 import { RUNTIME_DOCKER_IMAGES } from './docker-driver.mjs'
 import { runChecked } from './process.mjs'
 
@@ -38,10 +38,11 @@ function readCredential(reference) {
 export function backupDevelopmentState(manifestPath, { outputDirectory } = {}) {
   const manifest = reopenManifest(manifestPath)
   if (manifest.profile !== 'DEV') throw new Error('DEV_BACKUP_PROFILE_REQUIRED')
-  const output = path.resolve(outputDirectory || path.join(manifest.runDirectory, 'backups', 'pre-migration'))
+  const output = path.resolve(outputDirectory || path.join(manifest.stackRoot, 'evidence', 'backups', `pre-migration-${manifest.runId}`))
   fs.mkdirSync(output, { recursive: true, mode: 0o700 })
   const backups = []
-  for (const resource of manifest.resources.filter((item) => item.kind === 'database')) {
+  const stackResources = resolveResources(manifest, { includeStack: true })
+  for (const resource of stackResources.filter((item) => item.kind === 'database')) {
     assertAllocationContainer(resource)
     const bootstrap = readCredential(resource.rootCredentialReference)
     const file = path.join(output, `${resource.database}.dump`)
@@ -51,7 +52,7 @@ export function backupDevelopmentState(manifestPath, { outputDirectory } = {}) {
     fs.chmodSync(file, 0o600)
     backups.push({ kind: 'database', database: resource.database, containerName: resource.containerName, containerObjectId: resource.containerObjectId, file, sha256: sha256(bytes), restoreCommand: ['docker', 'exec', '-i', resource.containerName, 'pg_restore', '-U', bootstrap.rootUser, '--clean', '--if-exists', '--dbname', resource.database] })
   }
-  for (const resource of manifest.resources.filter((item) => item.kind === 'bucket')) {
+  for (const resource of stackResources.filter((item) => item.kind === 'bucket')) {
     assertAllocationContainer(resource)
     const admin = readCredential(resource.adminCredentialReference)
     const temporary = path.join(output, `.${resource.bucket}.mirror`)
@@ -65,7 +66,7 @@ export function backupDevelopmentState(manifestPath, { outputDirectory } = {}) {
     } finally { fs.rmSync(temporary, { recursive: true, force: true }) }
     backups.push({ kind: 'bucket', bucket: resource.bucket, containerName: resource.containerName, containerObjectId: resource.containerObjectId, file, sha256: sha256(fs.readFileSync(file)), restoreCommand: ['mc', 'mirror', '--overwrite', '/backup/data', `local/${resource.bucket}`] })
   }
-  const raw = { schemaVersion: 2, kind: 'OES_DEV_STATE_BACKUP', manifestFingerprint: manifest.manifestFingerprint, devStackId: manifest.devStackId, taskKey: manifest.taskKey, runId: manifest.runId, sourcesPreserved: true, backups }
+  const raw = { schemaVersion: 3, kind: 'OES_DEV_STATE_BACKUP', manifestFingerprint: manifest.manifestFingerprint, stackKey: manifest.stackKey, devStackId: manifest.devStackId, taskKey: manifest.taskKey, runId: manifest.runId, sourcesPreserved: true, backups }
   const record = { ...raw, backupFingerprint: fingerprint(raw) }
   writeAtomic(path.join(output, 'backup-record.json'), record)
   return record
@@ -77,7 +78,7 @@ export function restoreDevelopmentState(manifestPath, record, confirmation) {
   if (confirmation.kind !== 'OES_DEV_RESTORE_CONFIRMATION' || confirmation.status !== 'CONFIRMED' || confirmation.backupFingerprint !== record.backupFingerprint || confirmation.confirmationFingerprint !== fingerprint(confirmation, 'confirmationFingerprint')) throw new Error('DEV_RESTORE_CONFIRMATION_INVALID')
   const manifest = reopenManifest(manifestPath)
   if (manifest.profile !== 'DEV' || manifest.devStackId !== record.devStackId) throw new Error('DEV_RESTORE_TARGET_MISMATCH')
-  const resources = new Map(manifest.resources.filter((resource) => ['database', 'bucket'].includes(resource.kind)).map((resource) => [`${resource.kind}:${resource.database || resource.bucket}`, resource]))
+  const resources = new Map(resolveResources(manifest, { includeStack: true }).filter((resource) => ['database', 'bucket'].includes(resource.kind)).map((resource) => [`${resource.kind}:${resource.database || resource.bucket}`, resource]))
   const results = []
   for (const backup of record.backups) {
     const bytes = fs.readFileSync(backup.file)
@@ -100,6 +101,6 @@ export function restoreDevelopmentState(manifestPath, record, confirmation) {
     }
     results.push({ key, disposition: 'RESTORED_EXACT', exitStatus: 0 })
   }
-  const raw = { schemaVersion: 2, kind: 'OES_DEV_STATE_RESTORE_RESULT', backupFingerprint: record.backupFingerprint, manifestFingerprint: manifest.manifestFingerprint, results }
+  const raw = { schemaVersion: 3, kind: 'OES_DEV_STATE_RESTORE_RESULT', backupFingerprint: record.backupFingerprint, manifestFingerprint: manifest.manifestFingerprint, results }
   return { ...raw, resultFingerprint: fingerprint(raw) }
 }

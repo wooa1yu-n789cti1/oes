@@ -15,7 +15,12 @@ pnpm runtime:start -- --profile LOCAL_INTEGRATION --test-class integration \
   --owner permission-service --task-key TASK_KEY
 ```
 
-The launcher creates one machine-stable `devStackId`, one explicit `taskKey`, and one unique `runId`. State, credentials, leases, manifests, and evidence live beneath the configured external state root. Credentials are mode `0600`; the manifest contains only value-free references and hashes.
+The launcher creates a byte-exact machine identity, maps `oes-local-<machineFingerprint>` one-to-one
+to the immutable `devStackId`, and places each explicit `taskKey`/`runId` below that Stack. The
+configured external root contains only machine identity/registry/schema, global locks/semaphores,
+and `stacks/`. Stack provider data, credentials, leases, immutable manifest generations, restore
+state, and Stack evidence live below `stacks/<stackKey>/`; Run state lives below
+`stacks/<stackKey>/runs/<taskKey>/<runId>/`. Credentials are mode `0600`.
 
 ## 2. Profiles and dependency planning
 
@@ -38,7 +43,11 @@ pnpm runtime:run -- --profile LOCAL_INTEGRATION --test-class integration \
   pnpm --filter collaboration-service test:integration
 ```
 
-The launcher allocates dependencies, waits for readiness, publishes one atomic manifest, injects only the selected owner's environment, executes the command, records literal status, and reconciles exact owned resources. `SIGINT`, command failure, startup failure, and explicit `runtime:reconcile` use the same resource truth.
+The launcher allocates dependencies, waits for readiness, publishes an immutable Stack generation
+and then a Run manifest that references it by generation/path/SHA-256/fingerprint, injects only the
+selected owner's environment, executes the command, records literal status, and reconciles exact
+owned resources. The Run manifest never duplicates shared resource or endpoint payload.
+`SIGINT`, command failure, startup failure, and explicit `runtime:reconcile` use the same authority.
 
 For `DEV`, the launcher first writes a verified pre-migration snapshot, generates the selected
 Prisma clients and shared contracts, applies migrations, reconciles Identity-owned machine
@@ -58,7 +67,11 @@ pnpm db:seed -- --manifest /ABSOLUTE/RUN/manifest.json
 pnpm db:fixture -- --manifest /ABSOLUTE/RUN/manifest.json --fixture tenant-web-auth
 ```
 
-The order is provision roles/database, `prisma migrate deploy` using migrator authority, native/schema verification, runtime DML grants, Foundation Seed, explicit run/test Fixture, then service/test execution. Foundation Seed and Fixture are separate commands and inputs. Provider administration is never injected into a business service.
+The order is provision roles/database, `prisma migrate deploy` using a launcher-private migrator
+bundle, native/schema verification, runtime DML grants, Foundation Seed, explicit run/test Fixture,
+then service/test execution. A business process receives only its runtime `DATABASE_URL`; neither a
+migrator URL nor provider administration is present in its environment or credential reference.
+Foundation Seed and Fixture are separate commands and inputs.
 
 ## 5. DEV data snapshot and restore
 
@@ -91,7 +104,27 @@ pnpm runtime:status -- --manifest /ABSOLUTE/RUN/manifest.json
 pnpm runtime:reconcile -- --manifest /ABSOLUTE/RUN/manifest.json
 ```
 
-The manifest is endpoint authority only after readiness and binds profile, plan, `devStackId`, `taskKey`, `runId`, exact Docker/file resource identities, process identities, leases, credential references, and evidence reference. PostgreSQL roles/databases, MinIO users/buckets, Redis ACL namespaces, NATS permissions, and mTLS material are owner/run scoped. Cleanup is child-first and preserves shared, active, unknown, attached, or identity-drifted resources.
+The referenced Stack manifest is the only shared-provider object/volume/endpoint/credential/lease
+authority. The Run manifest is the only logical/ephemeral/process/transaction/cleanup authority.
+Both publish only after readiness. PostgreSQL roles/databases, MinIO users/buckets, Redis ACL
+namespaces, NATS permissions, and mTLS material are owner/run scoped. Cleanup is child-first and
+preserves shared, active, unknown, attached, or identity-drifted resources.
+
+Operator projection consumes explicit reference lists rather than Docker names or UI groups:
+
+```bash
+pnpm runtime:operator:status -- \
+  --observations /ABSOLUTE/docker-observations.json \
+  --authority /ABSOLUTE/operator-authority.json \
+  --output /ABSOLUTE/operator-status.json
+```
+
+`operator-authority.json` contains only `stackReferences`, `runManifestPaths`, and `leasePaths`.
+`leasePaths` must exactly enumerate every canonical lease currently present beneath the referenced
+Stacks; omission, duplication, or an unexpected path fails authority reopen. The result classifies
+each observation as `SHARED`, `RUN`, `CI`, `LEGACY`, or `UNKNOWN`; only an exact Run/CI manifest join
+with a fingerprint-valid `cleanup.json` and no active lease is eligible for launcher reconciliation.
+Every other object is preserved.
 
 ## 7. CI parity
 
@@ -105,7 +138,111 @@ pnpm runtime:a0 -- --driver docker --output /ABSOLUTE/A0-EVIDENCE.json
 
 A0 is business-neutral. It runs two simultaneous local allocations, proves shared TEST provider reuse plus distinct databases/users and buckets/credentials, dynamic Redis/NATS/mTLS endpoints, cross-run/cross-service denial, run-A cleanup without run-B damage, normal and abnormal reconciliation, temporary Nacos/MySQL and OTel smoke, CI job-private reproduction, stable rerun, residue observation, and rollback drill. It does not claim any business Journey complete.
 
-## 9. Legacy host-resource reconciliation
+## 9. One-time state-layout migration
+
+Inventory and plan do not mutate the configured root. First capture exact bind observations, then
+seal the old tree and its provider pool mapping:
+
+```bash
+state_root=/ABSOLUTE/runtime-v2
+dev_stack_id="$(jq -er '.devStackId | select(type == "string" and length > 0)' \
+  "$state_root/machine/dev-stack.json")"
+containers="$(docker ps -aq --filter label=oes.runtime.version=2 \
+  --filter "label=oes.runtime.dev-stack-id=$dev_stack_id")"
+networks="$(docker network ls -q --filter label=oes.runtime.version=2 \
+  --filter "label=oes.runtime.dev-stack-id=$dev_stack_id")"
+volumes="$(docker volume ls -q --filter label=oes.runtime.version=2 \
+  --filter "label=oes.runtime.dev-stack-id=$dev_stack_id")"
+container_json='[]'; network_json='[]'; volume_json='[]'
+if [ -n "$containers" ]; then container_json="$(docker container inspect $containers)"; fi
+if [ -n "$networks" ]; then network_json="$(docker network inspect $networks)"; fi
+if [ -n "$volumes" ]; then volume_json="$(docker volume inspect $volumes)"; fi
+jq -n --argjson containers "$container_json" --argjson networks "$network_json" \
+  --argjson volumes "$volume_json" \
+  '($containers | map(. + {type:"container"}))
+   + ($networks | map(. + {type:"network"}))
+   + ($volumes | map(. + {type:"volume"}))' \
+  > /ABSOLUTE/docker-observations.json
+
+pnpm runtime:state:inventory -- --state-root /ABSOLUTE/runtime-v2 \
+  --docker-observations /ABSOLUTE/docker-observations.json \
+  --output /ABSOLUTE/state-inventory.json
+
+pnpm runtime:state:plan -- --inventory /ABSOLUTE/state-inventory.json \
+  --provider-pools /ABSOLUTE/provider-pools.json \
+  --provider-snapshots /ABSOLUTE/provider-snapshots.json \
+  --dev-backup-record /EXTERNAL/STABLE/backup-record.json \
+  --output /ABSOLUTE/state-plan.json
+```
+
+`docker-observations.json` is the complete exact-`devStackId` V2 container, network, and volume set;
+the inventory preserves every supplied object and planning rejects any object without matching
+provider identity/snapshot coverage or the complete SHARED V2 label set. `provider-pools.json` is an
+object from provider name to `dev` or `test` when an old identity does
+not already seal `oes.runtime.pool`. `provider-snapshots.json` is a closed-world array of exact
+`{resource, endpoint}` observations: every copied provider identity, object ID, label, volume and
+old-root bind must have one matching `SHARED` resource, while every primary provider and mTLS has one
+ready endpoint. Duplicate/conflicting entries, omitted provider identities, unresolved absolute
+references, unknown machine-root entries and binds outside a mapped provider tree fail planning.
+The stable old `shared/<devStackId>/process-runtime` payload key is classified as Stack credential
+material and moves byte-for-byte to `credentials/process-runtime`, not a provider-data directory.
+An inventoried DEV PostgreSQL/MinIO data carrier or a DEV database/bucket makes
+`--dev-backup-record` mandatory; it must refer to a byte-verified backup outside the runtime state
+root. Its database/bucket keys and exact container identities must equal the complete planned DEV
+data-carrier set, and every archive is reopened during plan, stage, and activation.
+Stop DEV processes and every container with an old-root bind, then repeat inventory/plan until active
+Run, Stack lease, DEV-process, semaphore-ticket, control-lock and running-bind counts are all zero.
+Stage creates and fsyncs a same-filesystem sibling while leaving the configured root byte-exact:
+
+```bash
+pnpm runtime:state:stage -- --plan /ABSOLUTE/state-plan.json \
+  --inventory /ABSOLUTE/state-inventory.json
+```
+
+The emitted parent-owned journal is `PREPARED`. State activation is a separate Human-confirmed
+operation whose confirmation fingerprint binds that exact journal fingerprint:
+
+```bash
+pnpm runtime:state:activate -- --journal /ABSOLUTE/.runtime-v2.activation-ID.json \
+  --confirmation /ABSOLUTE/state-activation-confirmation.json
+```
+
+Activation atomically closes parent-owned allocation admission, holds the machine migration barrier,
+rechecks live quiescence and source bytes, and performs `PREPARED -> OLD_MOVED -> NEW_PLACED ->
+COMMITTED`. Each parent-journal transition fsyncs its containing directory. Necessary bind-provider
+replacement uses the canonical `oes-v2-<devStackIdToken>-<pool>-<provider>` name and seals both the
+retained old identity and ready new identity. It also atomically rewrites and reopens the provider
+`identity.json`. The generation directory and Stack pointer directory are fsynced and the exact
+publication is reopened before `COMMITTED`. Before `COMMITTED`, recover restores old authority and
+quarantines the staged/new tree; after `COMMITTED`, recover reopens the exact activated generation,
+provider identity, mapping, and readiness. Ordinary launcher commands reopen the registry's preserved immutable
+`devStackId`; an explicit ID is only an exact-match assertion:
+
+```bash
+pnpm runtime:state:recover -- --journal /ABSOLUTE/.runtime-v2.activation-ID.json
+```
+
+Confirmed rollback holds the same parent migration barrier. Its first observation across current and
+rollback roots requires zero Run, lease, DEV process, admission, semaphore, lock, and unexpected
+running bind while allowing only the journal-sealed replacement object IDs. It then stops those exact
+replacement providers, performs a second strict zero-running-bind observation, and only then renames
+either root. A non-zero observation preserves both roots and reports
+`STATE_MIGRATION_QUIESCENCE_REQUIRED`.
+
+Whole-state rollback retains the new tree for audit and requires a separately confirmed binding to
+the current committed journal:
+
+```bash
+pnpm runtime:state:rollback -- --journal /ABSOLUTE/.runtime-v2.activation-ID.json \
+  --confirmation /ABSOLUTE/state-rollback-confirmation.json
+```
+
+Any restore confirmation/binding copied into the staged Stack is moved under
+`restore/invalidated/` and recorded as `STATE_LAYOUT_TARGET_BINDING_CHANGED`; create a new restore
+plan/binding after successful reopen. Do not run activation, restore, or cleanup as one combined
+command.
+
+## 10. Legacy host-resource reconciliation
 
 Inventory and dry-run are read-only:
 
@@ -132,6 +269,6 @@ pnpm runtime:legacy:apply -- --plan /ABSOLUTE/cleanup-plan.json \
 
 The confirmation file is not a caller-authored approval flag. It must bind `ownerTaskId`, `stateVersion`, `transitionId`, the Human confirmation fingerprint, and an absolute byte-hashed plan reference; it must not select its own trust root. Immediately before `legacy-apply`, the Collaboration boundary supplies the independently controlled absolute `OES_LEGACY_CLEANUP_CURRENT_BINDING` path in the process environment. Apply reopens that exact current binding, requires the confirmation fields to match it, and reopens every `CONFIRMED_IDLE_LEGACY_RESIDUE` lifecycle-evidence reference before it inspects object ID, labels, state, attachments, and mounts. Missing, relative, self-referential, drifted, or mismatched binding input fails before Docker inspection. This delivery, launcher startup, tests, CI, merge, and ordinary reconciliation never invoke legacy apply.
 
-## 10. Rollback
+## 11. Repository rollback
 
 Revert the whole cutover candidate. If a verified DEV migration occurred, restore its source-bound snapshot. Do not selectively restore repository dotenv generation, fixed host endpoints, or an earlier lifecycle path. Runtime-created run resources reconcile from their exact manifest; retained legacy objects remain outside the deletion set until the independent Cleanup boundary.

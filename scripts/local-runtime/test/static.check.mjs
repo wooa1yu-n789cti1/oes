@@ -74,6 +74,12 @@ const driver = read('scripts/local-runtime/src/docker-driver.mjs')
 assert.match(driver, /127\.0\.0\.1::\$\{port\}/u)
 assert.doesNotMatch(driver, /--publish['"],\s*['"](?:127\.0\.0\.1:)?\d+:/u)
 const activeLocalRuntime = sources.filter(({ file }) => file.startsWith('scripts/local-runtime/')).map(({ text }) => text).join('\n')
+assert.doesNotMatch(activeLocalRuntime, /OES_MIGRATOR_DATABASE_URL/u, 'business runtime surface retains migrator environment authority')
+const hierarchyRuntime = sources.filter(({ file }) => file.startsWith('scripts/local-runtime/') && !['scripts/local-runtime/src/state-layout.mjs', 'scripts/local-runtime/src/state-migration.mjs', 'scripts/local-runtime/src/legacy-reconcile.mjs'].includes(file)).map(({ text }) => text).join('\n')
+assert.doesNotMatch(hierarchyRuntime, /path\.join\([^\n]*(?:stateRoot|manifest\.stateRoot)[^\n]*['"](?:shared|runs|leases|semaphore)['"]/u, 'active runtime retains a flat machine-root authority path')
+for (const label of ['oes.runtime.stack-key', 'oes.runtime.dev-stack-id', 'oes.runtime.scope', 'oes.runtime.pool', 'oes.runtime.provider', 'oes.runtime.ci-job-fingerprint']) assert.match(driver, new RegExp(label.replaceAll('.', '\\.'), 'u'), `Docker identity label missing: ${label}`)
+assert.match(read('scripts/local-runtime/launcher.mjs'), /state-inventory[\s\S]*state-plan[\s\S]*state-stage[\s\S]*state-activate[\s\S]*state-recover[\s\S]*state-rollback/u)
+assert.match(read('docs/runbooks/local-development-and-test-runtime.md'), /runtime:state:inventory[\s\S]*runtime:state:activate[\s\S]*runtime:state:recover[\s\S]*runtime:state:rollback/u)
 const aliasBoundaries = activeLocalRuntime.match(/mc alias set -- [^;\n`]*"\$(?:MINIO_ROOT_PASSWORD|A_SECRET)"/gu) || []
 const userAddBoundaries = activeLocalRuntime.match(/mc admin user add -- [^;&\n`]*"\$MINIO_USER_SECRET"/gu) || []
 assert.equal(aliasBoundaries.length, 6, 'all active MinIO aliases must terminate option parsing before credentials')

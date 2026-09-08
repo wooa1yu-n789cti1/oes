@@ -7,27 +7,62 @@ import { loadRuntimeConfig } from './src/config.mjs'
 import { resolveCredentialReference } from './src/credentials.mjs'
 import { inventoryLegacyResources, planLegacyCleanup, applyLegacyCleanup, observeLegacyResidue, backupValidDevData, writeLegacyArtifact } from './src/legacy-reconcile.mjs'
 import { environmentForOwner, reopenManifest } from './src/manifest.mjs'
+import { resolveEndpoint } from './src/manifest.mjs'
 import { reconcileRuntime, startRuntime, withRuntime } from './src/orchestrator.mjs'
 import { planRuntime } from './src/planner.mjs'
 import { runChecked } from './src/process.mjs'
 import { startDevelopmentProcesses, stopDevelopmentProcesses } from './src/process-runtime.mjs'
 import { backupDevelopmentState, restoreDevelopmentState } from './src/development-backup.mjs'
+import { activateStagedState, inventoryStateLayout, planStateLayoutMigration, recoverStateLayout, rollbackCommittedState, stageStateLayoutMigration } from './src/state-migration.mjs'
+import { planOperatorReconciliation, reopenOperatorAuthority, writeOperatorStatus } from './src/operator-status.mjs'
+import { sha256, writeAtomic } from './src/canonical.mjs'
 
 const root = path.resolve(import.meta.dirname, '../..')
+const BOOLEAN_OPTIONS = new Set(['migrate', 'foundation-seed'])
+const INTENT_OPTIONS = ['profile', 'test-class', 'owner', 'owners', 'capabilities', 'task-key', 'run-id', 'dev-stack-id', 'state-root', 'machine-config', 'concurrency', 'driver']
+const SUBCOMMAND_OPTIONS = Object.freeze({
+  dev: [...INTENT_OPTIONS, 'scope'], plan: INTENT_OPTIONS, start: INTENT_OPTIONS,
+  run: [...INTENT_OPTIONS, 'migrate', 'foundation-seed', 'fixture', 'timeout'],
+  migrate: ['manifest'], 'foundation-seed': ['manifest'], fixture: ['manifest', 'fixture'],
+  reconcile: ['manifest', 'transaction'], status: ['manifest'],
+  'state-inventory': ['state-root', 'docker-observations', 'output'],
+  'state-plan': ['inventory', 'provider-snapshots', 'provider-pools', 'dev-backup-record', 'dev-stack-id', 'output'],
+  'state-stage': ['plan', 'inventory'], 'state-activate': ['journal', 'confirmation'],
+  'state-recover': ['journal'], 'state-rollback': ['journal', 'confirmation'],
+  'operator-status': ['observations', 'authority', 'output'],
+  'dev-backup': ['manifest', 'output'], 'dev-restore': ['manifest', 'backup', 'confirmation'],
+  'legacy-inventory': ['bindings', 'output'], 'legacy-plan': ['inventory', 'owner-task-id', 'output'],
+  'legacy-backup': ['inventory', 'output'], 'legacy-apply': ['plan', 'confirmation', 'collaboration-binding', 'output'],
+  'legacy-residue': ['plan', 'bindings', 'output']
+})
 
 /** Parses long options while preserving the command following `--`. */
 export function parseArguments(argv) {
-  const separator = argv.indexOf('--')
-  const command = separator >= 0 ? argv.slice(separator + 1) : []
-  const tokens = separator >= 0 ? argv.slice(0, separator) : argv
+  const forwarded = argv[0] === '--' ? argv.slice(1) : argv
+  const separator = forwarded.indexOf('--')
+  const command = separator >= 0 ? forwarded.slice(separator + 1) : []
+  const tokens = separator >= 0 ? forwarded.slice(0, separator) : forwarded
   const options = {}
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index]
-    if (!token.startsWith('--')) continue
+    if (!token.startsWith('--')) throw new Error(`RUNTIME_ARGUMENT_INVALID value=${token}`)
     const [key, inline] = token.slice(2).split('=', 2)
-    options[key] = inline ?? (tokens[index + 1]?.startsWith('--') || index + 1 === tokens.length ? 'true' : tokens[++index])
+    if (!key || inline === '') throw new Error(`RUNTIME_OPTION_VALUE_REQUIRED option=${token}`)
+    const missingValue = tokens[index + 1]?.startsWith('--') || index + 1 === tokens.length
+    if (inline === undefined && missingValue && !BOOLEAN_OPTIONS.has(key)) throw new Error(`RUNTIME_OPTION_VALUE_REQUIRED option=${token}`)
+    options[key] = inline ?? (missingValue ? 'true' : tokens[++index])
   }
   return { options, command }
+}
+
+/** Rejects unknown subcommands/options and child commands outside the run boundary. */
+function validateCommandSurface(subcommand, options, command) {
+  if (!subcommand) return
+  const allowed = SUBCOMMAND_OPTIONS[subcommand]
+  if (!allowed) throw new Error(`RUNTIME_SUBCOMMAND_INVALID subcommand=${subcommand}`)
+  const unknown = Object.keys(options).filter((key) => !allowed.includes(key))
+  if (unknown.length) throw new Error(`RUNTIME_OPTION_INVALID subcommand=${subcommand} options=${unknown.join(',')}`)
+  if (subcommand !== 'run' && command.length) throw new Error(`RUNTIME_COMMAND_FORBIDDEN subcommand=${subcommand}`)
 }
 
 /** Splits one comma-separated option into a stable unique list. */
@@ -63,6 +98,7 @@ function ownerEnvironment(manifest, owner) {
 export async function main(argv = process.argv.slice(2)) {
   const subcommand = argv[0]
   const { options, command } = parseArguments(argv.slice(1))
+  validateCommandSurface(subcommand, options, command)
   if (subcommand === 'dev') {
     const scopes = {
       system: ['permission-service','identity-service','hr-service','auth-service','collaboration-service','asset-service','item-master-service','notification-service','public-entry-service','party-service','site-service','tenant-org-service','terminal-device-service','browser-activity-service','api-gateway'],
@@ -98,7 +134,7 @@ export async function main(argv = process.argv.slice(2)) {
       process.removeListener('SIGINT', interrupt)
       process.removeListener('SIGTERM', interrupt)
       if (processes) await stopDevelopmentProcesses(processes.children)
-      if (started) reconcileRuntime({ manifestPath: started.file, cleanupResource: started.cleanup, releaseSlot: started.releaseSlot, releaseDevLock: started.releaseDevLock })
+      if (started) reconcileRuntime({ manifestPath: started.file, cleanupResource: started.cleanup, releaseSlot: started.releaseSlot, releaseRunLock: started.releaseRunLock, releaseDevLock: started.releaseDevLock })
     }
     return
   }
@@ -142,7 +178,59 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (subcommand === 'status') {
     const manifest = reopenManifest(path.resolve(options.manifest || ''))
-    emit({ status: manifest.lifecycle, profile: manifest.profile, taskKey: manifest.taskKey, runId: manifest.runId, devStackId: manifest.devStackId, manifestFingerprint: manifest.manifestFingerprint, providers: manifest.endpoints.map((endpoint) => ({ provider: endpoint.provider, authority: endpoint.authority, ready: endpoint.ready })) })
+    emit({ status: manifest.lifecycle, profile: manifest.profile, stackKey: manifest.stackKey, taskKey: manifest.taskKey, runId: manifest.runId, devStackId: manifest.devStackId, manifestFingerprint: manifest.manifestFingerprint, providers: manifest.endpoints.map((binding) => { const endpoint = resolveEndpoint(manifest, binding.provider); return { provider: endpoint.provider, source: binding.source, authority: endpoint.authority, ready: endpoint.ready } }) })
+    return
+  }
+  if (subcommand === 'state-inventory') {
+    const dockerObjects = options['docker-observations'] ? JSON.parse(fs.readFileSync(path.resolve(options['docker-observations']), 'utf8')) : []
+    const value = inventoryStateLayout({ stateRoot: path.resolve(options['state-root']), dockerObjects })
+    if (options.output) writeAtomic(path.resolve(options.output), value)
+    emit(value)
+    return
+  }
+  if (subcommand === 'state-plan') {
+    const inventory = JSON.parse(fs.readFileSync(path.resolve(options.inventory), 'utf8'))
+    const providerSnapshots = options['provider-snapshots'] ? JSON.parse(fs.readFileSync(path.resolve(options['provider-snapshots']), 'utf8')) : []
+    const providerPools = options['provider-pools'] ? JSON.parse(fs.readFileSync(path.resolve(options['provider-pools']), 'utf8')) : {}
+    let devBackupReference = null
+    if (options['dev-backup-record']) {
+      const backupPath = path.resolve(options['dev-backup-record'])
+      const bytes = fs.readFileSync(backupPath)
+      const backup = JSON.parse(bytes.toString('utf8'))
+      devBackupReference = { type: 'OES_DEV_STATE_BACKUP', path: backupPath, sha256: sha256(bytes), fingerprint: backup.backupFingerprint }
+    }
+    const value = planStateLayoutMigration(inventory, { devStackId: options['dev-stack-id'], providerSnapshots, providerPools, devBackupReference })
+    if (options.output) writeAtomic(path.resolve(options.output), value)
+    emit(value)
+    return
+  }
+  if (subcommand === 'state-stage') {
+    const plan = JSON.parse(fs.readFileSync(path.resolve(options.plan), 'utf8'))
+    const inventory = JSON.parse(fs.readFileSync(path.resolve(options.inventory), 'utf8'))
+    emit(await stageStateLayoutMigration(plan, inventory))
+    return
+  }
+  if (subcommand === 'state-activate') {
+    const confirmation = JSON.parse(fs.readFileSync(path.resolve(options.confirmation), 'utf8'))
+    emit(activateStagedState({ journalPath: path.resolve(options.journal), confirmation }))
+    return
+  }
+  if (subcommand === 'state-recover') {
+    emit(recoverStateLayout({ journalPath: path.resolve(options.journal) }))
+    return
+  }
+  if (subcommand === 'state-rollback') {
+    const confirmation = JSON.parse(fs.readFileSync(path.resolve(options.confirmation), 'utf8'))
+    emit(rollbackCommittedState({ journalPath: path.resolve(options.journal), confirmation }))
+    return
+  }
+  if (subcommand === 'operator-status') {
+    const observations = JSON.parse(fs.readFileSync(path.resolve(options.observations), 'utf8'))
+    const references = JSON.parse(fs.readFileSync(path.resolve(options.authority), 'utf8'))
+    const authority = reopenOperatorAuthority(references)
+    const output = path.resolve(options.output)
+    const status = writeOperatorStatus(output, observations, authority)
+    emit({ ...status, reconciliationPlan: planOperatorReconciliation(observations, authority), output })
     return
   }
   if (subcommand === 'dev-backup') {
@@ -199,7 +287,7 @@ export async function main(argv = process.argv.slice(2)) {
   }
   emit({
     launcher: 'OES local runtime v2',
-    commands: ['dev', 'plan', 'start', 'run', 'migrate', 'foundation-seed', 'fixture', 'status', 'reconcile', 'dev-backup', 'dev-restore', 'legacy-inventory', 'legacy-plan', 'legacy-backup', 'legacy-apply', 'legacy-residue'],
+    commands: ['dev', 'plan', 'start', 'run', 'migrate', 'foundation-seed', 'fixture', 'status', 'reconcile', 'dev-backup', 'dev-restore', 'state-inventory', 'state-plan', 'state-stage', 'state-activate', 'state-recover', 'state-rollback', 'operator-status', 'legacy-inventory', 'legacy-plan', 'legacy-backup', 'legacy-apply', 'legacy-residue'],
     identity: 'Pass --task-key and optionally --run-id; worktree paths never derive ownership.',
     examples: [
       'node scripts/local-runtime/launcher.mjs plan --profile LOCAL_INTEGRATION --test-class integration --owner asset-service --capabilities object-store',
