@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { fingerprint, sha256, writeAtomic } from '../canonical.mjs'
 import { publishStackManifest, reopenCurrentStackManifest } from '../manifest.mjs'
-import { activateStagedState, inventoryStateLayout, migrationReplacementName, planStateLayoutMigration, recoverStateLayout, reopenJournal, rollbackCommittedState, stageStateLayoutMigration } from '../state-migration.mjs'
+import { activateStagedState, canonicalHostBindSource, inventoryStateLayout, migrationReplacementName, planStateLayoutMigration, recoverStateLayout, reopenJournal, rollbackCommittedState, stageStateLayoutMigration } from '../state-migration.mjs'
 import { resolveRuntimeLayout } from '../state-layout.mjs'
 import { trustedProcessEnvironment } from '../trusted-runtime-config.mjs'
 
@@ -45,6 +46,82 @@ function confirmation(kind, journal) {
   const raw = { schemaVersion: 3, kind, status: 'CONFIRMED', journalFingerprint: journal.journalFingerprint }
   return { ...raw, confirmationFingerprint: fingerprint(raw) }
 }
+
+test('Darwin canonicalization covers every exact Docker Desktop host-mount alias and preserves raw evidence', () => {
+  const base = fixture({ createPlan: false })
+  const provider = path.join(base.stateRoot, 'shared', 'fixture_machine', 'postgres')
+  const mounts = Array.from({ length: 7 }, (_, index) => {
+    const source = path.join(provider, `bind-${index}`)
+    fs.mkdirSync(source)
+    return { Type: 'bind', Source: [2, 6].includes(index) ? `/host_mnt${source}` : source, Destination: `/fixture-${index}` }
+  })
+  const dockerObjects = [{ ...base.dockerObjects[0], mounts }]
+  const inventory = inventoryStateLayout({ stateRoot: base.stateRoot, dockerObjects, hostPlatform: 'darwin' })
+  const plan = planStateLayoutMigration(inventory, { providerSnapshots: base.providerSnapshots })
+  assert.equal(plan.coverage.bindCount, 7)
+  assert.equal(plan.binds.length, 7)
+  assert.deepEqual(plan.binds.map((bind) => bind.source), mounts.map((mount) => canonicalHostBindSource(mount.Source, { platform: 'darwin' })))
+  assert.deepEqual(inventory.dockerObjects[0].mounts.filter((mount) => mount.SourceRepresentation === 'DOCKER_DESKTOP_HOST_MNT').map((mount) => mount.RawSource), [mounts[2].Source, mounts[6].Source])
+})
+
+test('Linux keeps /host_mnt literal while retaining ordinary bind-source behavior', () => {
+  const base = fixture({ createPlan: false })
+  const direct = path.join(base.stateRoot, 'shared', 'fixture_machine', 'postgres', 'data')
+  const alias = `/host_mnt${direct}`
+  const dockerObjects = [{ ...base.dockerObjects[0], mounts: [{ Type: 'bind', Source: direct, Destination: '/direct' }, { Type: 'bind', Source: alias, Destination: '/literal-host-mnt' }] }]
+  const inventory = inventoryStateLayout({ stateRoot: base.stateRoot, dockerObjects, hostPlatform: 'linux' })
+  assert.equal(canonicalHostBindSource(alias, { platform: 'linux' }), path.resolve(alias))
+  assert.deepEqual(inventory.binds.map((bind) => bind.destination), ['/direct'])
+  assert.equal(inventory.dockerObjects[0].mounts.find((mount) => mount.Destination === '/literal-host-mnt').Source, path.resolve(alias))
+})
+
+test('Darwin ambiguous or unmappable host-mount aliases fail closed with the raw source', () => {
+  for (const source of ['/host_mnt', '/host_mnt/Users/../private', `/host_mnt${path.join(os.tmpdir(), `oes-missing-${crypto.randomUUID()}`)}`]) {
+    assert.throws(() => canonicalHostBindSource(source, { platform: 'darwin', requireExisting: true }), (error) => /STATE_MIGRATION_BIND_SOURCE_(?:AMBIGUOUS|UNMAPPABLE)/u.test(error.message) && error.message.includes(JSON.stringify(source)))
+  }
+  const base = fixture({ createPlan: false })
+  const dockerObjects = [{ ...base.dockerObjects[0], mounts: [{ Type: 'bind', Source: '/host_mnt/Users/../private', Destination: '/data' }] }]
+  assert.throws(() => inventoryStateLayout({ stateRoot: base.stateRoot, dockerObjects, hostPlatform: 'darwin' }), /rawSource="\/host_mnt\/Users\/\.\.\/private"/u)
+})
+
+test('controlled rename windows retain sealed Darwin alias identity without requiring the old source to exist', () => {
+  const base = fixture({ createPlan: false })
+  const oldSource = path.join(base.stateRoot, 'shared', 'fixture_machine', 'postgres', 'removed-data')
+  const rawSource = `/host_mnt${oldSource}`
+  const dockerObjects = [{ ...base.dockerObjects[0], mounts: [{ Type: 'bind', Source: rawSource, Destination: '/data' }] }]
+  assert.throws(() => inventoryStateLayout({ stateRoot: base.stateRoot, dockerObjects, hostPlatform: 'darwin' }), /STATE_MIGRATION_BIND_SOURCE_UNMAPPABLE/u)
+  const lifecycleInventory = inventoryStateLayout({ stateRoot: base.stateRoot, dockerObjects, hostPlatform: 'darwin', requireBindSourceExisting: false })
+  assert.deepEqual(lifecycleInventory.binds, [{ objectId: 'object-a', name: 'postgres-a', running: false, source: oldSource, destination: '/data' }])
+  assert.equal(lifecycleInventory.dockerObjects[0].mounts[0].RawSource, rawSource)
+})
+
+test('Darwin alias identity remains exact through activation, committed recovery, and rollback records', async () => {
+  const base = fixture({ createPlan: false })
+  const provider = path.join(base.stateRoot, 'shared', 'fixture_machine', 'postgres')
+  const oldSource = path.join(provider, 'data')
+  fs.mkdirSync(oldSource)
+  const dockerObjects = [{ ...base.dockerObjects[0], mounts: [{ Type: 'bind', Source: `/host_mnt${oldSource}`, Destination: '/data' }] }]
+  const inventory = inventoryStateLayout({ stateRoot: base.stateRoot, dockerObjects, hostPlatform: 'darwin' })
+  const plan = planStateLayoutMigration(inventory, { providerSnapshots: base.providerSnapshots })
+  const staged = await stageStateLayoutMigration(plan, inventory, { identitySeed: seed, hostBinding })
+  const events = []
+  const lifecycle = {
+    activate: (binds, { journal }) => binds.map((bind) => {
+      assert.equal(bind.source, oldSource)
+      assert.equal(bind.nextSource, path.join(journal.oldRoot, 'stacks', journal.stackKey, 'providers', 'test', 'postgres', 'data'))
+      const labels = { 'oes.runtime.version': '2', 'oes.runtime.stack-key': journal.stackKey, 'oes.runtime.dev-stack-id': journal.devStackId, 'oes.runtime.scope': 'SHARED', 'oes.runtime.pool': 'test', 'oes.runtime.provider': 'postgres' }
+      return { oldObjectId: bind.objectId, newObjectId: 'object-b', oldName: bind.name, newName: migrationReplacementName(journal.devStackId, 'test', 'postgres'), backupName: 'postgres-retained', provider: 'postgres', pool: 'test', labels, binds: [{ oldSource: bind.source, source: bind.nextSource, destination: bind.destination }], disposition: 'FIXTURE_RESTARTED' }
+    }),
+    stop: (records) => events.push({ operation: 'stop', binds: records.flatMap((record) => record.binds) }),
+    restart: (records) => events.push({ operation: 'restart', binds: records.flatMap((record) => record.binds) })
+  }
+  const committed = activateStagedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ACTIVATION_CONFIRMATION', staged.journal), verifyProviderReadiness: () => true, observeQuiescence: zeroQuiescence, providerLifecycle: lifecycle })
+  assert.equal(recoverStateLayout({ journalPath: staged.journalPath, verifyProviderReadiness: () => true, verifyProviderMappings: () => true, providerLifecycle: lifecycle }).authority, 'NEW')
+  const rolledBack = rollbackCommittedState({ journalPath: staged.journalPath, confirmation: confirmation('OES_RUNTIME_STATE_LAYOUT_ROLLBACK_CONFIRMATION', committed), observeQuiescence: zeroQuiescence, providerLifecycle: lifecycle })
+  assert.equal(rolledBack.state, 'ROLLED_BACK')
+  assert.deepEqual(events.map((event) => event.operation), ['stop', 'restart'])
+  assert.equal(events.every((event) => event.binds.every((bind) => bind.oldSource === oldSource && bind.source.startsWith(`${base.stateRoot}${path.sep}`))), true)
+})
 
 test('staging creates a sibling canonical Stack, invalidates restore binding, and leaves old root byte-exact', async () => {
   const { stateRoot, inventory, plan } = fixture()
