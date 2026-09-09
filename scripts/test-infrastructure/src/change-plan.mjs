@@ -109,6 +109,14 @@ export function changedLockfileImporters(baseText, headText) {
   return keys.filter((key) => base.get(key) !== head.get(key))
 }
 
+/** Binds one immutable Change Plan artifact identity to the producer run attempt. */
+export function createChangePlanArtifactName(runId, runAttempt) {
+  const parts = [runId, runAttempt].map((value) => String(value ?? ''))
+  if (parts.some((value) => !/^[1-9]\d*$/.test(value)))
+    throw new Error('CHANGE_PLAN_ARTIFACT_ID_INVALID')
+  return `change-plan-${parts.join('-')}`
+}
+
 /** Resolves one lockfile importer to the nearest package at its workspace-relative path. */
 function ownerForImporter(lockfilePath, importer, packages) {
   const workspaceDirectory = normalizePath(dirname(lockfilePath)) === '.' ? '' : normalizePath(dirname(lockfilePath))
@@ -407,8 +415,9 @@ export function createChangePlan({
 }
 
 /** Emits GitHub job outputs without allowing embedded newlines. */
-function writeGithubOutputs(path, plan) {
+function writeGithubOutputs(path, plan, artifactName) {
   const values = {
+    'artifact-name': artifactName,
     mode: plan.mode,
     phase: plan.phase,
     'full-approved': String(plan.fullApproved),
@@ -465,7 +474,13 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.
     writeFileSync(output, `${JSON.stringify(plan, null, 2)}\n`)
     const markdown = renderChangePlan(plan)
     console.log(markdown)
-    if (args['github-output']) writeGithubOutputs(resolve(args['github-output']), plan)
+    if (args['github-output']) {
+      const artifactName = createChangePlanArtifactName(
+        process.env.GITHUB_RUN_ID,
+        process.env.GITHUB_RUN_ATTEMPT
+      )
+      writeGithubOutputs(resolve(args['github-output']), plan, artifactName)
+    }
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${markdown}\n`)
   } catch (error) {
     console.error(`CHANGE_PLAN=FAIL ${error.message}`)
