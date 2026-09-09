@@ -14,6 +14,14 @@ import { auditDevelopmentProcessEnvironmentInputs, auditDevelopmentProcessEnviro
 import { withExclusiveLock } from './locks.mjs'
 import { publishStackState } from './orchestrator.mjs'
 
+/** Reads one filesystem entry without following aliases and returns null only for true absence. */
+function lstatIfPresent(target) {
+  try { return fs.lstatSync(target) } catch (error) {
+    if (error?.code === 'ENOENT') return null
+    throw error
+  }
+}
+
 /** Reserves one OS-assigned loopback port until the caller explicitly hands it to a child. */
 export async function reservePort() {
   return new Promise((resolvePromise, reject) => {
@@ -332,8 +340,8 @@ export function publishDevelopmentProcessManifest(manifestPath, { signer = null,
 
 /** Verifies a directory marker before recursively deleting a run-owned signer work root. */
 export function cleanupRuntimeDirectory(resource) {
-  if (!fs.existsSync(resource.path)) return { resource, disposition: 'ALREADY_ABSENT', exitStatus: 0 }
-  const directory = fs.lstatSync(resource.path)
+  const directory = lstatIfPresent(resource.path)
+  if (!directory) return { resource, disposition: 'ALREADY_ABSENT', exitStatus: 0 }
   if (!directory.isDirectory() || directory.isSymbolicLink()) throw new Error('DIRECTORY_RESOURCE_TYPE_MISMATCH')
   const markerStat = fs.lstatSync(resource.marker)
   if (!markerStat.isFile() || markerStat.isSymbolicLink()) throw new Error('DIRECTORY_RESOURCE_MARKER_TYPE_MISMATCH')
@@ -342,7 +350,7 @@ export function cleanupRuntimeDirectory(resource) {
   const marker = JSON.parse(bytes.toString('utf8'))
   if (marker.path !== resource.path || canonicalJson(marker.labels) !== canonicalJson(resource.labels)) throw new Error('DIRECTORY_RESOURCE_IDENTITY_MISMATCH')
   fs.rmSync(resource.path, { recursive: true })
-  if (fs.existsSync(resource.path)) throw new Error('DIRECTORY_RESOURCE_DELETE_INCOMPLETE')
+  if (lstatIfPresent(resource.path)) throw new Error('DIRECTORY_RESOURCE_DELETE_INCOMPLETE')
   return { resource, disposition: 'DELETED_EXACT', exitStatus: 0 }
 }
 

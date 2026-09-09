@@ -133,6 +133,11 @@ test('signer source hash and work directory are deterministic while exact cleanu
   assert.equal(fs.existsSync(work), false)
   assert.equal(cleanupRuntimeDirectory(resource).disposition, 'ALREADY_ABSENT')
 
+  fs.symlinkSync(path.join(directory, 'missing-owned-target'), work)
+  assert.throws(() => cleanupRuntimeDirectory(resource), /DIRECTORY_RESOURCE_TYPE_MISMATCH/u)
+  assert.equal(fs.lstatSync(work).isSymbolicLink(), true)
+  fs.unlinkSync(work)
+
   fs.mkdirSync(work)
   writeAtomic(marker, { schemaVersion: 2, path: work, labels })
   const drifted = { ...resource, objectId: sha256(fs.readFileSync(marker)) }
@@ -305,4 +310,33 @@ test('UDS Docker proxy reuses one bridge and fails closed when that bridge exits
   assert.deepEqual(failures, ['UDS_DOCKER_PROXY_BRIDGE_EXITED'])
   assert.equal(fs.existsSync(socketPath), false)
   proxy.stop()
+})
+
+test('UDS Docker proxy preserves an identity-substituted socket path and fails closed', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-signer-proxy-substitution-'))
+  const socketPath = path.join(directory, 'proxy.sock')
+  const exits = []
+  const failures = []
+  const bridge = new EventEmitter()
+  bridge.exitCode = null
+  bridge.stdin = new PassThrough()
+  bridge.stdout = new PassThrough()
+  bridge.kill = () => { bridge.exitCode = 0; bridge.emit('exit', 0) }
+  const proxy = startUdsDockerProxy(
+    { OES_PROXY_SOCKET_PATH: socketPath, OES_PROXY_CONTAINER_NAME: 'oes-v2-fixture-execution-signer' },
+    {
+      spawnBridge: () => { queueMicrotask(() => bridge.emit('spawn')); return bridge },
+      exit: (status) => exits.push(status),
+      logFailure: (code) => failures.push(code)
+    }
+  )
+  while (!fs.existsSync(socketPath)) await new Promise((resolvePromise) => setTimeout(resolvePromise, 5))
+  fs.unlinkSync(socketPath)
+  fs.writeFileSync(socketPath, 'foreign-identity')
+  proxy.stop()
+  while (!exits.length) await new Promise((resolvePromise) => setTimeout(resolvePromise, 5))
+  assert.deepEqual(exits, [1])
+  assert.deepEqual(failures, ['UDS_DOCKER_PROXY_SOCKET_IDENTITY_MISMATCH'])
+  assert.equal(fs.readFileSync(socketPath, 'utf8'), 'foreign-identity')
+  fs.rmSync(directory, { recursive: true, force: true })
 })
