@@ -36,12 +36,13 @@ export function resolveMigratorCredential(manifest, owner) {
   return environment
 }
 
-/** Reopens one credential reference and exposes only the exact requesting owner's values. */
-export function resolveCredentialReference(reference, owner) {
+/** Reopens one credential reference and exposes only the exact requesting owner's provider-scoped values. */
+export function resolveCredentialReference(reference, owner, expectedProvider = undefined) {
   const bytes = fs.readFileSync(reference.path)
   if (sha256(bytes) !== reference.sha256) throw new Error(`CREDENTIAL_REFERENCE_SHA_MISMATCH path=${reference.path}`)
   const value = readJson(reference.path)
   if (value.credentialFingerprint !== reference.fingerprint || value.credentialFingerprint !== fingerprint(value, 'credentialFingerprint')) throw new Error(`CREDENTIAL_REFERENCE_FINGERPRINT_MISMATCH path=${reference.path}`)
+  if (expectedProvider && value.provider !== expectedProvider) throw new Error(`CREDENTIAL_REFERENCE_PROVIDER_MISMATCH expected=${expectedProvider}`)
   const environment = value.ownerEnvironments[owner]
   if (!environment) throw new Error(`CREDENTIAL_OWNER_DENIED owner=${owner} provider=${value.provider}`)
   return environment

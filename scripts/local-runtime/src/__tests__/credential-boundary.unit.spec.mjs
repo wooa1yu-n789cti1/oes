@@ -18,6 +18,7 @@ test('business owner environment exposes runtime PostgreSQL authority and never 
   const manifest = publishManifest(runRoot, { lifecycle: 'REGISTERED', profile: 'LOCAL_INTEGRATION', stateRoot, stackRoot, runDirectory: runRoot, stackKey, devStackId: 'fixture_machine', taskKey: 'task_a', runId: 'run_a', owners: ['owner-a'], resources: [], stackManifestReference: stack.reference, endpoints: [{ provider: 'postgres', source: 'STACK', ready: true, owners: ['owner-a'], credentialReference: runtimeReference }] }).manifest
   const runtime = environmentForOwner(manifest, 'owner-a', resolveCredentialReference)
   assert.equal(new URL(runtime.DATABASE_URL).username, 'runtime')
+  assert.throws(() => resolveCredentialReference(runtimeReference, 'owner-a', 'minio'), /CREDENTIAL_REFERENCE_PROVIDER_MISMATCH/u)
   assert.equal(Object.keys(runtime).some((key) => /MIGRATOR/u.test(key)), false)
   assert.doesNotMatch(JSON.stringify(manifest), /migrator-secret|OES_MIGRATOR_DATABASE_URL/u)
   const migrator = resolveMigratorCredential(manifest, 'owner-a')

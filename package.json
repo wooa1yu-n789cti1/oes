@@ -163,6 +163,7 @@
     "runtime:run": "node scripts/local-runtime/launcher.mjs run",
     "runtime:status": "node scripts/local-runtime/launcher.mjs status",
     "runtime:reconcile": "node scripts/local-runtime/launcher.mjs reconcile",
+    "runtime:seed:system-admin": "node scripts/local-runtime/launcher.mjs system-admin-seed",
     "runtime:dev:backup": "node scripts/local-runtime/launcher.mjs dev-backup",
     "runtime:dev:restore": "node scripts/local-runtime/launcher.mjs dev-restore",
     "runtime:state:inventory": "node scripts/local-runtime/launcher.mjs state-inventory",
@@ -178,9 +179,10 @@
     "runtime:legacy:backup": "node scripts/local-runtime/launcher.mjs legacy-backup",
     "runtime:legacy:apply": "node scripts/local-runtime/launcher.mjs legacy-apply",
     "runtime:legacy:residue": "node scripts/local-runtime/launcher.mjs legacy-residue",
-    "local-runtime:test": "node --test scripts/local-runtime/src/__tests__/*.unit.spec.mjs scripts/test-infrastructure/src/integration-runtime.unit.spec.mjs",
+    "local-runtime:test": "node --test scripts/local-runtime/src/__tests__/*.unit.spec.mjs scripts/local/src/seed-system-admin.unit.spec.mjs scripts/test-infrastructure/src/integration-runtime.unit.spec.mjs",
+    "local-runtime:contract": "node --test scripts/local-runtime/test/*.contract.spec.mjs",
     "local-runtime:static": "node scripts/local-runtime/test/static.check.mjs",
-    "local-runtime:check": "pnpm local-runtime:test && pnpm local-runtime:static",
+    "local-runtime:check": "pnpm local-runtime:test && pnpm local-runtime:contract && pnpm local-runtime:static",
     "db:fixture": "node scripts/local-runtime/launcher.mjs fixture"
   },
   "dependencies": {

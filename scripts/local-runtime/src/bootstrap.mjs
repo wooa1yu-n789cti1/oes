@@ -1,15 +1,157 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { canonicalJson, fingerprint, sha256 } from './canonical.mjs'
 import { resolveCredentialReference, resolveMigratorCredential } from './credentials.mjs'
 import { reopenManifest, resolveEndpoint, resolveResources } from './manifest.mjs'
 import { runChecked } from './process.mjs'
-import { finalizePostgresRuntimePrivileges, queryPostgresDatabase } from './docker-driver.mjs'
+import { finalizePostgresRuntimePrivileges, logicalResourceIdentity, queryPostgresDatabase } from './docker-driver.mjs'
+
+const SYSTEM_ADMIN_SEED_TARGETS = Object.freeze({
+  identityService: { owner: 'identity-service', envKey: 'OES_IDENTITY_DATABASE_URL' },
+  authService: { owner: 'auth-service', envKey: 'OES_AUTH_DATABASE_URL' },
+  permissionService: { owner: 'permission-service', envKey: 'OES_PERMISSION_DATABASE_URL' }
+})
+
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1'])
 
 /** Returns a minimal inherited process environment with runtime bindings stripped. */
 export function cleanProcessEnvironment(source = process.env) {
   const allowed = ['PATH', 'HOME', 'TMPDIR', 'SHELL', 'TERM', 'CI', 'NODE_OPTIONS', 'PNPM_HOME', 'COREPACK_HOME', 'LANG', 'LC_ALL']
   return Object.fromEntries(allowed.filter((key) => source[key] !== undefined).map((key) => [key, source[key]]))
+}
+
+/** Normalizes a URL hostname so bracketed IPv6 loopback compares canonically. */
+function normalizedHostname(value) {
+  return String(value || '').replace(/^\[|\]$/gu, '').toLowerCase()
+}
+
+/** Parses one exact local PostgreSQL runtime URL without retaining its password. */
+function parseSystemAdminDatabaseUrl(value, owner) {
+  let parsed
+  try { parsed = new URL(value) } catch { throw new Error(`SYSTEM_ADMIN_SEED_DATABASE_URL_INVALID owner=${owner}`) }
+  if (!['postgres:', 'postgresql:'].includes(parsed.protocol)) throw new Error(`SYSTEM_ADMIN_SEED_DATABASE_PROTOCOL_INVALID owner=${owner}`)
+  const hostname = normalizedHostname(parsed.hostname)
+  if (!LOOPBACK_HOSTS.has(hostname)) throw new Error(`SYSTEM_ADMIN_SEED_DATABASE_HOST_DENIED owner=${owner} host=${hostname}`)
+  const database = decodeURIComponent(parsed.pathname.replace(/^\//u, ''))
+  const runtime = decodeURIComponent(parsed.username)
+  const port = parsed.port || '5432'
+  const numericPort = Number(port)
+  if (!database || !runtime || !parsed.password || !/^\d+$/u.test(port) || numericPort < 1 || numericPort > 65535) throw new Error(`SYSTEM_ADMIN_SEED_DATABASE_IDENTITY_INVALID owner=${owner}`)
+  return { hostname, database, runtime, port }
+}
+
+/** Derives one value-free system-admin binding and its private runtime URLs from exact manifest truth. */
+export function buildSystemAdminSeedRuntimeBinding(manifestPath) {
+  if (!manifestPath || !path.isAbsolute(manifestPath)) throw new Error('SYSTEM_ADMIN_SEED_MANIFEST_REQUIRED')
+  const exactManifestPath = path.resolve(manifestPath)
+  const manifest = reopenManifest(exactManifestPath)
+  const manifestBytes = fs.readFileSync(exactManifestPath)
+  if (canonicalJson(JSON.parse(manifestBytes.toString('utf8'))) !== canonicalJson(manifest)) throw new Error('SYSTEM_ADMIN_SEED_MANIFEST_CHANGED')
+  const postgres = resolveEndpoint(manifest, 'postgres')
+  if (!postgres?.ready || !postgres.credentialReference) throw new Error('SYSTEM_ADMIN_SEED_POSTGRES_BINDING_REQUIRED')
+  const endpointHost = normalizedHostname(postgres.host)
+  const endpointPort = String(postgres.port || '')
+  const numericEndpointPort = Number(endpointPort)
+  if (!LOOPBACK_HOSTS.has(endpointHost) || !/^\d+$/u.test(endpointPort) || numericEndpointPort < 1 || numericEndpointPort > 65535) throw new Error('SYSTEM_ADMIN_SEED_POSTGRES_ENDPOINT_INVALID')
+  if (Object.keys(postgres.credentialReference).sort().join(',') !== 'fingerprint,path,sha256') throw new Error('SYSTEM_ADMIN_SEED_CREDENTIAL_REFERENCE_SHAPE_INVALID')
+  const credentialReference = {
+    path: postgres.credentialReference.path,
+    sha256: postgres.credentialReference.sha256,
+    fingerprint: postgres.credentialReference.fingerprint
+  }
+  const expectedCredentialPath = manifest.profile === 'DEV'
+    ? path.join(manifest.stackRoot, 'credentials', 'postgres.json')
+    : path.join(manifest.runDirectory, 'credentials', 'postgres.json')
+  if (path.resolve(credentialReference.path || '') !== expectedCredentialPath) throw new Error('SYSTEM_ADMIN_SEED_CREDENTIAL_REFERENCE_PATH_INVALID')
+
+  const resources = resolveResources(manifest, { includeStack: true })
+  const targets = {}
+  const databaseUrls = {}
+  for (const [key, target] of Object.entries(SYSTEM_ADMIN_SEED_TARGETS)) {
+    if (!manifest.owners.includes(target.owner) || !postgres.owners.includes(target.owner)) throw new Error(`SYSTEM_ADMIN_SEED_OWNER_UNDECLARED owner=${target.owner}`)
+    const credential = resolveCredentialReference(credentialReference, target.owner, 'postgres')
+    if (Object.keys(credential).length !== 1 || !credential.DATABASE_URL) throw new Error(`SYSTEM_ADMIN_SEED_CREDENTIAL_SCOPE_INVALID owner=${target.owner}`)
+    const parsed = parseSystemAdminDatabaseUrl(credential.DATABASE_URL, target.owner)
+    const allocations = resources.filter((resource) => resource.provider === 'postgres' && resource.kind === 'database' && resource.owner === target.owner)
+    if (allocations.length !== 1) throw new Error(`SYSTEM_ADMIN_SEED_DATABASE_ALLOCATION_NOT_EXACT owner=${target.owner}`)
+    const [allocation] = allocations
+    const logicalIdentity = logicalResourceIdentity(manifest, 'postgres', target.owner)
+    if (allocation.database !== logicalIdentity.database || allocation.migrator !== logicalIdentity.migrator || allocation.runtime !== logicalIdentity.runtime) throw new Error(`SYSTEM_ADMIN_SEED_LOGICAL_IDENTITY_MISMATCH owner=${target.owner}`)
+    if (allocation.database !== parsed.database || allocation.runtime !== parsed.runtime) throw new Error(`SYSTEM_ADMIN_SEED_DATABASE_ALLOCATION_MISMATCH owner=${target.owner}`)
+    if (parsed.hostname !== endpointHost || parsed.port !== endpointPort) throw new Error(`SYSTEM_ADMIN_SEED_DATABASE_ENDPOINT_MISMATCH owner=${target.owner}`)
+    databaseUrls[key] = credential.DATABASE_URL
+    targets[key] = {
+      owner: target.owner,
+      envKey: target.envKey,
+      database: parsed.database,
+      runtime: parsed.runtime,
+      credentialReference: { owner: target.owner, ...credentialReference }
+    }
+  }
+
+  const raw = {
+    schemaVersion: 1,
+    kind: 'OES_RUNTIME_SYSTEM_ADMIN_SEED_BINDING',
+    manifest: {
+      type: 'OES_RUNTIME_RUN_MANIFEST',
+      path: exactManifestPath,
+      sha256: sha256(manifestBytes),
+      fingerprint: manifest.manifestFingerprint
+    },
+    profile: manifest.profile,
+    stackKey: manifest.stackKey,
+    devStackId: manifest.devStackId,
+    taskKey: manifest.taskKey,
+    runId: manifest.runId,
+    postgres: { provider: 'postgres', source: postgres.source, host: endpointHost, port: endpointPort },
+    targets
+  }
+  if (sha256(fs.readFileSync(exactManifestPath)) !== raw.manifest.sha256) throw new Error('SYSTEM_ADMIN_SEED_MANIFEST_CHANGED')
+  return { manifest, binding: { ...raw, bindingFingerprint: fingerprint(raw) }, databaseUrls }
+}
+
+/** Reopens and compares an injected system-admin binding against its exact manifest and task environment. */
+export function verifySystemAdminSeedRuntimeBinding(manifestPath, serializedBinding, environment = process.env) {
+  let supplied
+  try { supplied = typeof serializedBinding === 'string' ? JSON.parse(serializedBinding) : serializedBinding } catch { throw new Error('SYSTEM_ADMIN_SEED_BINDING_JSON_INVALID') }
+  if (!supplied || supplied.schemaVersion !== 1 || supplied.kind !== 'OES_RUNTIME_SYSTEM_ADMIN_SEED_BINDING' || supplied.bindingFingerprint !== fingerprint(supplied, 'bindingFingerprint')) throw new Error('SYSTEM_ADMIN_SEED_BINDING_FINGERPRINT_MISMATCH')
+  const expected = buildSystemAdminSeedRuntimeBinding(manifestPath)
+  if (canonicalJson(supplied) !== canonicalJson(expected.binding)) throw new Error('SYSTEM_ADMIN_SEED_BINDING_MANIFEST_MISMATCH')
+  const requiredIdentity = {
+    OES_RUNTIME_MANIFEST: expected.binding.manifest.path,
+    OES_TASK_KEY: expected.binding.taskKey,
+    OES_RUN_ID: expected.binding.runId,
+    OES_STACK_KEY: expected.binding.stackKey
+  }
+  for (const [key, value] of Object.entries(requiredIdentity)) if (environment[key] !== value) throw new Error(`SYSTEM_ADMIN_SEED_TASK_IDENTITY_MISMATCH key=${key}`)
+  for (const [key, target] of Object.entries(expected.binding.targets)) if (environment[target.envKey] !== expected.databaseUrls[key]) throw new Error(`SYSTEM_ADMIN_SEED_DATABASE_BINDING_MISMATCH owner=${target.owner}`)
+  return expected
+}
+
+/** Builds the private child environment and value-free invocation metadata for one manifest-bound seed mode. */
+export function buildSystemAdminSeedInvocation(manifestPath, { root, mode = 'dry-run' }) {
+  if (!['dry-run', 'apply', 'validate'].includes(mode)) throw new Error(`SYSTEM_ADMIN_SEED_MODE_INVALID mode=${mode}`)
+  const resolved = buildSystemAdminSeedRuntimeBinding(manifestPath)
+  const environment = {
+    ...cleanProcessEnvironment(),
+    NODE_ENV: resolved.manifest.profile === 'DEV' ? 'development' : 'test',
+    OES_RUNTIME_MANIFEST: resolved.binding.manifest.path,
+    OES_SYSTEM_ADMIN_SEED_BINDING: canonicalJson(resolved.binding),
+    OES_TASK_KEY: resolved.binding.taskKey,
+    OES_RUN_ID: resolved.binding.runId,
+    OES_STACK_KEY: resolved.binding.stackKey
+  }
+  for (const [key, target] of Object.entries(resolved.binding.targets)) environment[target.envKey] = resolved.databaseUrls[key]
+  const args = ['scripts/local/seed-system-admin.mjs', ...(mode === 'apply' ? ['--apply'] : mode === 'validate' ? ['--validate'] : [])]
+  return { command: ['node', ...args], cwd: root, environment, mode, manifest: resolved.binding.manifest, bindingFingerprint: resolved.binding.bindingFingerprint }
+}
+
+/** Executes one system-admin seed mode through the exact launcher-authorized manifest binding. */
+export function runSystemAdminSeed(manifestPath, { root, mode = 'dry-run', runner = runChecked }) {
+  const invocation = buildSystemAdminSeedInvocation(manifestPath, { root, mode })
+  const result = runner(invocation.command[0], invocation.command.slice(1), { cwd: invocation.cwd, env: invocation.environment, timeout: 300000 })
+  return { stage: 'SYSTEM_ADMIN_SEED', mode, command: invocation.command, exitStatus: result.status, output: result.stdout, manifest: invocation.manifest, bindingFingerprint: invocation.bindingFingerprint }
 }
 
 /** Discovers the exact committed Prisma migration owner for each selected service. */

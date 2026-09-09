@@ -51,7 +51,9 @@ for (const [name, command] of Object.entries(rootPackage.scripts)) {
   if (name.startsWith('local:trusted-runtime:')) assert.match(command, /(?:runtime:|scripts\/local-runtime\/launcher\.mjs)/u, `compatibility script does not delegate: ${name}`)
 }
 assert.equal(rootPackage.scripts['test:database-lifecycle'], undefined)
-assert.equal(rootPackage.scripts['local-runtime:check'], 'pnpm local-runtime:test && pnpm local-runtime:static')
+assert.equal(rootPackage.scripts['local-runtime:contract'], 'node --test scripts/local-runtime/test/*.contract.spec.mjs')
+assert.equal(rootPackage.scripts['local-runtime:check'], 'pnpm local-runtime:test && pnpm local-runtime:contract && pnpm local-runtime:static')
+assert.equal(rootPackage.scripts['runtime:seed:system-admin'], 'node scripts/local-runtime/launcher.mjs system-admin-seed')
 
 for (const area of ['system', 'business']) {
   for (const owner of fs.readdirSync(path.join(root, 'src/services', area))) {
@@ -93,5 +95,17 @@ for (const invocation of [...aliasBoundaries, ...userAddBoundaries]) {
 const processRuntime = read('scripts/local-runtime/src/process-runtime.mjs')
 for (const binding of ['AUTH_EXECUTION_SIGNER_SOCKET_PATH', 'AUTH_EXECUTION_KMS_KEY_REF', 'AUTH_HTTP_PORT', 'GATEWAY_READINESS_TARGETS', 'issuer-server.mjs']) assert.match(processRuntime, new RegExp(binding, 'u'))
 assert.match(read('scripts/local-runtime/src/bootstrap.mjs'), /prisma['"],\s*['"]migrate['"],\s*['"]deploy/u)
+const systemAdminBootstrap = read('scripts/local-runtime/src/bootstrap.mjs')
+assert.match(systemAdminBootstrap, /buildSystemAdminSeedRuntimeBinding/u)
+assert.match(systemAdminBootstrap, /verifySystemAdminSeedRuntimeBinding/u)
+assert.match(systemAdminBootstrap, /SYSTEM_ADMIN_SEED_DATABASE_ALLOCATION_MISMATCH/u)
+assert.match(systemAdminBootstrap, /logicalResourceIdentity\(manifest, 'postgres', target\.owner\)/u)
+const systemAdminLauncher = read('scripts/local-runtime/launcher.mjs')
+assert.match(systemAdminLauncher, /system-admin-seed[\s\S]*runSystemAdminSeed/u)
+assert.match(systemAdminLauncher, /apply[\s\S]*validate[\s\S]*runSystemAdminSeed/u)
+const systemAdminSeed = read('scripts/local/seed-system-admin.mjs')
+assert.match(systemAdminSeed, /SYSTEM_ADMIN_SEED_MANIFEST_BINDING_REQUIRED/u)
+assert.match(systemAdminSeed, /legacy-fixed-database-boundary/u)
+assert.doesNotMatch(systemAdminSeed, /console\.log\([^\n]*(?:DATABASE_URL|OES_SYSTEM_ADMIN_SEED_BINDING)/u)
 
 process.stdout.write(`LOCAL_RUNTIME_STATIC_OK files=${sources.length} services=${Object.keys(json('scripts/local-runtime/relationships.json').owners).length}\n`)

@@ -2,6 +2,7 @@
 
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
+import { verifySystemAdminSeedRuntimeBinding } from '../local-runtime/src/bootstrap.mjs'
 
 const require = createRequire(import.meta.url)
 
@@ -62,16 +63,24 @@ export const SYSTEM_ADMIN_SEED = {
 
 /** parseSystemAdminSeedArgs keeps system-admin writes opt-in through an explicit --apply flag. */
 export function parseSystemAdminSeedArgs(args) {
-  return {
+  const options = {
     apply: args.includes('--apply'),
     validate: args.includes('--validate'),
     help: args.includes('--help') || args.includes('-h')
   }
+  if (options.apply && options.validate) throw new Error('SYSTEM_ADMIN_SEED_MODE_CONFLICT')
+  return options
 }
 
 /** buildSystemAdminSeedConfig resolves local database targets and static seed values without opening connections. */
 export function buildSystemAdminSeedConfig(env = process.env) {
-  const databaseUrls = Object.fromEntries(
+  const manifestPath = env.OES_RUNTIME_MANIFEST?.trim()
+  const serializedBinding = env.OES_SYSTEM_ADMIN_SEED_BINDING?.trim()
+  if (Boolean(manifestPath) !== Boolean(serializedBinding)) throw new Error('SYSTEM_ADMIN_SEED_MANIFEST_BINDING_REQUIRED')
+  const runtime = manifestPath
+    ? verifySystemAdminSeedRuntimeBinding(manifestPath, serializedBinding, env)
+    : null
+  const databaseUrls = runtime?.databaseUrls || Object.fromEntries(
     Object.entries(DATABASE_TARGETS).map(([key, target]) => [
       key,
       target.envKeys.map((envKey) => env[envKey]).find(Boolean) ?? DEFAULT_DATABASE_URLS[key]
@@ -80,6 +89,7 @@ export function buildSystemAdminSeedConfig(env = process.env) {
 
   return {
     databaseUrls,
+    runtimeBinding: runtime?.binding || null,
     seed: {
       ...SYSTEM_ADMIN_SEED,
       identity: {
@@ -95,6 +105,16 @@ export function buildSystemAdminSeedExecutionPlan(config, options) {
   return {
     mode: options.validate ? 'validate' : options.apply ? 'apply' : 'dry-run',
     writesDatabase: Boolean(options.apply),
+    authority: config.runtimeBinding
+      ? {
+          mode: 'launcher-manifest',
+          manifest: config.runtimeBinding.manifest,
+          taskKey: config.runtimeBinding.taskKey,
+          runId: config.runtimeBinding.runId,
+          bindingFingerprint: config.runtimeBinding.bindingFingerprint,
+          targets: config.runtimeBinding.targets
+        }
+      : { mode: 'legacy-fixed-database-boundary' },
     serviceOrder: SERVICE_ORDER,
     targets: Object.fromEntries(
       Object.entries(config.databaseUrls).map(([key, url]) => [
@@ -297,10 +317,22 @@ export function validateSystemAdminSeedConfig(config) {
       errors.push(`${target.label} DATABASE_URL must target localhost, got ${parsed.hostname}`)
     }
 
-    if (parsed.database !== target.expectedDatabase) {
+    const expectedDatabase = config.runtimeBinding?.targets?.[key]?.database ?? target.expectedDatabase
+    if (parsed.database !== expectedDatabase) {
       errors.push(
-        `${target.label} DATABASE_URL must target database ${target.expectedDatabase}, got ${parsed.database || '(empty)'}`
+        `${target.label} DATABASE_URL must target database ${expectedDatabase}, got ${parsed.database || '(empty)'}`
       )
+    }
+
+    const runtimeTarget = config.runtimeBinding?.targets?.[key]
+    if (runtimeTarget && parsed.username !== runtimeTarget.runtime) {
+      errors.push(`${target.label} DATABASE_URL must use runtime owner ${runtimeTarget.runtime}`)
+    }
+    if (runtimeTarget && (parsed.port || '5432') !== config.runtimeBinding.postgres.port) {
+      errors.push(`${target.label} DATABASE_URL port must match manifest port ${config.runtimeBinding.postgres.port}`)
+    }
+    if (runtimeTarget && parsed.hostname !== config.runtimeBinding.postgres.host) {
+      errors.push(`${target.label} DATABASE_URL host must match manifest host ${config.runtimeBinding.postgres.host}`)
     }
   }
 
@@ -503,7 +535,7 @@ export function maskDatabaseUrl(value) {
     return '(invalid-url)'
   }
 
-  const auth = parsed.username ? `${parsed.username}:***@` : ''
+  const auth = parsed.username ? '***@' : ''
   const port = parsed.port ? `:${parsed.port}` : ''
   return `${parsed.protocol}://${auth}${parsed.hostname}${port}/${parsed.database}`
 }
@@ -528,7 +560,7 @@ function parseDatabaseUrl(value) {
 
     return {
       protocol: url.protocol.replace(':', ''),
-      hostname: url.hostname,
+      hostname: url.hostname.replace(/^\[|\]$/gu, '').toLowerCase(),
       port: url.port,
       username: decodeURIComponent(url.username),
       database: url.pathname.replace(/^\//, '')
@@ -540,7 +572,7 @@ function parseDatabaseUrl(value) {
 
 /** printHelp explains the local-only contract for the system admin seed script. */
 function printHelp() {
-  console.log(`Usage: node scripts/local/seed-system-admin.mjs [--apply]
+  console.log(`Usage: node scripts/local/seed-system-admin.mjs [--apply | --validate]
 
 Seeds the local system admin account across identity, auth, and permission stores.
 
@@ -549,7 +581,10 @@ Default mode is dry-run. Use --apply to write and --validate to read-check:
   auth-service       LoginMethod.EMAIL only; no password credential
   permission-service AccountRole(system.admin)
 
-Database URL overrides:
+This direct entry retains only the legacy fixed-database boundary. For V2 manifests use:
+  pnpm runtime:seed:system-admin -- --manifest /ABSOLUTE/RUN/manifest.json [--apply | --validate]
+
+Legacy database URL overrides:
   OES_IDENTITY_DATABASE_URL
   OES_AUTH_DATABASE_URL
   OES_PERMISSION_DATABASE_URL

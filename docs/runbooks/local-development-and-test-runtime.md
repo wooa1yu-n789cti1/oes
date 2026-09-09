@@ -64,6 +64,9 @@ Managed profiles use committed migrations only:
 ```bash
 pnpm db:migrate -- --manifest /ABSOLUTE/RUN/manifest.json
 pnpm db:seed -- --manifest /ABSOLUTE/RUN/manifest.json
+pnpm runtime:seed:system-admin -- --manifest /ABSOLUTE/RUN/manifest.json
+pnpm runtime:seed:system-admin -- --manifest /ABSOLUTE/RUN/manifest.json --apply
+pnpm runtime:seed:system-admin -- --manifest /ABSOLUTE/RUN/manifest.json --validate
 pnpm db:fixture -- --manifest /ABSOLUTE/RUN/manifest.json --fixture tenant-web-auth
 ```
 
@@ -72,6 +75,15 @@ bundle, native/schema verification, runtime DML grants, Foundation Seed, explici
 then service/test execution. A business process receives only its runtime `DATABASE_URL`; neither a
 migrator URL nor provider administration is present in its environment or credential reference.
 Foundation Seed and Fixture are separate commands and inputs.
+
+The system-admin seed is an explicit launcher operation rather than an automatic Foundation Seed.
+Its default mode is dry-run. Both `--apply` and `--validate` reopen the exact Run and referenced Stack
+manifest, derive only the Identity/Auth/Permission runtime credential references and dynamic database
+allocations, and inject a fingerprinted `taskKey + runId + endpoint + owner/database` binding. The
+seed rejects a missing or forged binding, a non-loopback endpoint, a different task/run or port, and
+owner/database crossover before opening Prisma clients. Output includes only value-free references
+and redacted URLs. Direct `pnpm seed:system-admin` remains the legacy fixed `identitydb` / `authdb` /
+`permissiondb` boundary; dynamic V2 databases are accepted only through `runtime:seed:system-admin`.
 
 ## 5. DEV data snapshot and restore
 

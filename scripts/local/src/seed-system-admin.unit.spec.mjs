@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { buildSystemAdminSeedInvocation } from '../../local-runtime/src/bootstrap.mjs'
+import { createSystemAdminSeedManifestFixture } from '../../local-runtime/src/__tests__/system-admin-seed-test-fixture.mjs'
 
 import {
   applySystemAdminSeed,
@@ -35,6 +37,36 @@ test('system admin seed rejects non-local or unexpected database targets', () =>
   const errors = validateSystemAdminSeedConfig(config)
 
   assert.match(errors.join('\n'), /identity-service DATABASE_URL must target database identitydb/)
+})
+
+test('system admin seed accepts exact manifest-bound dynamic databases and keeps legacy fixed', () => {
+  const fixture = createSystemAdminSeedManifestFixture()
+  const invocation = buildSystemAdminSeedInvocation(fixture.file, { root: '/repo', mode: 'dry-run' })
+  const config = buildSystemAdminSeedConfig(invocation.environment)
+  const plan = buildSystemAdminSeedExecutionPlan(config, parseSystemAdminSeedArgs([]))
+  assert.deepEqual(validateSystemAdminSeedConfig(config), [])
+  assert.equal(plan.authority.mode, 'launcher-manifest')
+  assert.equal(plan.authority.taskKey, fixture.taskKey)
+  assert.equal(plan.targets.identityService.database, fixture.resources.find((resource) => resource.owner === 'identity-service').database)
+  for (const secret of fixture.secrets) assert.doesNotMatch(JSON.stringify(plan), new RegExp(secret, 'u'))
+
+  const legacyDynamic = buildSystemAdminSeedConfig({ OES_IDENTITY_DATABASE_URL: invocation.environment.OES_IDENTITY_DATABASE_URL })
+  assert.match(validateSystemAdminSeedConfig(legacyDynamic).join('\n'), /must target database identitydb/u)
+})
+
+test('system admin seed rejects incomplete manifest authority and revalidates dynamic target identity', () => {
+  const fixture = createSystemAdminSeedManifestFixture()
+  assert.throws(() => buildSystemAdminSeedConfig({ OES_RUNTIME_MANIFEST: fixture.file }), /SYSTEM_ADMIN_SEED_MANIFEST_BINDING_REQUIRED/u)
+  const invocation = buildSystemAdminSeedInvocation(fixture.file, { root: '/repo', mode: 'dry-run' })
+  const config = buildSystemAdminSeedConfig(invocation.environment)
+  config.databaseUrls.identityService = config.databaseUrls.authService
+  const errors = validateSystemAdminSeedConfig(config).join('\n')
+  assert.match(errors, new RegExp(`identity-service DATABASE_URL must target database ${config.runtimeBinding.targets.identityService.database}`, 'u'))
+  assert.match(errors, new RegExp(`identity-service DATABASE_URL must use runtime owner ${config.runtimeBinding.targets.identityService.runtime}`, 'u'))
+})
+
+test('system admin seed rejects contradictory apply and validate modes', () => {
+  assert.throws(() => parseSystemAdminSeedArgs(['--apply', '--validate']), /SYSTEM_ADMIN_SEED_MODE_CONFLICT/u)
 })
 
 test('validateAppliedSystemAdminSeed reports a consistent cross-service system admin seed', async () => {

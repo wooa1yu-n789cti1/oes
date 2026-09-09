@@ -2,7 +2,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { applyCommittedMigrations, applyFoundationSeeds, applyRunFixture, cleanProcessEnvironment, prepareDevelopmentArtifacts, reconcileMachineWorkloadSelectors } from './src/bootstrap.mjs'
+import { applyCommittedMigrations, applyFoundationSeeds, applyRunFixture, cleanProcessEnvironment, prepareDevelopmentArtifacts, reconcileMachineWorkloadSelectors, runSystemAdminSeed } from './src/bootstrap.mjs'
 import { loadRuntimeConfig } from './src/config.mjs'
 import { resolveCredentialReference } from './src/credentials.mjs'
 import { inventoryLegacyResources, planLegacyCleanup, applyLegacyCleanup, observeLegacyResidue, backupValidDevData, writeLegacyArtifact } from './src/legacy-reconcile.mjs'
@@ -18,12 +18,13 @@ import { planOperatorReconciliation, reopenOperatorAuthority, writeOperatorStatu
 import { sha256, writeAtomic } from './src/canonical.mjs'
 
 const root = path.resolve(import.meta.dirname, '../..')
-const BOOLEAN_OPTIONS = new Set(['migrate', 'foundation-seed'])
+const BOOLEAN_OPTIONS = new Set(['migrate', 'foundation-seed', 'apply', 'validate'])
 const INTENT_OPTIONS = ['profile', 'test-class', 'owner', 'owners', 'capabilities', 'task-key', 'run-id', 'dev-stack-id', 'state-root', 'machine-config', 'concurrency', 'driver']
 const SUBCOMMAND_OPTIONS = Object.freeze({
   dev: [...INTENT_OPTIONS, 'scope'], plan: INTENT_OPTIONS, start: INTENT_OPTIONS,
   run: [...INTENT_OPTIONS, 'migrate', 'foundation-seed', 'fixture', 'timeout'],
   migrate: ['manifest'], 'foundation-seed': ['manifest'], fixture: ['manifest', 'fixture'],
+  'system-admin-seed': ['manifest', 'apply', 'validate'],
   reconcile: ['manifest', 'transaction'], status: ['manifest'],
   'state-inventory': ['state-root', 'docker-observations', 'output'],
   'state-plan': ['inventory', 'provider-snapshots', 'provider-pools', 'dev-backup-record', 'dev-stack-id', 'output'],
@@ -170,6 +171,13 @@ export async function main(argv = process.argv.slice(2)) {
     emit({ status: 'COMPLETE', stage: subcommand, results: result })
     return
   }
+  if (subcommand === 'system-admin-seed') {
+    if (!options.manifest) throw new Error('SYSTEM_ADMIN_SEED_MANIFEST_REQUIRED')
+    if (options.apply === 'true' && options.validate === 'true') throw new Error('SYSTEM_ADMIN_SEED_MODE_CONFLICT')
+    const mode = options.apply === 'true' ? 'apply' : options.validate === 'true' ? 'validate' : 'dry-run'
+    emit({ status: 'COMPLETE', ...runSystemAdminSeed(path.resolve(options.manifest), { root, mode }) })
+    return
+  }
   if (subcommand === 'reconcile') {
     const manifestPath = options.manifest ? path.resolve(options.manifest) : null
     const transactionPath = options.transaction ? path.resolve(options.transaction) : null
@@ -287,11 +295,12 @@ export async function main(argv = process.argv.slice(2)) {
   }
   emit({
     launcher: 'OES local runtime v2',
-    commands: ['dev', 'plan', 'start', 'run', 'migrate', 'foundation-seed', 'fixture', 'status', 'reconcile', 'dev-backup', 'dev-restore', 'state-inventory', 'state-plan', 'state-stage', 'state-activate', 'state-recover', 'state-rollback', 'operator-status', 'legacy-inventory', 'legacy-plan', 'legacy-backup', 'legacy-apply', 'legacy-residue'],
+    commands: ['dev', 'plan', 'start', 'run', 'migrate', 'foundation-seed', 'fixture', 'system-admin-seed', 'status', 'reconcile', 'dev-backup', 'dev-restore', 'state-inventory', 'state-plan', 'state-stage', 'state-activate', 'state-recover', 'state-rollback', 'operator-status', 'legacy-inventory', 'legacy-plan', 'legacy-backup', 'legacy-apply', 'legacy-residue'],
     identity: 'Pass --task-key and optionally --run-id; worktree paths never derive ownership.',
     examples: [
       'node scripts/local-runtime/launcher.mjs plan --profile LOCAL_INTEGRATION --test-class integration --owner asset-service --capabilities object-store',
-      'node scripts/local-runtime/launcher.mjs run --profile CI --test-class integration --owner permission-service --task-key ci_job --migrate -- pnpm --filter permission-service test:integration'
+      'node scripts/local-runtime/launcher.mjs run --profile CI --test-class integration --owner permission-service --task-key ci_job --migrate -- pnpm --filter permission-service test:integration',
+      'node scripts/local-runtime/launcher.mjs system-admin-seed --manifest /ABSOLUTE/RUN/manifest.json --validate'
     ]
   })
 }
