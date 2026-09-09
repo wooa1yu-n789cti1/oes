@@ -10,7 +10,8 @@ const patterns = [
   /(?:required|requireEnv|req)\(['"]([A-Z][A-Z0-9_]+)['"]\)/gu,
   /requiredInterval\(process\.env\.([A-Z][A-Z0-9_]+)\)/gu,
   /require[A-Za-z]+\(process\.env\.([A-Z][A-Z0-9_]+)\)/gu,
-  /encodedKey\s*=\s*process\.env\.([A-Z][A-Z0-9_]+)/gu
+  /encodedKey\s*=\s*process\.env\.([A-Z][A-Z0-9_]+)/gu,
+  /NATS_(?:USER|PASSWORD)\s*:\s*process\.env\.([A-Z][A-Z0-9_]+)/gu
 ]
 
 /** Resolves the exact owner source directory without scanning unrelated repository content. */

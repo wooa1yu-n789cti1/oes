@@ -47,7 +47,10 @@ function completeProjectionFixture() {
     postgres: (owner) => ({ DATABASE_URL: `postgresql://${owner}:fixture@127.0.0.1:41001/${owner.replaceAll('-', '_')}` }),
     minio: () => ({ ASSET_S3_ENDPOINT: 'http://127.0.0.1:41002', ASSET_S3_ACCESS_KEY_ID: 'asset-access', ASSET_S3_SECRET_ACCESS_KEY: 'asset-secret', ASSET_S3_BUCKET: 'asset-bucket', ASSET_S3_FORCE_PATH_STYLE: 'true' }),
     redis: (owner) => ({ REDIS_HOST: '127.0.0.1', REDIS_PORT: '41003', REDIS_USERNAME: owner, REDIS_PASSWORD: 'redis-secret', OES_REDIS_NAMESPACE: `oes:${owner}`, TERMINAL_DEVICE_UNAVAILABLE_REDIS_CHANNEL: 'oes:events:terminal-device.unavailable' }),
-    nats: (owner) => ({ NATS_URL: 'nats://127.0.0.1:41004', NATS_USER: owner, NATS_PASSWORD: 'nats-secret' }),
+    nats: (owner) => ({
+      NATS_URL: 'nats://127.0.0.1:41004', NATS_USER: owner, NATS_PASSWORD: 'nats-secret',
+      ...(owner === 'notification-service' ? { NATS_NOTIFICATION_USER: owner, NATS_NOTIFICATION_PASSWORD: 'nats-secret' } : {})
+    }),
     mtls: (owner) => mtls[owner]
   }
   const ports = Object.fromEntries(owners.map((owner, index) => [owner, 42000 + index]))
@@ -82,10 +85,12 @@ test('all 22 clean owner projections satisfy startup requirements and emit only 
   const siteSecret = report.owners.find(({ owner }) => owner === 'site-service').required.find(({ key }) => key === 'SITE_PREVIEW_TOKEN_SECRET')
   const notificationSecret = report.owners.find(({ owner }) => owner === 'notification-service').required.find(({ key }) => key === 'NOTIFICATION_DELIVERY_PAYLOAD_KEY')
   const objectStoreSecret = report.owners.find(({ owner }) => owner === 'asset-service').required.find(({ key }) => key === 'ASSET_S3_SECRET_ACCESS_KEY')
+  const notificationNatsPassword = report.owners.find(({ owner }) => owner === 'notification-service').required.find(({ key }) => key === 'NATS_NOTIFICATION_PASSWORD')
   const assetInterval = report.owners.find(({ owner }) => owner === 'asset-service').required.find(({ key }) => key === 'ASSET_MEDIA_LIFECYCLE_INTERVAL_MS')
   assert.deepEqual(siteSecret, { key: 'SITE_PREVIEW_TOKEN_SECRET', source: 'DEV_GENERATED_SECRET', sensitive: true })
   assert.deepEqual(notificationSecret, { key: 'NOTIFICATION_DELIVERY_PAYLOAD_KEY', source: 'DEV_GENERATED_SECRET', sensitive: true })
   assert.deepEqual(objectStoreSecret, { key: 'ASSET_S3_SECRET_ACCESS_KEY', source: 'PROVIDER_OBJECT_STORE', sensitive: true })
+  assert.deepEqual(notificationNatsPassword, { key: 'NATS_NOTIFICATION_PASSWORD', source: 'PROVIDER_EVENTS', sensitive: true })
   assert.deepEqual(assetInterval, { key: 'ASSET_MEDIA_LIFECYCLE_INTERVAL_MS', source: 'DEV_DEFAULT', sensitive: false })
 })
 
@@ -136,6 +141,12 @@ test('pre-spawn audit fails closed for missing, illegal, and permission-drifted 
   delete missing.ASSET_MEDIA_LIFECYCLE_INTERVAL_MS
   assert.throws(() => assertDevelopmentProcessEnvironment('asset-service', missing, declarations), /^Error: DEVELOPMENT_PROCESS_CONFIG_MISSING owner=asset-service key=ASSET_MEDIA_LIFECYCLE_INTERVAL_MS$/u)
   assert.throws(() => assertDevelopmentProcessEnvironment('collaboration-service', { ...environments['collaboration-service'], COLLABORATION_OUTBOX_INTERVAL_MS: '99' }, declarations), /DEVELOPMENT_PROCESS_CONFIG_INVALID owner=collaboration-service key=COLLABORATION_OUTBOX_INTERVAL_MS/u)
+  assert.throws(() => assertDevelopmentProcessEnvironment('asset-service', { ...environments['asset-service'], OES_GRPC_TLS_ENABLED: 'false' }, declarations), /DEVELOPMENT_PROCESS_CONFIG_INVALID owner=asset-service key=OES_GRPC_TLS_ENABLED/u)
+  assert.throws(() => assertDevelopmentProcessEnvironment('asset-service', { ...environments['asset-service'], OES_GRPC_TLS_MIN_VERSION: 'TLSv1.3' }, declarations), /DEVELOPMENT_PROCESS_CONFIG_INVALID owner=asset-service key=OES_GRPC_TLS_MIN_VERSION/u)
+  assert.throws(() => assertDevelopmentProcessEnvironment('asset-service', { ...environments['asset-service'], OES_WORKLOAD_SPIFFE_ID: 'https://invalid.example' }, declarations), /DEVELOPMENT_PROCESS_CONFIG_INVALID owner=asset-service key=OES_WORKLOAD_SPIFFE_ID/u)
+  const missingNotificationAlias = structuredClone(environments['notification-service'])
+  delete missingNotificationAlias.NATS_NOTIFICATION_USER
+  assert.throws(() => assertDevelopmentProcessEnvironment('notification-service', missingNotificationAlias, declarations), /DEVELOPMENT_PROCESS_CONFIG_MISSING owner=notification-service key=NATS_NOTIFICATION_USER/u)
   const signerPending = structuredClone(environments)
   delete signerPending['auth-service'].AUTH_EXECUTION_KMS_KEY_REF
   delete signerPending['auth-service'].AUTH_EXECUTION_SIGNER_SOCKET_PATH

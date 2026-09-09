@@ -32,7 +32,7 @@ const OWNER_REQUIREMENTS = Object.freeze({
   'identity-service': ['IDENTITY_PARTY_MACHINE_PRINCIPAL_ID', 'IDENTITY_PARTY_MACHINE_WORKLOAD_BINDING_ID', 'IDENTITY_PARTY_MACHINE_WORKLOAD_BINDING_VERSION'],
   'item-master-service': [],
   'mes-service': [],
-  'notification-service': ['AUTH_NOTIFICATION_AUTH_SPIFFE_ID', 'NOTIFICATION_DELIVERY_PAYLOAD_KEY'],
+  'notification-service': ['AUTH_NOTIFICATION_AUTH_SPIFFE_ID', 'NATS_NOTIFICATION_USER', 'NATS_NOTIFICATION_PASSWORD', 'NOTIFICATION_DELIVERY_PAYLOAD_KEY'],
   'party-service': [],
   'permission-service': ['PERMISSION_AUTH_SERVICE_SPIFFE_ID', 'PERMISSION_WORKLOAD_ISSUANCE_POLICIES'],
   'procurement-service': [],
@@ -59,9 +59,16 @@ const RUNTIME_DERIVED_REQUIREMENTS = Object.freeze({
   'auth-service': Object.freeze(['AUTH_EXECUTION_KMS_KEY_REF', 'AUTH_EXECUTION_SIGNER_SOCKET_PATH'])
 })
 
+const OWNER_REQUIREMENT_SOURCES = Object.freeze({
+  'notification-service': Object.freeze({
+    NATS_NOTIFICATION_USER: 'PROVIDER_EVENTS',
+    NATS_NOTIFICATION_PASSWORD: 'PROVIDER_EVENTS'
+  })
+})
+
 const SENSITIVE_REQUIREMENT_KEYS = new Set([
   'DATABASE_URL', 'ASSET_S3_ACCESS_KEY_ID', 'ASSET_S3_SECRET_ACCESS_KEY',
-  'REDIS_PASSWORD', 'NATS_PASSWORD'
+  'REDIS_PASSWORD', 'NATS_PASSWORD', 'NATS_NOTIFICATION_PASSWORD'
 ])
 
 const SENSITIVE_KEY = /(PASSWORD|SECRET|TOKEN|DATABASE_URL|PRIVATE_KEY|ACCESS_KEY_ID|KMS_KEY_REF)$/u
@@ -71,6 +78,7 @@ const INTEGER_KEY = /(?:_PORT|_INTERVAL_MS)$/u
 function configurationSource(owner, key, declarations) {
   if (Object.hasOwn(NON_SECRET_DEFAULTS[owner] || {}, key)) return 'DEV_DEFAULT'
   if (Object.hasOwn(GENERATED_SECRETS[owner] || {}, key)) return 'DEV_GENERATED_SECRET'
+  if (Object.hasOwn(OWNER_REQUIREMENT_SOURCES[owner] || {}, key)) return OWNER_REQUIREMENT_SOURCES[owner][key]
   for (const capability of declarations.owners[owner].capabilities || []) if ((CAPABILITY_REQUIREMENTS[capability] || []).includes(key)) return `PROVIDER_${capability.toUpperCase().replaceAll('-', '_')}`
   if (COMMON_REQUIREMENTS.includes(key)) return 'LAUNCHER_COMMON'
   if (/(?:_SERVICE_(?:HOST|PORT|GRPC_URL)|_GRPC_URL)$|^GRPC_SERVICE_/u.test(key)) return 'OWNER_ENDPOINT'
@@ -138,6 +146,10 @@ export function assertDevelopmentProcessEnvironment(owner, environment, declarat
     }
     if (key === 'NODE_ENV' && value !== 'development') throw new Error(`DEVELOPMENT_PROCESS_CONFIG_INVALID owner=${owner} key=${key}`)
   }
+  for (const [key, expected] of Object.entries({ OES_GRPC_TLS_ENABLED: 'true', OES_GRPC_TLS_MIN_VERSION: 'TLSv1.2' })) {
+    if (required.includes(key) && environment[key] !== expected) throw new Error(`DEVELOPMENT_PROCESS_CONFIG_INVALID owner=${owner} key=${key}`)
+  }
+  if (required.includes('OES_WORKLOAD_SPIFFE_ID') && !environment.OES_WORKLOAD_SPIFFE_ID.startsWith('spiffe://')) throw new Error(`DEVELOPMENT_PROCESS_CONFIG_INVALID owner=${owner} key=OES_WORKLOAD_SPIFFE_ID`)
   for (const key of ['AUTH_EXECUTION_WORKLOAD_POLICIES', 'PERMISSION_WORKLOAD_ISSUANCE_POLICIES'].filter((candidate) => required.includes(candidate))) {
     try { if (!Array.isArray(JSON.parse(environment[key]))) throw new Error('not-array') } catch { throw new Error(`DEVELOPMENT_PROCESS_CONFIG_INVALID owner=${owner} key=${key}`) }
   }
