@@ -90,6 +90,14 @@ function intentFrom(options) {
 /** Writes deterministic JSON output without credential values. */
 function emit(value) { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`) }
 
+/** Waits for operator interruption or propagates one runtime liveness failure to launcher cleanup. */
+export async function waitForDevelopmentTermination(signal, liveness) {
+  if (signal.aborted) return
+  const interrupted = new Promise((resolvePromise) => signal.addEventListener('abort', resolvePromise, { once: true }))
+  if (liveness) await Promise.race([interrupted, liveness])
+  else await interrupted
+}
+
 /** Resolves the exact owner environment from a registered manifest. */
 function ownerEnvironment(manifest, owner) {
   return { ...cleanProcessEnvironment(), ...environmentForOwner(manifest, owner, resolveCredentialReference), OES_RUNTIME_MANIFEST: path.join(manifest.runDirectory, 'manifest.json') }
@@ -130,10 +138,11 @@ export async function main(argv = process.argv.slice(2)) {
       if (controller.signal.aborted) throw controller.signal.reason
       processes = await startDevelopmentProcesses(started.file, { root, selectorPath: selectors?.path, signal: controller.signal })
       emit({ status: 'DEV_READY', manifestPath: processes.manifestPath, manifestFingerprint: processes.manifest.manifestFingerprint, owners })
-      if (!controller.signal.aborted) await new Promise((resolvePromise) => controller.signal.addEventListener('abort', resolvePromise, { once: true }))
+      await waitForDevelopmentTermination(controller.signal, processes.liveness)
     } finally {
       process.removeListener('SIGINT', interrupt)
       process.removeListener('SIGTERM', interrupt)
+      processes?.stopLiveness?.()
       if (processes) await stopDevelopmentProcesses(processes.children)
       if (started) reconcileRuntime({ manifestPath: started.file, cleanupResource: started.cleanup, releaseSlot: started.releaseSlot, releaseRunLock: started.releaseRunLock, releaseDevLock: started.releaseDevLock })
     }

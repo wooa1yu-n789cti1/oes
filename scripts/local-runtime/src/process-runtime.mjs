@@ -52,20 +52,133 @@ async function waitForProcess(child, owner, port, timeoutMs = 180000, signal) {
   throw new Error(`DEV_PROCESS_READINESS_TIMEOUT owner=${owner} port=${port}`)
 }
 
-/** Polls one host UDS facade until it accepts a local connection or its process exits. */
-async function waitForUnixProcess(child, owner, socketPath, timeoutMs = 30000) {
-  const started = Date.now()
-  while (Date.now() - started < timeoutMs) {
-    if (child.exitCode !== null) throw new Error(`DEV_PROCESS_EXITED owner=${owner} exit=${child.exitCode}`)
-    const ready = await new Promise((resolvePromise) => {
-      const socket = net.createConnection(socketPath)
-      const done = (value) => { socket.destroy(); resolvePromise(value) }
-      socket.setTimeout(250, () => done(false)); socket.once('connect', () => done(true)); socket.once('error', () => done(false))
+/** Performs one bounded request over the exact signer JSON-RPC socket without exposing payload data. */
+export function callProtectedSigner(socketPath, method, params, timeoutMs = 5000) {
+  return new Promise((resolvePromise, reject) => {
+    const socket = net.createConnection(socketPath)
+    let responseText = ''
+    let settled = false
+    const fail = (code) => {
+      if (settled) return
+      settled = true
+      socket.destroy()
+      reject(new Error(code))
+    }
+    socket.setTimeout(timeoutMs)
+    socket.once('timeout', () => fail('SIGNER_FUNCTIONAL_PROTOCOL_UNAVAILABLE'))
+    socket.once('error', () => fail('SIGNER_FUNCTIONAL_PROTOCOL_UNAVAILABLE'))
+    socket.on('data', (chunk) => {
+      responseText += chunk.toString('utf8')
+      if (Buffer.byteLength(responseText) > 1024 * 1024) return fail('SIGNER_FUNCTIONAL_RESPONSE_INVALID')
+      const newline = responseText.indexOf('\n')
+      if (newline === -1 || settled) return
+      try {
+        if (responseText.slice(newline + 1).trim()) throw new Error('extra response data')
+        const response = JSON.parse(responseText.slice(0, newline))
+        if (!response || response.jsonrpc !== '2.0' || response.id !== 'local-runtime-readiness' || response.error || !Object.hasOwn(response, 'result')) throw new Error('invalid response')
+        settled = true
+        socket.destroy()
+        resolvePromise(response.result)
+      } catch {
+        fail('SIGNER_FUNCTIONAL_RESPONSE_INVALID')
+      }
     })
-    if (ready) return
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
+    socket.once('connect', () => socket.write(`${JSON.stringify({ jsonrpc: '2.0', id: 'local-runtime-readiness', method, params })}\n`))
+  })
+}
+
+/** Proves one real ES256 operation through the host proxy and verifies it with the returned public key. */
+export async function probeProtectedSigner(socketPath, keyReference, { call = callProtectedSigner, now = () => new Date(), randomBytes = crypto.randomBytes } = {}) {
+  const active = await call(socketPath, 'GetActiveKey', {})
+  if (!active || typeof active.kid !== 'string' || !active.kid || active.publicJwk?.kty !== 'EC' || active.publicJwk?.crv !== 'P-256' || typeof active.publicJwk.x !== 'string' || typeof active.publicJwk.y !== 'string') throw new Error('SIGNER_FUNCTIONAL_RESPONSE_INVALID')
+  const challenge = Buffer.concat([Buffer.from('oes.local-runtime.signer-readiness/v1\0', 'utf8'), randomBytes(32)])
+  const signed = await call(socketPath, 'SignEs256', { kid: active.kid, signingInputBase64url: challenge.toString('base64url') })
+  if (!signed || typeof signed.signatureBase64url !== 'string') throw new Error('SIGNER_FUNCTIONAL_RESPONSE_INVALID')
+  const signature = Buffer.from(signed.signatureBase64url, 'base64url')
+  if (signature.length !== 64 || signature.toString('base64url') !== signed.signatureBase64url) throw new Error('SIGNER_FUNCTIONAL_RESPONSE_INVALID')
+  let verified = false
+  try {
+    verified = crypto.verify('sha256', challenge, { key: crypto.createPublicKey({ key: active.publicJwk, format: 'jwk' }), dsaEncoding: 'ieee-p1363' }, signature)
+  } catch { /* Normalize public-key parsing and verification failures below. */ }
+  if (!verified) throw new Error('SIGNER_FUNCTIONAL_SIGNATURE_INVALID')
+  const evidence = {
+    schemaVersion: 1,
+    kind: 'OES_SIGNER_FUNCTIONAL_READINESS',
+    protocol: 'newline-json-rpc-2.0',
+    operation: 'GetActiveKey+SignEs256+local-verify',
+    keyReferenceSha256: sha256(keyReference),
+    keyIdSha256: sha256(active.kid),
+    challengeSha256: sha256(challenge),
+    signatureSha256: sha256(signature),
+    verifiedAtUtc: now().toISOString()
   }
-  throw new Error(`DEV_PROCESS_READINESS_TIMEOUT owner=${owner} socket=${socketPath}`)
+  return { ...evidence, evidenceFingerprint: sha256(canonicalJson(evidence)) }
+}
+
+/** Retries only transient signer transport startup failures within one explicit attempt boundary. */
+export async function waitForProtectedSignerReadiness(socketPath, keyReference, { attempts = 6, delayMs = 250, probe = probeProtectedSigner, signal } = {}) {
+  let lastError
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    if (signal?.aborted) throw signal.reason
+    try { return await probe(socketPath, keyReference) } catch (error) {
+      lastError = error
+      if (error?.message !== 'SIGNER_FUNCTIONAL_PROTOCOL_UNAVAILABLE') throw error
+      if (attempt < attempts) await new Promise((resolvePromise) => setTimeout(resolvePromise, delayMs))
+    }
+  }
+  const error = new Error(`SIGNER_FUNCTIONAL_READINESS_FAILED attempts=${attempts}`)
+  error.cause = lastError
+  throw error
+}
+
+/** Reopens exact container identity and running state without trusting a name-only Docker observation. */
+export function inspectProtectedSignerContainer(resource, inspect = runChecked) {
+  let observed
+  try { observed = JSON.parse(inspect('docker', ['inspect', '--type', 'container', resource.name], { timeout: 10000 }).stdout)[0] } catch { throw new Error('SIGNER_DOCKER_UNAVAILABLE') }
+  if (!observed || observed.Id !== resource.objectId || Object.entries(resource.labels).some(([key, value]) => observed.Config?.Labels?.[key] !== value)) throw new Error('SIGNER_CONTAINER_IDENTITY_MISMATCH')
+  if (!observed.State?.Running) throw new Error(`SIGNER_CONTAINER_EXITED exit=${observed.State?.ExitCode ?? 'UNKNOWN'}`)
+  return observed
+}
+
+/** Continuously checks proxy, exact container/Docker state, and real signer function until stopped. */
+export function monitorProtectedSigner({ proxyChild, containerResource, socketPath, keyReference, intervalMs = 5000, inspect = inspectProtectedSignerContainer, probe = probeProtectedSigner }) {
+  let timer = null
+  let stopped = false
+  let rejectFailure
+  const failure = new Promise((_, reject) => { rejectFailure = reject })
+  void failure.catch(() => {})
+  const fail = (error) => {
+    if (stopped) return
+    stopped = true
+    if (timer) clearTimeout(timer)
+    rejectFailure(error)
+  }
+  const proxyExited = () => fail(new Error(`SIGNER_PROXY_EXITED exit=${proxyChild.exitCode ?? 'UNKNOWN'}`))
+  proxyChild.once('exit', proxyExited)
+  const check = async () => {
+    if (stopped) return
+    if (timer) clearTimeout(timer)
+    timer = null
+    try {
+      inspect(containerResource)
+      await probe(socketPath, keyReference)
+      if (!stopped) timer = setTimeout(check, intervalMs)
+    } catch (error) {
+      const message = String(error?.message || error)
+      fail(/^SIGNER_(?:DOCKER|CONTAINER)/u.test(message) ? error : new Error('SIGNER_FUNCTIONAL_PROBE_FAILED'))
+    }
+  }
+  timer = setTimeout(check, intervalMs)
+  return {
+    failure,
+    check,
+    stop: () => {
+      if (stopped) return
+      stopped = true
+      if (timer) clearTimeout(timer)
+      proxyChild.removeListener('exit', proxyExited)
+    }
+  }
 }
 
 /** Projects every supported URL spelling for one exact local gRPC endpoint. */
@@ -146,6 +259,9 @@ export async function startProtectedSigner(root, manifest, signal) {
   const uid = process.getuid?.() ?? 65532
   const gid = process.getgid?.() ?? 65532
   let proxyChild = null
+  let containerResource = null
+  let monitor = null
+  let containerStarted = false
   try {
     runChecked('docker', [
       'run', '--detach', '--name', name,
@@ -160,31 +276,45 @@ export async function startProtectedSigner(root, manifest, signal) {
       '--env', 'AUTH_EXECUTION_SIGNER_SOCKET_PATH=/execution-signer/container.sock',
       image
     ], { timeout: 180000 })
+    containerStarted = true
     const observed = JSON.parse(runChecked('docker', ['inspect', '--type', 'container', name], { timeout: 20000 }).stdout)[0]
     if (observed.Image !== observedImage.Id) throw new Error(`SIGNER_IMAGE_IDENTITY_MISMATCH image=${image}`)
     const imageResource = { provider, pool: manifest.pool, scope: 'SHARED', kind: 'image', name: image, objectId: observedImage.Id, labels: imageLabels, sourceHash, cleanup: 'PRESERVE_SHARED' }
-    const containerResource = { provider, pool: manifest.pool, scope: 'RUN', kind: 'container', name, objectId: observed.Id, labels, volume: null, cleanup: 'DELETE_EXACT', sourceHash, imageId: observedImage.Id }
+    containerResource = { provider, pool: manifest.pool, scope: 'RUN', kind: 'container', name, objectId: observed.Id, labels, volume: null, cleanup: 'DELETE_EXACT', sourceHash, imageId: observedImage.Id }
     const started = Date.now()
     while (Date.now() - started < 180000) {
       if (signal?.aborted) throw signal.reason
-      if (fs.existsSync(ready) && fs.existsSync(socket) && fs.statSync(socket).isSocket()) {
+      if (fs.existsSync(ready) && proxyChild) {
         const keyReference = fs.readFileSync(ready, 'utf8').trim()
         if (!keyReference.startsWith('pkcs11:')) throw new Error('SIGNER_KEY_REFERENCE_INVALID')
-        return { resources: [imageResource, directoryResource, containerResource], children: [{ owner: 'execution-token-signer-proxy', kind: 'support', child: proxyChild }], environment: { AUTH_EXECUTION_SIGNER_SOCKET_PATH: socket, AUTH_EXECUTION_KMS_KEY_REF: keyReference }, endpoint: { provider: 'execution-token-signer', authority: `unix:${socket}`, ready: true, owners: ['auth-service'], environment: {}, credentialReference: null } }
+        const functionalReadiness = await waitForProtectedSignerReadiness(socket, keyReference, { signal })
+        const readinessPath = path.join(work, 'functional-readiness.json')
+        writeAtomic(readinessPath, functionalReadiness)
+        const readinessReference = { path: readinessPath, sha256: sha256(fs.readFileSync(readinessPath)), fingerprint: functionalReadiness.evidenceFingerprint }
+        monitor = monitorProtectedSigner({ proxyChild, containerResource, socketPath: socket, keyReference })
+        return { resources: [imageResource, directoryResource, containerResource], children: [{ owner: 'execution-token-signer-proxy', kind: 'support', child: proxyChild }], environment: { AUTH_EXECUTION_SIGNER_SOCKET_PATH: socket, AUTH_EXECUTION_KMS_KEY_REF: keyReference }, endpoint: { provider: 'execution-token-signer', authority: `unix:${socket}`, ready: true, owners: ['auth-service'], environment: {}, credentialReference: null, functionalReadiness: readinessReference }, monitor }
       }
       if (fs.existsSync(ready) && fs.existsSync(containerSocket) && fs.statSync(containerSocket).isSocket() && !proxyChild) {
         proxyChild = spawn(process.execPath, [path.join(root, 'scripts/local-runtime/src/uds-docker-proxy.mjs')], { cwd: root, env: { ...cleanProcessEnvironment(), OES_PROXY_SOCKET_PATH: socket, OES_PROXY_CONTAINER_NAME: name }, stdio: 'inherit' })
-        await waitForUnixProcess(proxyChild, 'execution-token-signer-proxy', socket)
       }
-      const running = JSON.parse(runChecked('docker', ['inspect', '--format', '{{json .State}}', name], { timeout: 10000 }).stdout)
-      if (!running.Running) throw new Error(`SIGNER_CONTAINER_EXITED exit=${running.ExitCode}`)
+      inspectProtectedSignerContainer(containerResource)
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 500))
     }
     throw new Error('SIGNER_READINESS_TIMEOUT')
   } catch (error) {
-    if (proxyChild?.exitCode === null) proxyChild.kill('SIGTERM')
-    try { runChecked('docker', ['rm', '--force', name], { timeout: 20000 }) } catch { /* Preserve the primary failure. */ }
-    fs.rmSync(work, { recursive: true, force: true })
+    monitor?.stop()
+    if (proxyChild) await stopDevelopmentProcesses([{ child: proxyChild }])
+    let containerCleaned = !containerStarted
+    if (containerResource) {
+      const result = cleanupDockerResource(containerResource, manifest)
+      containerCleaned = result.exitStatus === 0
+      if (!containerCleaned) error.cleanupFailure = result.reason
+    } else if (containerStarted) {
+      error.cleanupFailure = 'SIGNER_CONTAINER_IDENTITY_UNCONFIRMED'
+    }
+    if (containerCleaned) {
+      try { cleanupRuntimeDirectory(directoryResource) } catch (cleanupError) { error.cleanupFailure = cleanupError.message }
+    }
     throw error
   }
 }
@@ -202,11 +332,17 @@ export function publishDevelopmentProcessManifest(manifestPath, { signer = null,
 
 /** Verifies a directory marker before recursively deleting a run-owned signer work root. */
 export function cleanupRuntimeDirectory(resource) {
+  if (!fs.existsSync(resource.path)) return { resource, disposition: 'ALREADY_ABSENT', exitStatus: 0 }
+  const directory = fs.lstatSync(resource.path)
+  if (!directory.isDirectory() || directory.isSymbolicLink()) throw new Error('DIRECTORY_RESOURCE_TYPE_MISMATCH')
+  const markerStat = fs.lstatSync(resource.marker)
+  if (!markerStat.isFile() || markerStat.isSymbolicLink()) throw new Error('DIRECTORY_RESOURCE_MARKER_TYPE_MISMATCH')
   const bytes = fs.readFileSync(resource.marker)
   if (sha256(bytes) !== resource.objectId) throw new Error('DIRECTORY_RESOURCE_MARKER_MISMATCH')
   const marker = JSON.parse(bytes.toString('utf8'))
   if (marker.path !== resource.path || canonicalJson(marker.labels) !== canonicalJson(resource.labels)) throw new Error('DIRECTORY_RESOURCE_IDENTITY_MISMATCH')
   fs.rmSync(resource.path, { recursive: true })
+  if (fs.existsSync(resource.path)) throw new Error('DIRECTORY_RESOURCE_DELETE_INCOMPLETE')
   return { resource, disposition: 'DELETED_EXACT', exitStatus: 0 }
 }
 
@@ -270,7 +406,9 @@ export async function startDevelopmentProcesses(manifestPath, { root, selectorPa
             const child = spawn('pnpm', ['--filter', owner, 'dev'], { cwd: root, env: environments[owner], stdio: 'inherit' })
             attemptChildren.push({ owner, kind: 'service', port: ports[owner], child })
           }
-          await Promise.all(attemptChildren.filter(({ kind }) => kind === 'service').map(({ child, owner, port }) => waitForProcess(child, owner, port, 180000, signal)))
+          const processReadiness = Promise.all(attemptChildren.filter(({ kind }) => kind === 'service').map(({ child, owner, port }) => waitForProcess(child, owner, port, 180000, signal)))
+          if (signer) await Promise.race([processReadiness, signer.monitor.failure])
+          else await processReadiness
           return { attemptChildren, ports, issuerPort, authHttpPort, attempt }
         } catch (error) {
           lastError = error
@@ -285,8 +423,9 @@ export async function startDevelopmentProcesses(manifestPath, { root, selectorPa
     const processEndpoints = started.attemptChildren.filter(({ kind }) => kind === 'service').map(({ owner, port, child }) => ({ provider: 'host-process', authority: `pid:${child.pid}:tcp:${port}`, host: `${owner}.localhost`, port, ready: true, owners: manifest.owners.filter((candidate) => candidate === owner || declarations.owners[candidate].downstreams?.includes(owner)), environment: endpointEnvironment(owner, port), credentialReference: null }))
     const issuerEndpoints = started.authHttpPort ? [{ provider: 'host-issuer', authority: `pid:${started.attemptChildren.find(({ owner }) => owner === 'local-issuer').child.pid}:https:${started.issuerPort}`, host: 'issuer.local.oes.internal', port: started.issuerPort, ready: true, owners: manifest.owners, environment: { AUTH_EXECUTION_ISSUER: `https://issuer.local.oes.internal:${started.issuerPort}` }, credentialReference: null }] : []
     const published = publishDevelopmentProcessManifest(manifestPath, { signer, issuerEndpoints, processEndpoints })
-    return { children, manifest: published.manifest, manifestPath: published.file }
+    return { children, manifest: published.manifest, manifestPath: published.file, liveness: signer?.monitor.failure || null, stopLiveness: () => signer?.monitor.stop() }
   } catch (error) {
+    signer?.monitor.stop()
     await stopDevelopmentProcesses(children)
     if (signer) {
       for (const resource of [...signer.resources].reverse()) {
