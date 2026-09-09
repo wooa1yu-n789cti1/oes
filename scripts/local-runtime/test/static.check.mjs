@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
+import { developmentProcessConfigurationOwners } from '../src/development-process-config.mjs'
 
 const root = path.resolve(import.meta.dirname, '../../..')
 const read = (relative) => fs.readFileSync(path.join(root, relative), 'utf8')
@@ -94,6 +95,12 @@ for (const invocation of [...aliasBoundaries, ...userAddBoundaries]) {
 }
 const processRuntime = read('scripts/local-runtime/src/process-runtime.mjs')
 for (const binding of ['AUTH_EXECUTION_SIGNER_SOCKET_PATH', 'AUTH_EXECUTION_KMS_KEY_REF', 'AUTH_HTTP_PORT', 'GATEWAY_READINESS_TARGETS', 'issuer-server.mjs']) assert.match(processRuntime, new RegExp(binding, 'u'))
+const declarations = json('scripts/local-runtime/relationships.json')
+assert.deepEqual(developmentProcessConfigurationOwners(), Object.keys(declarations.owners).sort(), 'DEV process configuration contract must cover every declared owner')
+assert.ok(processRuntime.indexOf('auditDevelopmentProcessEnvironments(environments, declarations)') < processRuntime.indexOf("spawn('pnpm', ['--filter', owner, 'dev']"), 'all selected owner environments must be audited before service spawn')
+const developmentConfig = read('scripts/local-runtime/src/development-process-config.mjs')
+for (const key of ['ASSET_MEDIA_LIFECYCLE_INTERVAL_MS', 'ASSET_MEDIA_OUTBOX_INTERVAL_MS', 'COLLABORATION_OUTBOX_INTERVAL_MS', 'SITE_PREVIEW_TOKEN_SECRET']) assert.match(developmentConfig, new RegExp(key, 'u'), `DEV process configuration gap is not classified: ${key}`)
+assert.doesNotMatch(developmentConfig, /console\.|process\.env/u, 'DEV process configuration must not read ambient values or log secret-bearing environments')
 assert.match(read('scripts/local-runtime/src/bootstrap.mjs'), /prisma['"],\s*['"]migrate['"],\s*['"]deploy/u)
 const systemAdminBootstrap = read('scripts/local-runtime/src/bootstrap.mjs')
 assert.match(systemAdminBootstrap, /buildSystemAdminSeedRuntimeBinding/u)

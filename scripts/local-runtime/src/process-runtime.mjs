@@ -10,6 +10,7 @@ import { cleanupDockerResource, exactResourceToken, runtimeLabels } from './dock
 import { canonicalJson, sha256, writeAtomic } from './canonical.mjs'
 import { runChecked } from './process.mjs'
 import { trustedProcessEnvironment } from './trusted-runtime-config.mjs'
+import { auditDevelopmentProcessEnvironments } from './development-process-config.mjs'
 import { withExclusiveLock } from './locks.mjs'
 import { publishStackState } from './orchestrator.mjs'
 
@@ -234,20 +235,10 @@ export async function startDevelopmentProcesses(manifestPath, { root, selectorPa
         const issuerPort = issuerReservation.port
         const authHttpPort = authHttpReservation?.port || null
         try {
-          if (authHttpPort) {
-            const authEnvironment = environmentForOwner(manifest, 'auth-service', resolveCredentialReference)
-            await issuerReservation.release()
-            await authHttpReservation.release()
-            const child = spawn(process.execPath, [path.join(root, 'scripts/local-runtime/src/issuer-server.mjs')], { cwd: root, env: { ...cleanProcessEnvironment(), OES_ISSUER_PORT: String(issuerPort), OES_AUTH_HTTP_PORT: String(authHttpPort), OES_ISSUER_CERT_PATH: authEnvironment.OES_GRPC_TLS_CERT_PATH, OES_ISSUER_KEY_PATH: authEnvironment.OES_GRPC_TLS_KEY_PATH }, stdio: 'inherit' })
-            attemptChildren.push({ owner: 'local-issuer', kind: 'support', port: issuerPort, child })
-            await waitForProcess(child, 'local-issuer', issuerPort, 180000, signal)
-          } else {
-            await issuerReservation.release()
-          }
-          for (const owner of manifest.owners) {
+          const environments = Object.fromEntries(manifest.owners.map((owner) => {
             const providerEnvironment = environmentForOwner(manifest, owner, resolveCredentialReference)
             const trustedEnvironment = trustedProcessEnvironment({ root, manifest, owner, issuerPort, selectorPath })
-            const environment = {
+            return [owner, {
               ...cleanProcessEnvironment(),
               ...providerEnvironment,
               ...downstreamEnvironment(owner, ports, declarations),
@@ -259,9 +250,22 @@ export async function startDevelopmentProcesses(manifestPath, { root, selectorPa
               SERVICE_REGISTRY_PORT: String(ports[owner]),
               ...(owner === 'api-gateway' ? { SERVICE_PORT: String(ports[owner]), ...gatewayReadinessEnvironment(ports, declarations) } : {}),
               ...(owner === 'auth-service' ? { AUTH_HTTP_PORT: String(authHttpPort), ...signer.environment } : {})
-            }
+            }]
+          }))
+          auditDevelopmentProcessEnvironments(environments, declarations)
+          if (authHttpPort) {
+            const authEnvironment = environmentForOwner(manifest, 'auth-service', resolveCredentialReference)
+            await issuerReservation.release()
+            await authHttpReservation.release()
+            const child = spawn(process.execPath, [path.join(root, 'scripts/local-runtime/src/issuer-server.mjs')], { cwd: root, env: { ...cleanProcessEnvironment(), OES_ISSUER_PORT: String(issuerPort), OES_AUTH_HTTP_PORT: String(authHttpPort), OES_ISSUER_CERT_PATH: authEnvironment.OES_GRPC_TLS_CERT_PATH, OES_ISSUER_KEY_PATH: authEnvironment.OES_GRPC_TLS_KEY_PATH }, stdio: 'inherit' })
+            attemptChildren.push({ owner: 'local-issuer', kind: 'support', port: issuerPort, child })
+            await waitForProcess(child, 'local-issuer', issuerPort, 180000, signal)
+          } else {
+            await issuerReservation.release()
+          }
+          for (const owner of manifest.owners) {
             await ownerReservations[owner].release()
-            const child = spawn('pnpm', ['--filter', owner, 'dev'], { cwd: root, env: environment, stdio: 'inherit' })
+            const child = spawn('pnpm', ['--filter', owner, 'dev'], { cwd: root, env: environments[owner], stdio: 'inherit' })
             attemptChildren.push({ owner, kind: 'service', port: ports[owner], child })
           }
           await Promise.all(attemptChildren.filter(({ kind }) => kind === 'service').map(({ child, owner, port }) => waitForProcess(child, owner, port, 180000, signal)))

@@ -417,7 +417,7 @@ test('process-runtime key becomes Stack credential material with exact bytes and
   assert.equal(fs.existsSync(path.join(staged.layout.stackRoot, 'providers', 'dev', 'process-runtime')), false)
   const mtlsBundle = path.join(staged.layout.stackRoot, 'credentials', 'test-mtls.json')
   writeAtomic(mtlsBundle, { ownerEnvironments: { 'notification-service': { OES_GRPC_TLS_CA_PATH: '/fixture/ca.pem' } } })
-  const manifest = { stackRoot: staged.layout.stackRoot, endpoints: [{ provider: 'mtls', source: 'RUN', ready: true, authority: 'filesystem:fixture', owners: ['notification-service'], credentialReference: { path: mtlsBundle } }] }
+  const manifest = { profile: 'DEV', stackRoot: staged.layout.stackRoot, endpoints: [{ provider: 'mtls', source: 'RUN', ready: true, authority: 'filesystem:fixture', owners: ['notification-service'], credentialReference: { path: mtlsBundle } }] }
   const environment = trustedProcessEnvironment({ root: path.resolve(import.meta.dirname, '../../../..'), manifest, owner: 'notification-service', issuerPort: 12345 })
   assert.equal(environment.NOTIFICATION_DELIVERY_PAYLOAD_KEY, 'stable-secret')
   assert.equal(fs.readFileSync(target, 'utf8'), 'stable-secret')

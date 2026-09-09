@@ -1,9 +1,8 @@
-import crypto from 'node:crypto'
 import fs from 'node:fs'
 import { resolveEndpoint } from './manifest.mjs'
 import path from 'node:path'
 import { validate, WORKLOAD_POLICY_VERSION } from '../../local/workload-policy-profile.mjs'
-import { writeAtomic } from './canonical.mjs'
+import { developmentProcessConfigEnvironment } from './development-process-config.mjs'
 
 const SELECTOR_PREFIXES = Object.freeze({
   'api-gateway': ['GATEWAY'],
@@ -77,16 +76,7 @@ export function selectorEnvironment(owner, selectors) {
   ]))
 }
 
-/** Creates or reopens the DEV notification payload key outside the repository. */
-function notificationPayloadKey(manifest) {
-  const file = path.join(manifest.stackRoot, 'credentials', 'process-runtime', 'notification-delivery-payload.key')
-  if (!fs.existsSync(file)) writeAtomic(file, crypto.randomBytes(32).toString('base64'), 0o600)
-  const value = fs.readFileSync(file, 'utf8')
-  if (!value.trim() || (fs.statSync(file).mode & 0o077) !== 0) throw new Error('NOTIFICATION_PAYLOAD_KEY_INVALID')
-  return value.trim()
-}
-
-/** Produces the non-secret trust and owner bindings shared by host development processes. */
+/** Produces the trust, owner, and DEV configuration bindings for one exact host process. */
 export function trustedProcessEnvironment({ root, manifest, owner, issuerPort, selectorPath }) {
   const { auth, permission } = loadWorkloadPolicies(root)
   const selectors = loadMachineSelectors(selectorPath)
@@ -107,8 +97,7 @@ export function trustedProcessEnvironment({ root, manifest, owner, issuerPort, s
       AUTH_PERMISSION_WORKLOAD_ISSUANCE_POLICY_VERSION: WORKLOAD_POLICY_VERSION
     },
     'notification-service': {
-      AUTH_NOTIFICATION_AUTH_SPIFFE_ID: 'spiffe://local.oes.internal/ns/oes/sa/auth-service',
-      NOTIFICATION_DELIVERY_PAYLOAD_KEY: notificationPayloadKey(manifest)
+      AUTH_NOTIFICATION_AUTH_SPIFFE_ID: 'spiffe://local.oes.internal/ns/oes/sa/auth-service'
     },
     'permission-service': {
       PERMISSION_AUTH_SERVICE_SPIFFE_ID: 'spiffe://local.oes.internal/ns/oes/sa/auth-service',
@@ -123,7 +112,7 @@ export function trustedProcessEnvironment({ root, manifest, owner, issuerPort, s
       GATEWAY_TERMINAL_DEVICE_SPIFFE_ID: 'spiffe://local.oes.internal/ns/oes/sa/api-gateway'
     }
   }
-  return { ...common, ...(exact[owner] || {}) }
+  return { ...common, ...(exact[owner] || {}), ...developmentProcessConfigEnvironment(manifest, owner) }
 }
 
 /** Resolves the owner-specific CA from the sealed mTLS credential reference. */
