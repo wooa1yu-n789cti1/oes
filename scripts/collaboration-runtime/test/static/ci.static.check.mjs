@@ -26,6 +26,51 @@ assert.match(workflow, /confirmation-required/)
 assert.match(workflow, /ci-full-approved-/)
 assert.doesNotMatch(workflow, /test:risk|test:l2|test:design-gap|test-matrix|l2-test-runner|Shadow/)
 
+/** Enforces producer-owned Change Plan artifact identity for every downstream download. */
+const assertChangePlanArtifactContract = (source) => {
+  const producer = source.match(/^  change-plan:\n[\s\S]*?(?=^  full-confirmation:)/m)?.[0]
+  assert.ok(producer, 'authoritative CI must define the Change Plan producer')
+  assert.match(producer, /^      artifact-name: \$\{\{ steps\.plan\.outputs\.artifact-name \}\}$/m)
+  assert.match(producer, /^          name: \$\{\{ steps\.plan\.outputs\.artifact-name \}\}$/m)
+  const downloads = [...source.matchAll(/^      - uses: actions\/download-artifact@v8\n(?: {8,}.*\n)*/gm)]
+  assert.ok(downloads.length > 0, 'authoritative CI must retain Change Plan consumers')
+  for (const [index, step] of downloads.entries())
+    assert.match(
+      step[0],
+      /^          name: \$\{\{ needs\.change-plan\.outputs\.artifact-name \}\}$/m,
+      `Change Plan consumer ${index + 1} must reuse the producer output`
+    )
+  assert.doesNotMatch(
+    source,
+    /name: change-plan-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/
+  )
+}
+
+assertChangePlanArtifactContract(workflow)
+for (const mutation of [
+  (source) =>
+    source.replace(
+      '      artifact-name: ${{ steps.plan.outputs.artifact-name }}\n',
+      ''
+    ),
+  (source) =>
+    source.replace(
+      '          name: ${{ steps.plan.outputs.artifact-name }}',
+      '          name: change-plan-${{ github.run_id }}-${{ github.run_attempt }}'
+    ),
+  (source) =>
+    source.replace(
+      '          name: ${{ needs.change-plan.outputs.artifact-name }}',
+      '          name: change-plan-${{ github.run_id }}-${{ github.run_attempt }}'
+    )
+])
+  assert.throws(
+    () => assertChangePlanArtifactContract(mutation(workflow)),
+    /artifact-name|reuse the producer output/,
+    'producer or consumer attempt re-derivation must fail static validation'
+  )
+console.log('change-plan artifact continuity mutations: PASS output upload consumer')
+
 const workspaceInstalls = [
   ['needs-web-install', 'pnpm --dir app/web install --frozen-lockfile'],
   ['needs-pda-install', 'pnpm --dir app/pda install --frozen-lockfile']

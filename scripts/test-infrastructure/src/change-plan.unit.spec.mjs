@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { changedLockfileImporters, createChangePlan } from './change-plan.mjs'
+import {
+  changedLockfileImporters,
+  createChangePlan,
+  createChangePlanArtifactName
+} from './change-plan.mjs'
 
 const packages = [
   { directory: 'packages/common', name: 'common', dependencies: {}, scripts: {} },
@@ -52,6 +56,25 @@ function plan(changes, overrides = {}) {
     ...overrides
   })
 }
+
+test('Change Plan artifact identity is immutable within one producer attempt', () => {
+  assert.equal(createChangePlanArtifactName(34246890169, 2), 'change-plan-34246890169-2')
+  assert.equal(createChangePlanArtifactName('34246890169', '2'), 'change-plan-34246890169-2')
+  assert.equal(createChangePlanArtifactName(34246890169, 3), 'change-plan-34246890169-3')
+})
+
+test('Change Plan artifact identity rejects absent or ambiguous producer coordinates', () => {
+  for (const coordinates of [
+    [undefined, 2],
+    [34246890169, undefined],
+    [34246890169, 0],
+    ['34246890169-2', 2]
+  ])
+    assert.throws(
+      () => createChangePlanArtifactName(...coordinates),
+      /CHANGE_PLAN_ARTIFACT_ID_INVALID/
+    )
+})
 
 test('rename and delete use the complete two-sided diff and select the renamed test', () => {
   const result = plan([

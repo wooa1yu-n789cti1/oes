@@ -26,6 +26,7 @@ jobs:
     name: Change Plan
     runs-on: ubuntu-latest
     outputs:
+      artifact-name: ${{ steps.plan.outputs.artifact-name }}
       mode: ${{ steps.plan.outputs.mode }}
       phase: ${{ steps.plan.outputs.phase }}
       confirmation-required: ${{ steps.plan.outputs.confirmation-required }}
@@ -94,7 +95,7 @@ jobs:
       - name: Upload immutable Change Plan
         uses: actions/upload-artifact@v7
         with:
-          name: change-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ steps.plan.outputs.artifact-name }}
           path: .tmp/change-plan.json
           if-no-files-found: error
           retention-days: 14
@@ -108,7 +109,7 @@ jobs:
       - uses: actions/download-artifact@v8
         if: ${{ needs.change-plan.result == 'success' }}
         with:
-          name: change-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.change-plan.outputs.artifact-name }}
           path: .tmp
       - name: Enforce exact-head confirmation before expensive FULL
         env:
@@ -145,7 +146,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - uses: actions/download-artifact@v8
         with:
-          name: change-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.change-plan.outputs.artifact-name }}
           path: .tmp
       - if: ${{ needs.change-plan.outputs.needs-web-install == 'true' }}
         run: pnpm --dir app/web install --frozen-lockfile
@@ -184,7 +185,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - uses: actions/download-artifact@v8
         with:
-          name: change-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.change-plan.outputs.artifact-name }}
           path: .tmp
       - if: ${{ needs.change-plan.outputs.needs-web-install == 'true' }}
         run: pnpm --dir app/web install --frozen-lockfile
@@ -221,7 +222,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - uses: actions/download-artifact@v8
         with:
-          name: change-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.change-plan.outputs.artifact-name }}
           path: .tmp
       - if: ${{ needs.change-plan.outputs.needs-web-install == 'true' }}
         run: pnpm --dir app/web install --frozen-lockfile
@@ -257,7 +258,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - uses: actions/download-artifact@v8
         with:
-          name: change-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.change-plan.outputs.artifact-name }}
           path: .tmp
       - if: ${{ needs.change-plan.outputs.needs-web-install == 'true' }}
         run: pnpm --dir app/web install --frozen-lockfile
@@ -291,7 +292,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - uses: actions/download-artifact@v8
         with:
-          name: change-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.change-plan.outputs.artifact-name }}
           path: .tmp
       - if: ${{ needs.change-plan.outputs.needs-web-install == 'true' }}
         run: pnpm --dir app/web install --frozen-lockfile
@@ -332,7 +333,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - uses: actions/download-artifact@v8
         with:
-          name: change-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.change-plan.outputs.artifact-name }}
           path: .tmp
       - name: Build compiled Integration-test dependencies
         run: |
@@ -374,7 +375,7 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
       - uses: actions/download-artifact@v8
         with:
-          name: change-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.change-plan.outputs.artifact-name }}
           path: .tmp
       - if: ${{ needs.change-plan.outputs.needs-web-install == 'true' }}
         run: pnpm --dir app/web install --frozen-lockfile
@@ -413,7 +414,7 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
       - uses: actions/download-artifact@v8
         with:
-          name: change-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.change-plan.outputs.artifact-name }}
           path: .tmp
       - if: ${{ needs.change-plan.outputs.needs-web-install == 'true' }}
         run: pnpm --dir app/web install --frozen-lockfile
@@ -451,7 +452,7 @@ jobs:
       - uses: actions/download-artifact@v8
         if: ${{ needs.change-plan.result == 'success' }}
         with:
-          name: change-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.change-plan.outputs.artifact-name }}
           path: .tmp
       - name: Aggregate complete fail-closed gate
         env:
