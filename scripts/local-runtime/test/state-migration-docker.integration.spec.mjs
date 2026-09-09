@@ -6,6 +6,7 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import test from 'node:test'
 import { fingerprint, writeAtomic } from '../src/canonical.mjs'
+import { nacosContainerEnvironment } from '../src/docker-driver.mjs'
 import { activateStagedState, inventoryStateLayout, migrationReplacementName, planStateLayoutMigration, recoverStateLayout, rollbackCommittedState, stageStateLayoutMigration } from '../src/state-migration.mjs'
 
 const MYSQL_IMAGE = 'mysql:8.0@sha256:a3dff78d876222746a0bacc36dd7e4bf9e673c85fb7ee0d12ed25bd32c43c19b'
@@ -61,7 +62,8 @@ async function createFixture(baseDirectory, scenario, registerCleanup) {
   const mysqlId = docker(['run', '--detach', '--name', mysqlName, ...labelArgs(labels('nacos-mysql')), '--network', networkName, '--network-alias', 'nacos-mysql', '--mount', `type=volume,src=${volumeName},dst=/var/lib/mysql`, '--mount', `type=bind,src=${schemaPath},dst=/docker-entrypoint-initdb.d/01-nacos-schema.sql,readonly`, '--env', `MYSQL_ROOT_PASSWORD=${rootPassword}`, '--env', 'MYSQL_DATABASE=nacos', '--env', 'MYSQL_USER=nacos', '--env', `MYSQL_PASSWORD=${nacosPassword}`, MYSQL_IMAGE]).stdout.trim()
   fixtureIdentity.containers.push({ objectId: mysqlId, names: [mysqlName], provider: 'nacos-mysql' })
   waitFor(() => docker(['exec', mysqlName, 'mysqladmin', 'ping', '-h', '127.0.0.1', '-u', 'root', `-p${rootPassword}`, '--silent'], { allowFailure: true, timeout: 10000 }).status === 0, `${scenario}-mysql-initial`)
-  const nacosId = docker(['run', '--detach', '--name', nacosName, ...labelArgs(labels('nacos')), '--network', networkName, '--network-alias', 'nacos', '--publish', '127.0.0.1::8848', '--env', 'MODE=standalone', '--env', 'PREFER_HOST_MODE=ip', '--env', 'SPRING_DATASOURCE_PLATFORM=mysql', '--env', `MYSQL_SERVICE_HOST=${mysqlName}`, '--env', 'MYSQL_SERVICE_PORT=3306', '--env', 'MYSQL_SERVICE_DB_NAME=nacos', '--env', 'MYSQL_SERVICE_USER=nacos', '--env', `MYSQL_SERVICE_PASSWORD=${nacosPassword}`, '--env', 'MYSQL_SERVICE_DB_PARAM=characterEncoding=utf8&connectTimeout=1000&socketTimeout=3000&autoReconnect=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC', '--env', 'NACOS_AUTH_ENABLE=true', '--env', `NACOS_AUTH_TOKEN=${authToken}`, '--env', 'NACOS_AUTH_IDENTITY_KEY=serverIdentity', '--env', `NACOS_AUTH_IDENTITY_VALUE=${token}`, '--env', 'JVM_XMS=256m', '--env', 'JVM_XMX=256m', '--env', 'JVM_XMN=128m', NACOS_IMAGE]).stdout.trim()
+  const nacosEnvironment = nacosContainerEnvironment(mysqlName, nacosPassword, authToken, token)
+  const nacosId = docker(['run', '--detach', '--name', nacosName, ...labelArgs(labels('nacos')), '--network', networkName, '--network-alias', 'nacos', '--publish', '127.0.0.1::8848', ...Object.entries(nacosEnvironment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), NACOS_IMAGE]).stdout.trim()
   fixtureIdentity.containers.push({ objectId: nacosId, names: [nacosName], provider: 'nacos' })
   const nacosPort = docker(['port', nacosName, '8848/tcp']).stdout.trim().match(/127\.0\.0\.1:(\d+)$/u)?.[1]
   assert.ok(nacosPort)
