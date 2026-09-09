@@ -405,22 +405,23 @@ test('planning requires complete SHARED V2 labels and reopens retired credential
 
 test('process-runtime key becomes Stack credential material with exact bytes and mode', async () => {
   const { stateRoot, providerSnapshots, dockerObjects } = fixture()
+  const stableSecret = Buffer.alloc(32, 7).toString('base64')
   const key = path.join(stateRoot, 'shared', 'fixture_machine', 'process-runtime', 'notification-delivery-payload.key')
   fs.mkdirSync(path.dirname(key), { recursive: true })
-  fs.writeFileSync(key, 'stable-secret', { mode: 0o600 })
+  fs.writeFileSync(key, stableSecret, { mode: 0o600 })
   const inventory = inventoryStateLayout({ stateRoot, dockerObjects })
   const plan = planStateLayoutMigration(inventory, { providerSnapshots })
   const staged = await stageStateLayoutMigration(plan, inventory, { identitySeed: seed, hostBinding })
   const target = path.join(staged.layout.stackRoot, 'credentials', 'process-runtime', 'notification-delivery-payload.key')
-  assert.equal(fs.readFileSync(target, 'utf8'), 'stable-secret')
+  assert.equal(fs.readFileSync(target, 'utf8'), stableSecret)
   assert.equal(fs.statSync(target).mode & 0o777, 0o600)
   assert.equal(fs.existsSync(path.join(staged.layout.stackRoot, 'providers', 'dev', 'process-runtime')), false)
   const mtlsBundle = path.join(staged.layout.stackRoot, 'credentials', 'test-mtls.json')
   writeAtomic(mtlsBundle, { ownerEnvironments: { 'notification-service': { OES_GRPC_TLS_CA_PATH: '/fixture/ca.pem' } } })
   const manifest = { profile: 'DEV', stackRoot: staged.layout.stackRoot, endpoints: [{ provider: 'mtls', source: 'RUN', ready: true, authority: 'filesystem:fixture', owners: ['notification-service'], credentialReference: { path: mtlsBundle } }] }
   const environment = trustedProcessEnvironment({ root: path.resolve(import.meta.dirname, '../../../..'), manifest, owner: 'notification-service', issuerPort: 12345 })
-  assert.equal(environment.NOTIFICATION_DELIVERY_PAYLOAD_KEY, 'stable-secret')
-  assert.equal(fs.readFileSync(target, 'utf8'), 'stable-secret')
+  assert.equal(environment.NOTIFICATION_DELIVERY_PAYLOAD_KEY, stableSecret)
+  assert.equal(fs.readFileSync(target, 'utf8'), stableSecret)
 })
 
 test('ordinary post-migration resolution reopens the preserved immutable devStackId', async () => {

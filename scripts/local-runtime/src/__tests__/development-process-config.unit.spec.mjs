@@ -9,6 +9,7 @@ import { downstreamEnvironment, gatewayReadinessEnvironment } from '../process-r
 import { trustedProcessEnvironment } from '../trusted-runtime-config.mjs'
 import {
   assertDevelopmentProcessEnvironment,
+  auditDevelopmentProcessEnvironmentInputs,
   auditDevelopmentProcessEnvironments,
   developmentProcessConfigEnvironment,
   developmentProcessConfigurationOwners
@@ -80,9 +81,11 @@ test('all 22 clean owner projections satisfy startup requirements and emit only 
   assert.match(serialized, /NOTIFICATION_DELIVERY_PAYLOAD_KEY/u)
   const siteSecret = report.owners.find(({ owner }) => owner === 'site-service').required.find(({ key }) => key === 'SITE_PREVIEW_TOKEN_SECRET')
   const notificationSecret = report.owners.find(({ owner }) => owner === 'notification-service').required.find(({ key }) => key === 'NOTIFICATION_DELIVERY_PAYLOAD_KEY')
+  const objectStoreSecret = report.owners.find(({ owner }) => owner === 'asset-service').required.find(({ key }) => key === 'ASSET_S3_SECRET_ACCESS_KEY')
   const assetInterval = report.owners.find(({ owner }) => owner === 'asset-service').required.find(({ key }) => key === 'ASSET_MEDIA_LIFECYCLE_INTERVAL_MS')
   assert.deepEqual(siteSecret, { key: 'SITE_PREVIEW_TOKEN_SECRET', source: 'DEV_GENERATED_SECRET', sensitive: true })
   assert.deepEqual(notificationSecret, { key: 'NOTIFICATION_DELIVERY_PAYLOAD_KEY', source: 'DEV_GENERATED_SECRET', sensitive: true })
+  assert.deepEqual(objectStoreSecret, { key: 'ASSET_S3_SECRET_ACCESS_KEY', source: 'PROVIDER_OBJECT_STORE', sensitive: true })
   assert.deepEqual(assetInterval, { key: 'ASSET_MEDIA_LIFECYCLE_INTERVAL_MS', source: 'DEV_DEFAULT', sensitive: false })
 })
 
@@ -133,6 +136,14 @@ test('pre-spawn audit fails closed for missing, illegal, and permission-drifted 
   delete missing.ASSET_MEDIA_LIFECYCLE_INTERVAL_MS
   assert.throws(() => assertDevelopmentProcessEnvironment('asset-service', missing, declarations), /^Error: DEVELOPMENT_PROCESS_CONFIG_MISSING owner=asset-service key=ASSET_MEDIA_LIFECYCLE_INTERVAL_MS$/u)
   assert.throws(() => assertDevelopmentProcessEnvironment('collaboration-service', { ...environments['collaboration-service'], COLLABORATION_OUTBOX_INTERVAL_MS: '99' }, declarations), /DEVELOPMENT_PROCESS_CONFIG_INVALID owner=collaboration-service key=COLLABORATION_OUTBOX_INTERVAL_MS/u)
+  const signerPending = structuredClone(environments)
+  delete signerPending['auth-service'].AUTH_EXECUTION_KMS_KEY_REF
+  delete signerPending['auth-service'].AUTH_EXECUTION_SIGNER_SOCKET_PATH
+  assert.equal(auditDevelopmentProcessEnvironmentInputs(signerPending, declarations).ownerCount, 22)
+  assert.throws(() => auditDevelopmentProcessEnvironments(signerPending, declarations), /DEVELOPMENT_PROCESS_CONFIG_MISSING owner=auth-service key=AUTH_EXECUTION_KMS_KEY_REF/u)
+  delete signerPending['auth-service'].AUTH_EXECUTION_WORKLOAD_POLICIES
+  assert.throws(() => auditDevelopmentProcessEnvironmentInputs(signerPending, declarations), /DEVELOPMENT_PROCESS_CONFIG_MISSING owner=auth-service key=AUTH_EXECUTION_WORKLOAD_POLICIES/u)
+  assert.throws(() => assertDevelopmentProcessEnvironment('asset-service', environments['asset-service'], declarations, owners, ['DATABASE_URL']), /DEVELOPMENT_PROCESS_CONFIG_DEFERRED_KEY_INVALID owner=asset-service key=DATABASE_URL/u)
   const secretFile = path.join(manifest.stackRoot, 'credentials', 'process-runtime', 'site-preview-token.key')
   fs.chmodSync(secretFile, 0o644)
   assert.throws(() => developmentProcessConfigEnvironment(manifest, 'site-service'), /DEVELOPMENT_PROCESS_SECRET_FILE_INVALID owner=site-service key=SITE_PREVIEW_TOKEN_SECRET/u)
@@ -140,4 +151,15 @@ test('pre-spawn audit fails closed for missing, illegal, and permission-drifted 
   const foreign = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-dev-secret-foreign-'))
   fs.symlinkSync(foreign, path.dirname(secretFile))
   assert.throws(() => developmentProcessConfigEnvironment(manifest, 'site-service'), /STATE_SYMLINK_FORBIDDEN/u)
+})
+
+test('notification DEV secret must decode to the exact 32-byte service invariant', () => {
+  const manifest = { profile: 'DEV', stackRoot: fs.mkdtempSync(path.join(os.tmpdir(), 'oes-dev-notification-secret-')) }
+  const directory = path.join(manifest.stackRoot, 'credentials', 'process-runtime')
+  fs.mkdirSync(directory, { recursive: true })
+  const file = path.join(directory, 'notification-delivery-payload.key')
+  fs.writeFileSync(file, 'legacy-invalid-key', { mode: 0o600 })
+  assert.throws(() => developmentProcessConfigEnvironment(manifest, 'notification-service'), /^Error: DEVELOPMENT_PROCESS_SECRET_VALUE_INVALID owner=notification-service key=NOTIFICATION_DELIVERY_PAYLOAD_KEY$/u)
+  fs.writeFileSync(file, Buffer.alloc(32, 7).toString('base64'), { mode: 0o600 })
+  assert.equal(Buffer.from(developmentProcessConfigEnvironment(manifest, 'notification-service').NOTIFICATION_DELIVERY_PAYLOAD_KEY, 'base64').length, 32)
 })

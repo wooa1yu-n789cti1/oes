@@ -98,6 +98,7 @@ for (const binding of ['AUTH_EXECUTION_SIGNER_SOCKET_PATH', 'AUTH_EXECUTION_KMS_
 const declarations = json('scripts/local-runtime/relationships.json')
 assert.deepEqual(developmentProcessConfigurationOwners(), Object.keys(declarations.owners).sort(), 'DEV process configuration contract must cover every declared owner')
 assert.ok(processRuntime.indexOf('auditDevelopmentProcessEnvironments(environments, declarations)') < processRuntime.indexOf("spawn('pnpm', ['--filter', owner, 'dev']"), 'all selected owner environments must be audited before service spawn')
+assert.ok(processRuntime.indexOf('auditDevelopmentProcessEnvironmentInputs(environments, declarations)') < processRuntime.indexOf('signer = await startProtectedSigner(root, manifest, signal)'), 'all non-runtime-derived owner inputs must be audited before protected signer startup')
 const developmentConfig = read('scripts/local-runtime/src/development-process-config.mjs')
 for (const key of ['ASSET_MEDIA_LIFECYCLE_INTERVAL_MS', 'ASSET_MEDIA_OUTBOX_INTERVAL_MS', 'COLLABORATION_OUTBOX_INTERVAL_MS', 'SITE_PREVIEW_TOKEN_SECRET']) assert.match(developmentConfig, new RegExp(key, 'u'), `DEV process configuration gap is not classified: ${key}`)
 assert.doesNotMatch(developmentConfig, /console\.|process\.env/u, 'DEV process configuration must not read ambient values or log secret-bearing environments')

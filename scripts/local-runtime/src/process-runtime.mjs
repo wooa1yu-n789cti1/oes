@@ -10,7 +10,7 @@ import { cleanupDockerResource, exactResourceToken, runtimeLabels } from './dock
 import { canonicalJson, sha256, writeAtomic } from './canonical.mjs'
 import { runChecked } from './process.mjs'
 import { trustedProcessEnvironment } from './trusted-runtime-config.mjs'
-import { auditDevelopmentProcessEnvironments } from './development-process-config.mjs'
+import { auditDevelopmentProcessEnvironmentInputs, auditDevelopmentProcessEnvironments } from './development-process-config.mjs'
 import { withExclusiveLock } from './locks.mjs'
 import { publishStackState } from './orchestrator.mjs'
 
@@ -218,10 +218,6 @@ export async function startDevelopmentProcesses(manifestPath, { root, selectorPa
   const children = []
   let signer = null
   try {
-    if (manifest.owners.includes('auth-service')) {
-      signer = await startProtectedSigner(root, manifest, signal)
-      children.push(...signer.children)
-    }
     if (signal?.aborted) throw signal.reason
     const started = await withExclusiveLock(path.join(manifest.stateRoot, 'locks', 'process-port-allocation.lock'), async () => {
       let lastError
@@ -249,9 +245,15 @@ export async function startDevelopmentProcesses(manifestPath, { root, selectorPa
               SERVICE_REGISTRY_IP: '127.0.0.1',
               SERVICE_REGISTRY_PORT: String(ports[owner]),
               ...(owner === 'api-gateway' ? { SERVICE_PORT: String(ports[owner]), ...gatewayReadinessEnvironment(ports, declarations) } : {}),
-              ...(owner === 'auth-service' ? { AUTH_HTTP_PORT: String(authHttpPort), ...signer.environment } : {})
+              ...(owner === 'auth-service' ? { AUTH_HTTP_PORT: String(authHttpPort) } : {})
             }]
           }))
+          auditDevelopmentProcessEnvironmentInputs(environments, declarations)
+          if (manifest.owners.includes('auth-service') && !signer) {
+            signer = await startProtectedSigner(root, manifest, signal)
+            children.push(...signer.children)
+          }
+          if (signer) Object.assign(environments['auth-service'], signer.environment)
           auditDevelopmentProcessEnvironments(environments, declarations)
           if (authHttpPort) {
             const authEnvironment = environmentForOwner(manifest, 'auth-service', resolveCredentialReference)

@@ -51,9 +51,18 @@ const NON_SECRET_DEFAULTS = Object.freeze({
 })
 
 const GENERATED_SECRETS = Object.freeze({
-  'notification-service': Object.freeze({ NOTIFICATION_DELIVERY_PAYLOAD_KEY: Object.freeze({ filename: 'notification-delivery-payload.key', minimumLength: 1 }) }),
+  'notification-service': Object.freeze({ NOTIFICATION_DELIVERY_PAYLOAD_KEY: Object.freeze({ filename: 'notification-delivery-payload.key', decodedLength: 32, encoding: 'base64' }) }),
   'site-service': Object.freeze({ SITE_PREVIEW_TOKEN_SECRET: Object.freeze({ filename: 'site-preview-token.key', minimumLength: 32 }) })
 })
+
+const RUNTIME_DERIVED_REQUIREMENTS = Object.freeze({
+  'auth-service': Object.freeze(['AUTH_EXECUTION_KMS_KEY_REF', 'AUTH_EXECUTION_SIGNER_SOCKET_PATH'])
+})
+
+const SENSITIVE_REQUIREMENT_KEYS = new Set([
+  'DATABASE_URL', 'ASSET_S3_ACCESS_KEY_ID', 'ASSET_S3_SECRET_ACCESS_KEY',
+  'REDIS_PASSWORD', 'NATS_PASSWORD'
+])
 
 const SENSITIVE_KEY = /(PASSWORD|SECRET|TOKEN|DATABASE_URL|PRIVATE_KEY|ACCESS_KEY_ID|KMS_KEY_REF)$/u
 const INTEGER_KEY = /(?:_PORT|_INTERVAL_MS)$/u
@@ -84,7 +93,9 @@ function reopenDevelopmentSecret(manifest, owner, key, specification) {
   const stat = fs.lstatSync(file)
   if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error(`DEVELOPMENT_PROCESS_SECRET_FILE_INVALID owner=${owner} key=${key}`)
   const value = fs.readFileSync(file, 'utf8')
-  if (value.length < specification.minimumLength || value.trim() !== value) throw new Error(`DEVELOPMENT_PROCESS_SECRET_VALUE_INVALID owner=${owner} key=${key}`)
+  const invalidLength = specification.minimumLength && value.length < specification.minimumLength
+  const invalidDecodedLength = specification.encoding === 'base64' && Buffer.from(value, 'base64').length !== specification.decodedLength
+  if (invalidLength || invalidDecodedLength || value.trim() !== value) throw new Error(`DEVELOPMENT_PROCESS_SECRET_VALUE_INVALID owner=${owner} key=${key}`)
   return value
 }
 
@@ -111,9 +122,13 @@ export function requiredDevelopmentProcessKeys(owner, declarations, selectedOwne
 }
 
 /** Validates one fully composed owner environment before the launcher spawns any business service. */
-export function assertDevelopmentProcessEnvironment(owner, environment, declarations, selectedOwners) {
+export function assertDevelopmentProcessEnvironment(owner, environment, declarations, selectedOwners, deferredKeys = []) {
   const required = requiredDevelopmentProcessKeys(owner, declarations, selectedOwners)
+  const permittedDeferred = new Set(RUNTIME_DERIVED_REQUIREMENTS[owner] || [])
+  for (const key of deferredKeys) if (!permittedDeferred.has(key)) throw new Error(`DEVELOPMENT_PROCESS_CONFIG_DEFERRED_KEY_INVALID owner=${owner} key=${key}`)
+  const deferred = new Set(deferredKeys)
   for (const key of required) {
+    if (deferred.has(key)) continue
     const value = environment[key]
     if (typeof value !== 'string' || !value.trim()) throw new Error(`DEVELOPMENT_PROCESS_CONFIG_MISSING owner=${owner} key=${key}`)
     if (INTEGER_KEY.test(key)) {
@@ -143,10 +158,17 @@ export function developmentProcessConfigurationAudit(declarations, selectedOwner
       owner,
       required: requiredDevelopmentProcessKeys(owner, declarations, selected).map((key) => {
         const source = configurationSource(owner, key, declarations)
-        return { key, source, sensitive: source === 'DEV_GENERATED_SECRET' || SENSITIVE_KEY.test(key) }
+        return { key, source, sensitive: source === 'DEV_GENERATED_SECRET' || SENSITIVE_REQUIREMENT_KEYS.has(key) || SENSITIVE_KEY.test(key) }
       })
     }))
   })
+}
+
+/** Rejects every non-runtime-derived owner configuration defect before any support process starts. */
+export function auditDevelopmentProcessEnvironmentInputs(environments, declarations) {
+  const selectedOwners = Object.keys(environments).sort()
+  for (const owner of selectedOwners) assertDevelopmentProcessEnvironment(owner, environments[owner], declarations, selectedOwners, RUNTIME_DERIVED_REQUIREMENTS[owner] || [])
+  return developmentProcessConfigurationAudit(declarations, selectedOwners)
 }
 
 /** Audits a complete selected DEV process set and returns only value-free configuration metadata. */
