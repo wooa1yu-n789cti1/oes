@@ -9,7 +9,7 @@ import {
   verifyCleanupProducesNoRepositoryDiff
 } from '../cleanup.ts'
 import { validateJsonSchema } from '../schema-validation.ts'
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
@@ -203,24 +203,34 @@ test('cleanup loader rejects a bound owner target replaced by a physical symlink
   const worktree = value.terminalDeliveries[0].resources.find((item) => item.kind === 'worktree')
   if (!worktree) throw new Error('worktree fixture absent')
   mkdirSync(join(worktree.path, '..'), { recursive: true })
-  symlinkSync(mkdtempSync(join(tmpdir(), 'oes-cleanup-non-owner-')), worktree.path)
-  assert.throws(() => trustedCleanupAuthorization(value), /OWNER_RESOURCE_PHYSICAL_PATH_ALIAS/)
+  const nonOwnerRoot = mkdtempSync(join(tmpdir(), 'oes-cleanup-non-owner-'))
+  try {
+    symlinkSync(nonOwnerRoot, worktree.path)
+    assert.throws(() => trustedCleanupAuthorization(value), /OWNER_RESOURCE_PHYSICAL_PATH_ALIAS/)
+  } finally {
+    rmSync(nonOwnerRoot, { recursive: true, force: true })
+  }
 
   const loaded = trustedCleanupAuthorization()
   const delivery = loaded.terminalDeliveries[0]
   const loadedWorktree = delivery.resources.find((item) => item.kind === 'worktree')
   if (!loadedWorktree) throw new Error('loaded worktree fixture absent')
   mkdirSync(join(loadedWorktree.path, '..'), { recursive: true })
-  symlinkSync(mkdtempSync(join(tmpdir(), 'oes-cleanup-late-alias-')), loadedWorktree.path)
-  assert.throws(
-    () =>
-      planChildSelfCleanup(
-        loaded,
-        delivery.ownerTaskId,
-        delivery.resources.map((resource) => observation(resource))
-      ),
-    /OWNER_RESOURCE_PHYSICAL_PATH_ALIAS/
-  )
+  const lateAliasRoot = mkdtempSync(join(tmpdir(), 'oes-cleanup-late-alias-'))
+  try {
+    symlinkSync(lateAliasRoot, loadedWorktree.path)
+    assert.throws(
+      () =>
+        planChildSelfCleanup(
+          loaded,
+          delivery.ownerTaskId,
+          delivery.resources.map((resource) => observation(resource))
+        ),
+      /OWNER_RESOURCE_PHYSICAL_PATH_ALIAS/
+    )
+  } finally {
+    rmSync(lateAliasRoot, { recursive: true, force: true })
+  }
 })
 
 test('cleanup result set seals the exact child-plus-CO absence and zero-diff proof', () => {

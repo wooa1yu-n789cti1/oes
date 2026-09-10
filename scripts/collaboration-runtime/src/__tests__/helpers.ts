@@ -1,6 +1,7 @@
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { after } from 'node:test'
 import { canonicalJson, objectFingerprint, sha256 } from '../canonical.ts'
 import type {
   RemoteActionAuthorization,
@@ -22,6 +23,20 @@ const cleanupTrustByAuthorization = new WeakMap<
   CoordinationCleanupAuthorization,
   RemoteTrustRoots
 >()
+const fixtureRoots = new Set<string>()
+
+/** Creates and registers one process-owned temporary fixture root for terminal cleanup. */
+function fixtureTempDir(prefix: string): string {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), prefix)))
+  fixtureRoots.add(root)
+  return root
+}
+
+after(() => {
+  for (const root of [...fixtureRoots].sort((left, right) => right.length - left.length))
+    rmSync(root, { recursive: true, force: true })
+  fixtureRoots.clear()
+})
 
 /** Returns the fixture trust context separately from the untrusted binding. */
 export function remoteTrust(binding: RemoteDriverBinding): RemoteTrustRoots {
@@ -39,8 +54,8 @@ export function cleanupTrust(value: CoordinationCleanupAuthorization): RemoteTru
 
 /** Reissues a fixture action authorization and seals the exact binding against it. */
 export function authorizeRemoteBinding(binding: RemoteDriverBinding): RemoteDriverBinding {
-  const authorizationRoot = mkdtempSync(join(tmpdir(), 'oes-remote-authorization-test-'))
-  const admissionRoot = mkdtempSync(join(tmpdir(), 'oes-remote-admission-test-'))
+  const authorizationRoot = fixtureTempDir('oes-remote-authorization-test-')
+  const admissionRoot = fixtureTempDir('oes-remote-admission-test-')
   if (binding.admission?.mode === 'serial-latest-main')
     binding.admission.lockPath = join(admissionRoot, 'latest-main.lock')
   const rootRecord: RemoteAuthorizationRoot = {
@@ -152,10 +167,8 @@ export function authorizeRemoteBinding(binding: RemoteDriverBinding): RemoteDriv
 
 /** Creates one valid V2 remote binding rooted in an owner-exclusive test clone. */
 export function remoteBinding(overrides: Partial<RemoteDriverBinding> = {}): RemoteDriverBinding {
-  const parent = join(process.cwd(), '.tmp-collaboration-runtime-tests')
-  mkdirSync(parent, { recursive: true })
-  const root = mkdtempSync(join(parent, 'owner-'))
-  const artifactRoot = mkdtempSync(join(parent, 'artifacts-'))
+  const root = fixtureTempDir('oes-remote-owner-test-')
+  const artifactRoot = fixtureTempDir('oes-remote-artifacts-test-')
   const base: RemoteDriverBinding = {
     schemaVersion: 1,
     kind: 'OES_REMOTE_DRIVER_BINDING',
@@ -232,7 +245,7 @@ export function remoteBinding(overrides: Partial<RemoteDriverBinding> = {}): Rem
 
 /** Creates one valid V2 two-DO terminal cleanup authorization. */
 export function cleanupAuthorization(): CoordinationCleanupAuthorization {
-  const fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), 'oes-cleanup-owner-resources-')))
+  const fixtureRoot = realpathSync(fixtureTempDir('oes-cleanup-owner-resources-'))
   const bindingReference = (
     key: string,
     ownerTaskId: string,
@@ -370,7 +383,7 @@ export function cleanupAuthorization(): CoordinationCleanupAuthorization {
 export function trustedCleanupAuthorization(
   value: CoordinationCleanupAuthorization = cleanupAuthorization()
 ): CoordinationCleanupAuthorization {
-  const authorizationRoot = mkdtempSync(join(tmpdir(), 'oes-cleanup-authorization-root-'))
+  const authorizationRoot = fixtureTempDir('oes-cleanup-authorization-root-')
   const rootPath = join(authorizationRoot, 'coordination-cleanup.json')
   const rootBytes = `${canonicalJson(value)}\n`
   writeFileSync(rootPath, rootBytes)
@@ -422,7 +435,7 @@ export function trustedChildCleanupAuthorization(
   value: CoordinationCleanupAuthorization = cleanupAuthorization(),
   mutateChild?: (child: CoordinationChildCleanupAuthorization) => void
 ): { root: CoordinationCleanupAuthorization; child: CoordinationChildCleanupAuthorization } {
-  const authorizationRoot = mkdtempSync(join(tmpdir(), 'oes-child-cleanup-authorization-root-'))
+  const authorizationRoot = fixtureTempDir('oes-child-cleanup-authorization-root-')
   const rootPath = join(authorizationRoot, 'coordination-cleanup.json')
   const rootBytes = `${canonicalJson(value)}\n`
   writeFileSync(rootPath, rootBytes)

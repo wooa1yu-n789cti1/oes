@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "../..",
+    "paths": {
+      "@oes/site-runtime-kit": ["../../site-runtime-kit/src/index.ts"]
+    }
+  }
+}

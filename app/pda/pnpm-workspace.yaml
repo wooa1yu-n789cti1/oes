@@ -1,2 +1,6 @@
 packages:
   - web
+
+strictDepBuilds: true
+allowBuilds:
+  esbuild: true
