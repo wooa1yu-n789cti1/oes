@@ -93,5 +93,6 @@ function optionalMetadata(
   propertyName: string
 ): Record<string, string> {
   const value = getGrpcMetadataValue(metadata, metadataKey)
+  if (propertyName === 'tracestate' && value === '') return {}
   return value === undefined ? {} : { [propertyName]: value }
 }

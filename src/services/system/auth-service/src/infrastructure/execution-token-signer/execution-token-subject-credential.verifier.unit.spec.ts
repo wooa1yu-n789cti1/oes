@@ -122,6 +122,8 @@ describe('ExecutionTokenSubjectCredentialVerifier', () => {
       sessionTerminal: 'WEB',
       sourceTokenId: 'subject-jti',
       sourceExpiresAt: 400,
+      actorWorkloadSpiffeId: WORKLOAD.spiffeId,
+      actorTargetAudience: TARGET,
       requestId: 'request-system-1',
       traceId: '4bf92f3577b34da6a3ce929d0e0e4736',
       spanId: '00f067aa0ba902b7',
@@ -151,6 +153,8 @@ describe('ExecutionTokenSubjectCredentialVerifier', () => {
       sessionTerminal: 'WEB',
       sourceTokenId: 'subject-jti',
       sourceExpiresAt: 400,
+      actorWorkloadSpiffeId: WORKLOAD.spiffeId,
+      actorTargetAudience: TARGET,
       actor: { sub: 'machine-mes', principal_type: 'MACHINE', scope_level: 'SYSTEM' }
     })
   })

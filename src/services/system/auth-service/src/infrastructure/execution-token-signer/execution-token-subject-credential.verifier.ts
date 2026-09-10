@@ -138,6 +138,8 @@ export class ExecutionTokenSubjectCredentialVerifier {
       sourceTokenId: claims.jti,
       sourceAudience: claims.aud,
       sourceExpiresAt: claims.exp as number,
+      actorWorkloadSpiffeId: workload.spiffeId,
+      actorTargetAudience: targetAudience,
       requestId: trustedCorrelation.requestId,
       traceId: trustedCorrelation.traceId,
       spanId: trustedCorrelation.spanId

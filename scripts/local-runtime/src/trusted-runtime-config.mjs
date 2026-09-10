@@ -83,6 +83,7 @@ export function trustedProcessEnvironment({ root, manifest, owner, issuerPort, s
   const boundAuth = bindHumanOboPolicies(auth, selectors)
   const issuer = `https://issuer.local.oes.internal:${issuerPort}`
   const common = {
+    AUTH_EXECUTION_WORKLOAD_POLICIES: JSON.stringify(boundAuth),
     AUTH_EXECUTION_ISSUER: issuer,
     NODE_EXTRA_CA_CERTS: environmentCaPath(manifest, owner),
     NODE_OPTIONS: `--require=${path.join(root, 'scripts/local/runtime-config/issuer-dns.cjs')}`,
@@ -93,7 +94,6 @@ export function trustedProcessEnvironment({ root, manifest, owner, issuerPort, s
       GATEWAY_TERMINAL_DEVICE_PEER_SPIFFE_ID: 'spiffe://local.oes.internal/ns/oes/sa/terminal-device-service'
     },
     'auth-service': {
-      AUTH_EXECUTION_WORKLOAD_POLICIES: JSON.stringify(boundAuth),
       AUTH_PERMISSION_WORKLOAD_ISSUANCE_POLICY_VERSION: WORKLOAD_POLICY_VERSION
     },
     'notification-service': {

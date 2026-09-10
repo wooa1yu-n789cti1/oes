@@ -155,6 +155,100 @@ describe('ExecutionTokenExchangeService', () => {
     )
   })
 
+  it('retains the verified originating actor policy while Auth issues the principal-decision bootstrap token', async () => {
+    const signer = new FakeExecutionTokenSigningPort()
+    const audit = { appendOboLink: jest.fn().mockResolvedValue(undefined) }
+    const collaborationSpiffeId = 'spiffe://local.oes/collaboration-service'
+    const authSpiffeId = 'spiffe://local.oes/auth-service'
+    const identityAudience = 'urn:oes:service:identity-service'
+    const permissionAudience = 'urn:oes:service:permission-service'
+    const service = new ExecutionTokenExchangeService(
+      new ExecutionTokenRegistry({
+        issuer: 'https://auth.local.oes.example',
+        workloadPolicies: [
+          {
+            spiffeId: collaborationSpiffeId,
+            audiences: [identityAudience],
+            humanObo: {
+              selfAudience: 'urn:oes:service:collaboration-service',
+              actorMachinePrincipalId: 'machine-collaboration',
+              actorBindingId: 'binding-machine-collaboration',
+              actorBindingVersion: '1',
+              targetAudiences: [identityAudience]
+            }
+          },
+          { spiffeId: authSpiffeId, audiences: [permissionAudience] }
+        ]
+      }),
+      signer,
+      () => 1_700_000_300,
+      audit
+    )
+
+    const result = await service.exchange({
+      targetAudience: permissionAudience,
+      requestedPermissionCodes: ['permission.internal.principal_authorization.resolve'],
+      workloadIdentity: {
+        spiffeId: authSpiffeId,
+        certificateThumbprint: 'D'.repeat(43)
+      },
+      execution: {
+        subject: 'account-1',
+        principalType: 'HUMAN',
+        scopeLevel: 'TENANT',
+        tenantId: 'tenant-1',
+        sessionId: 'session-1',
+        sessionTerminal: 'WEB',
+        actor: {
+          sub: 'machine-collaboration',
+          principal_type: 'MACHINE',
+          scope_level: 'SYSTEM'
+        },
+        sourceTokenId: 'collaboration-subject-jti',
+        sourceAudience: 'urn:oes:service:collaboration-service',
+        sourceExpiresAt: 1_700_000_420,
+        actorWorkloadSpiffeId: collaborationSpiffeId,
+        actorTargetAudience: identityAudience,
+        requestId: 'request-nested-bootstrap-1',
+        traceId: TRACE_ID,
+        spanId: SPAN_ID
+      },
+      authorizationDecision: {
+        allowed: true,
+        kind: 'INTERNAL',
+        grantedPermissionCodes: ['permission.internal.principal_authorization.resolve'],
+        deniedPermissionCodes: [],
+        principalType: 'HUMAN',
+        principalId: 'account-1',
+        scopeLevel: 'TENANT',
+        tenantId: 'tenant-1',
+        targetAudience: permissionAudience,
+        originalWorkloadSpiffeId: authSpiffeId,
+        requestedPermissionCodes: ['permission.internal.principal_authorization.resolve'],
+        decisionReference: 'decision-nested-bootstrap-1',
+        authzVersion: 'authz-nested-bootstrap-1'
+      }
+    })
+
+    const claims = JSON.parse(
+      Buffer.from(result.accessToken.split('.')[1], 'base64url').toString('utf8')
+    )
+    expect(claims).toMatchObject({
+      client_id: authSpiffeId,
+      aud: permissionAudience,
+      sub: 'account-1',
+      act: { sub: 'machine-collaboration', principal_type: 'MACHINE', scope_level: 'SYSTEM' },
+      exp: 1_700_000_420
+    })
+    expect(audit.appendOboLink).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceTokenId: 'collaboration-subject-jti',
+        workload: authSpiffeId,
+        audience: permissionAudience
+      })
+    )
+  })
+
   it.each([
     [
       'TENANT without tenant',

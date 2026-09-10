@@ -12,7 +12,17 @@ test('collaboration Task P1 smoke flow drives all frozen commands and verifies a
     login: async (request) => {
       calls.push(['login', request])
       return {
-        accountOptions: [{ accountId: seed.operatorAccountId }],
+        accountOptions: [
+          {
+            accountId: '00000000-0000-4000-8000-000000000902',
+            scopeLevel: 'SYSTEM',
+          },
+          {
+            accountId: seed.operatorAccountId,
+            scopeLevel: 'TENANT',
+            tenantId: seed.tenantId,
+          },
+        ],
         operator: { userId: seed.operatorUserId },
       }
     },
@@ -134,6 +144,7 @@ test('collaboration Task P1 smoke flow drives all frozen commands and verifies a
   assert.equal(result.assignedTask.taskId, seed.expectedAssignedTaskId)
   assert.equal(result.assignedTask.assigneeAccountId, seed.assigneeAccountId)
   assert.equal(result.assignedTask.createdByMeContainsAssigned, true)
+  assert.equal(calls[1][1].accountId, seed.operatorAccountId)
   assert.deepEqual(result.assignedTask.auditActions, ['TASK_CREATED'])
   assert.deepEqual(result.assignedTask.eventTypes, ['TaskCreated', 'TaskAssigned'])
   assert.deepEqual(result.auditActions, [

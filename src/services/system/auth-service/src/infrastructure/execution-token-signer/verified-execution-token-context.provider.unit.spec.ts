@@ -103,6 +103,48 @@ describe('VerifiedExecutionTokenContextProvider', () => {
     expect(result.execution).not.toHaveProperty('permissionCodes')
   })
 
+  it('treats a transport-injected empty optional tracestate as absent', async () => {
+    const sourceCredentialVerifier = {
+      verify: jest.fn().mockResolvedValue({
+        subject: 'account-1',
+        principalType: 'HUMAN',
+        scopeLevel: 'TENANT',
+        tenantId: 'tenant-1',
+        sessionId: 'session-1',
+        sessionTerminal: 'WEB'
+      })
+    }
+    const permissionDecisionResolver = {
+      resolve: jest.fn().mockResolvedValue({ allowed: true })
+    }
+    const provider = new VerifiedExecutionTokenContextProvider(
+      workload,
+      sourceCredentialVerifier,
+      permissionDecisionResolver
+    )
+    const metadata = carrierMetadata()
+    metadata.set('tracestate', '')
+
+    await provider.resolve(
+      { metadata },
+      {
+        targetAudience: 'urn:oes:service:permission-service',
+        requestedPermissionCodes: ['AUTH.READ']
+      }
+    )
+
+    expect(sourceCredentialVerifier.verify).toHaveBeenCalledWith(
+      'verified.session.access-token',
+      WORKLOAD_IDENTITY,
+      {
+        requestId: 'request-1',
+        targetAudience: 'urn:oes:service:permission-service',
+        requestedPermissionCodes: ['AUTH.READ'],
+        traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'
+      }
+    )
+  })
+
   it('fails closed without carrier authority even when legacy operator facts mirror the request', async () => {
     const metadata = carrierMetadata()
     metadata.remove('authorization')

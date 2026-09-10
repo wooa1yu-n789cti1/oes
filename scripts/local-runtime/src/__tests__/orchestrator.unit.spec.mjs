@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { resolveCredentialReference } from '../credentials.mjs'
-import { logicalResourceIdentity } from '../docker-driver.mjs'
+import { logicalResourceIdentity, REDIS_RUNTIME_ACL_COMMAND_RULES } from '../docker-driver.mjs'
 import { environmentForOwner, resolveResources } from '../manifest.mjs'
 import { fingerprint, sha256, writeAtomic } from '../canonical.mjs'
 import { cleanupRunPrivateFiles, reconcileRuntime, startRuntime, withRuntime } from '../orchestrator.mjs'
@@ -409,6 +409,13 @@ test('production-shaped Redis ACL allocation reopens for DEV, LOCAL_INTEGRATION 
     assert.equal(fs.existsSync(stackLeasePath(fixture.transaction.stackRoot, fixture.transaction.taskKey, fixture.transaction.runId)), false)
     assert.deepEqual(fs.readdirSync(path.join(stateRoot, 'semaphores', 'queue')), [])
   })
+})
+
+test('runtime Redis ACL grants bounded transaction completion without admin or dangerous categories', () => {
+  assert.deepEqual(REDIS_RUNTIME_ACL_COMMAND_RULES, [
+    '+@read', '+@write', '+ping', '+publish', '+subscribe', '+unsubscribe',
+    '-@admin', '-@dangerous', '+multi', '+exec', '+discard'
+  ])
 })
 
 test('transaction recovery reopens and rejects a sealed source replacement before cleanup', async () => {
