@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import { Prisma, PrismaClient } from '../../prisma/generated/prisma'
 import {
   PermissionServiceSeed,
@@ -8,6 +7,7 @@ import {
   validatePermissionServiceSeed
 } from './permission-service-seed'
 import { PolicyTemplateInstanceMapper } from '../infrastructure/mappers/policy-template-instance.mapper'
+import { deterministicSeedId } from './deterministic-seed-id'
 import { syncBuiltInRoleInstanceBaselines } from './role-instance-foundation'
 
 export type PermissionServiceSeedWriterOptions = {
@@ -23,17 +23,7 @@ export type PermissionServiceSeedExecutionPlan = {
 
 /** Builds a stable RFC-4122-shaped identifier for one canonical permission code. */
 export function deterministicPermissionSeedId(code: string): string {
-  const source = createHash('sha256').update(`oes.permission.seed:${code}`).digest('hex').slice(0, 32)
-  const versioned = `${source.slice(0, 12)}5${source.slice(13)}`
-  const variant = ((Number.parseInt(versioned[16], 16) & 0x3) | 0x8).toString(16)
-  const normalized = `${versioned.slice(0, 16)}${variant}${versioned.slice(17)}`
-  return [
-    normalized.slice(0, 8),
-    normalized.slice(8, 12),
-    normalized.slice(12, 16),
-    normalized.slice(16, 20),
-    normalized.slice(20)
-  ].join('-')
+  return deterministicSeedId(`oes.permission.seed:${code}`)
 }
 
 /** parsePermissionServiceSeedArgs keeps seed writes opt-in through an explicit --apply flag. */

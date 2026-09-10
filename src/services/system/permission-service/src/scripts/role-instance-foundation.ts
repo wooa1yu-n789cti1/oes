@@ -4,8 +4,28 @@ import {
   buildNavigationFoundationVisibilitySeeds
 } from './navigation-foundation'
 import { BUILT_IN_ROLE_TEMPLATES } from './role-foundation'
+import { deterministicSeedId } from './deterministic-seed-id'
 
 type PermissionCodeMap = ReadonlyMap<string, string>
+
+export type RoleInstanceBaselineRollbackResult = {
+  deletedCount: number
+  deletedRolePermissionIds: string[]
+  identityMismatchIds: string[]
+  missingPermissionCodes: string[]
+  mode: 'apply' | 'dry-run'
+  requestedPermissionCodes: string[]
+  seedOwnedMatchCount: number
+  unmatchedPermissionCodes: string[]
+}
+
+/** Builds a stable identifier that marks a role-permission edge created by managed baseline backfill. */
+export function deterministicRoleInstanceBaselinePermissionId(
+  roleId: string,
+  permissionId: string
+): string {
+  return deterministicSeedId(`oes.role-instance-baseline:${roleId}:${permissionId}`)
+}
 
 // Ensures built-in role instances keep the minimum baseline permissions and navigation defined by their managed templates.
 export async function syncBuiltInRoleInstanceBaselines(
@@ -75,6 +95,7 @@ export async function syncBuiltInRoleInstanceBaselines(
         baselinePermissionIds
           .filter((permissionId) => !existingPairs.has(`${roleId}:${permissionId}`))
           .map((permissionId) => ({
+            id: deterministicRoleInstanceBaselinePermissionId(roleId, permissionId),
             roleId,
             permissionId
           }))
@@ -95,6 +116,113 @@ export async function syncBuiltInRoleInstanceBaselines(
   }
 
   return createdCount
+}
+
+/** Removes only baseline role-permission edges whose deterministic ids prove seed ownership. */
+export async function rollbackBuiltInRoleInstanceBaselinePermissions(
+  prisma: Pick<PrismaClient, 'permission' | 'role' | 'rolePermission'>,
+  permissionCodes: readonly string[],
+  apply = false
+): Promise<RoleInstanceBaselineRollbackResult> {
+  const requestedPermissionCodes = [...new Set(permissionCodes)].sort()
+  const permissions =
+    requestedPermissionCodes.length === 0
+      ? []
+      : await prisma.permission.findMany({
+          where: { code: { in: requestedPermissionCodes } },
+          select: { code: true, id: true }
+        })
+  const permissionByCode = new Map(permissions.map((item) => [item.code, item.id]))
+  const expectedEdges: Array<{ id: string; permissionId: string; roleId: string }> = []
+  const matchedPermissionCodes = new Set<string>()
+
+  for (const template of BUILT_IN_ROLE_TEMPLATES) {
+    const matchedCodes = template.permissionCodes.filter(
+      (code) => requestedPermissionCodes.includes(code) && permissionByCode.has(code)
+    )
+    matchedCodes.forEach((code) => matchedPermissionCodes.add(code))
+    const permissionIds = matchedCodes
+      .map((code) => permissionByCode.get(code))
+      .filter((permissionId): permissionId is string => Boolean(permissionId))
+
+    if (permissionIds.length === 0) {
+      continue
+    }
+
+    const managedInstances = await prisma.role.findMany({
+      where: {
+        kind: { in: [RoleKind.SYSTEM_INSTANCE, RoleKind.TENANT_INSTANCE] },
+        OR: [{ code: template.code }, { templateRoleId: template.id }]
+      },
+      select: { id: true }
+    })
+
+    for (const role of managedInstances) {
+      for (const permissionId of permissionIds) {
+        expectedEdges.push({
+          id: deterministicRoleInstanceBaselinePermissionId(role.id, permissionId),
+          permissionId,
+          roleId: role.id
+        })
+      }
+    }
+  }
+
+  const existingEdges =
+    expectedEdges.length === 0
+      ? []
+      : await prisma.rolePermission.findMany({
+          where: { id: { in: expectedEdges.map((edge) => edge.id) } },
+          select: { id: true, permissionId: true, roleId: true }
+        })
+  const expectedById = new Map(expectedEdges.map((edge) => [edge.id, edge]))
+  const seedOwnedEdges = existingEdges.filter((edge) => {
+    const expected = expectedById.get(edge.id)
+    return expected?.permissionId === edge.permissionId && expected.roleId === edge.roleId
+  })
+  const identityMismatchIds = existingEdges
+    .filter((edge) => !seedOwnedEdges.some((seedOwnedEdge) => seedOwnedEdge.id === edge.id))
+    .map((edge) => edge.id)
+    .sort()
+  const missingPermissionCodes = requestedPermissionCodes.filter(
+    (code) => !permissionByCode.has(code)
+  )
+  const unmatchedPermissionCodes = requestedPermissionCodes.filter(
+    (code) => permissionByCode.has(code) && !matchedPermissionCodes.has(code)
+  )
+
+  let deletedCount = 0
+  if (
+    apply &&
+    (missingPermissionCodes.length > 0 ||
+      unmatchedPermissionCodes.length > 0 ||
+      identityMismatchIds.length > 0)
+  ) {
+    throw new Error('Role-instance baseline rollback identity checks failed')
+  }
+  if (apply && seedOwnedEdges.length > 0) {
+    const deleted = await prisma.rolePermission.deleteMany({
+      where: {
+        OR: seedOwnedEdges.map((edge) => ({
+          id: edge.id,
+          permissionId: edge.permissionId,
+          roleId: edge.roleId
+        }))
+      }
+    })
+    deletedCount = deleted.count
+  }
+
+  return {
+    deletedCount,
+    deletedRolePermissionIds: seedOwnedEdges.map((edge) => edge.id).sort(),
+    identityMismatchIds,
+    missingPermissionCodes,
+    mode: apply ? 'apply' : 'dry-run',
+    requestedPermissionCodes,
+    seedOwnedMatchCount: seedOwnedEdges.length,
+    unmatchedPermissionCodes
+  }
 }
 
 /** backfillRoleNavigationVisibility adds template baseline navigation entries without deleting tenant custom entries. */
