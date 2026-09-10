@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { execFileSync } from 'node:child_process'
 
@@ -68,6 +68,27 @@ export function normalizePath(value) {
 
 /** Recursively lists files while excluding generated and dependency directories. */
 export function walkFiles(root, current = root, result = []) {
+  if (resolve(current) === resolve(root) && result.length === 0) {
+    try {
+      const repositoryRoot = execFileSync('git', ['-C', root, 'rev-parse', '--show-toplevel'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore']
+      }).trim()
+      if (realpathSync(repositoryRoot) === realpathSync(root)) {
+        return execFileSync(
+          'git',
+          ['-C', root, 'ls-files', '--cached', '--others', '--exclude-standard', '-z'],
+          { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
+        )
+          .split('\0')
+          .filter(Boolean)
+          .map(normalizePath)
+          .filter((path) => existsSync(resolve(root, path)) && statSync(resolve(root, path)).isFile())
+      }
+    } catch {
+      // Non-repository fixture roots retain the filesystem traversal used by unit tests.
+    }
+  }
   for (const entry of readdirSync(current, { withFileTypes: true })) {
     if (entry.isDirectory() && ignoredDirectoryNames.has(entry.name)) continue
     const absolute = join(current, entry.name)

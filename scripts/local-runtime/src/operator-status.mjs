@@ -7,7 +7,20 @@ import { reopenStackLeases } from './stack-lease.mjs'
 const REQUIRED = ['oes.runtime.version', 'oes.runtime.stack-key', 'oes.runtime.dev-stack-id', 'oes.runtime.scope', 'oes.runtime.pool', 'oes.runtime.provider']
 
 /** Returns the stable exact object identity used for manifest/observation joins. */
-function objectIdentity(value) { return value.objectId || value.Id || value.id }
+function objectIdentity(value) {
+  const direct = value.objectId || value.Id || value.id
+  if (direct) return direct
+  const type = value.type || value.Type
+  if (type !== 'volume') return undefined
+  return fingerprint({ name: value.Name, createdAt: value.CreatedAt, driver: value.Driver, scope: value.Scope, labels: value.Labels || {} })
+}
+
+/** Matches direct Docker resources and exact volumes nested under their owning container resource. */
+function matchesManifestResource(resource, objectId, provider, scope, pool) {
+  const identityMatches = resource.objectId === objectId || resource.volume?.objectId === objectId
+  const resourcePool = resource.pool || resource.labels?.['oes.runtime.pool'] || resource.volume?.labels?.['oes.runtime.pool']
+  return identityMatches && resource.provider === provider && resource.scope === scope && (!pool || !resourcePool || resourcePool === pool)
+}
 
 /** Reopens reference-only manifest inputs before using them as lifecycle authority. */
 export function reopenOperatorAuthority({ stackReferences = [], runManifestPaths = [], leasePaths = [] }) {
@@ -47,7 +60,7 @@ export function classifyRuntimeObject(observed, authority) {
   if (labels['com.docker.compose.project'] || (labels['oes.runtime.version'] && labels['oes.runtime.version'] !== '2')) return { status: 'LEGACY', objectId, reason: 'LEGACY_LABEL_EVIDENCE' }
   if (!objectId) return { status: 'UNKNOWN', objectId, reason: 'INCOMPLETE_V2_IDENTITY' }
   if (!labels['oes.runtime.stack-key'] && REQUIRED.filter((key) => key !== 'oes.runtime.stack-key').every((key) => labels[key]) && labels['oes.runtime.scope'] === 'SHARED') {
-    const matches = authority.stacks.flatMap((stack) => stack.resources.filter((resource) => resource.objectId === objectId && resource.scope === 'SHARED' && resource.labelCompatibility === 'PRE_STACK_KEY_V2_EXACT' && resource.provider === labels['oes.runtime.provider'] && (resource.pool || resource.labels?.['oes.runtime.pool']) === labels['oes.runtime.pool'] && stack.devStackId === labels['oes.runtime.dev-stack-id']).map((resource) => ({ stack, resource })))
+    const matches = authority.stacks.flatMap((stack) => stack.resources.filter((resource) => matchesManifestResource(resource, objectId, labels['oes.runtime.provider'], 'SHARED', labels['oes.runtime.pool']) && resource.labelCompatibility === 'PRE_STACK_KEY_V2_EXACT' && stack.devStackId === labels['oes.runtime.dev-stack-id']).map((resource) => ({ stack, resource })))
     if (matches.length === 1) return { status: 'SHARED', objectId, stackKey: matches[0].stack.stackKey, provider: matches[0].resource.provider, manifestFingerprint: matches[0].stack.stackManifestFingerprint, activeLeaseCount: authority.leases.filter((lease) => lease.stackKey === matches[0].stack.stackKey).length, labelCompatibility: 'PRE_STACK_KEY_V2_EXACT' }
   }
   if (REQUIRED.some((key) => !labels[key])) return { status: 'UNKNOWN', objectId, reason: 'INCOMPLETE_V2_IDENTITY' }
@@ -57,7 +70,7 @@ export function classifyRuntimeObject(observed, authority) {
   const provider = labels['oes.runtime.provider']
   if (scope === 'SHARED') {
     const stack = authority.stacks.find((candidate) => candidate.stackKey === stackKey && candidate.devStackId === devStackId)
-    const resource = stack?.resources.find((candidate) => candidate.objectId === objectId && candidate.provider === provider && candidate.scope === 'SHARED' && (candidate.pool || candidate.labels?.['oes.runtime.pool'] || labels['oes.runtime.pool']) === labels['oes.runtime.pool'])
+    const resource = stack?.resources.find((candidate) => matchesManifestResource(candidate, objectId, provider, 'SHARED', labels['oes.runtime.pool']))
     return resource ? { status: 'SHARED', objectId, stackKey, provider, manifestFingerprint: stack.stackManifestFingerprint, activeLeaseCount: authority.leases.filter((lease) => lease.stackKey === stackKey && lease.devStackId === devStackId).length } : { status: 'UNKNOWN', objectId, reason: 'SHARED_MANIFEST_JOIN_MISSING' }
   }
   if (!['RUN', 'CI'].includes(scope)) return { status: 'UNKNOWN', objectId, reason: 'SCOPE_INVALID' }
@@ -65,7 +78,7 @@ export function classifyRuntimeObject(observed, authority) {
   const runId = labels['oes.runtime.run-id']
   if (!taskKey || !runId) return { status: 'UNKNOWN', objectId, reason: 'RUN_LABEL_IDENTITY_MISSING' }
   const run = authority.runs.find((candidate) => candidate.stackKey === stackKey && candidate.devStackId === devStackId && candidate.taskKey === taskKey && candidate.runId === runId)
-  const resource = run?.resources.find((candidate) => candidate.objectId === objectId && candidate.provider === provider && candidate.scope === scope)
+  const resource = run?.resources.find((candidate) => matchesManifestResource(candidate, objectId, provider, scope, labels['oes.runtime.pool']))
   const lease = authority.leases.find((candidate) => candidate.stackKey === stackKey && candidate.taskKey === taskKey && candidate.runId === runId)
   if (!run || !resource) return { status: 'UNKNOWN', objectId, reason: 'RUN_MANIFEST_JOIN_MISSING' }
   if (scope === 'CI' && (!labels['oes.runtime.ci-job-fingerprint'] || labels['oes.runtime.ci-job-fingerprint'] !== run.jobFingerprint)) return { status: 'UNKNOWN', objectId, reason: 'CI_IDENTITY_JOIN_MISSING' }

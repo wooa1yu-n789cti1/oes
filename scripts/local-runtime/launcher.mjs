@@ -195,7 +195,7 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (subcommand === 'status') {
     const manifest = reopenManifest(path.resolve(options.manifest || ''))
-    emit({ status: manifest.lifecycle, profile: manifest.profile, stackKey: manifest.stackKey, taskKey: manifest.taskKey, runId: manifest.runId, devStackId: manifest.devStackId, manifestFingerprint: manifest.manifestFingerprint, providers: manifest.endpoints.map((binding) => { const endpoint = resolveEndpoint(manifest, binding.provider); return { provider: endpoint.provider, source: binding.source, authority: endpoint.authority, ready: endpoint.ready } }) })
+    emit({ status: manifest.lifecycle, profile: manifest.profile, stackKey: manifest.stackKey, taskKey: manifest.taskKey, runId: manifest.runId, devStackId: manifest.devStackId, manifestFingerprint: manifest.manifestFingerprint, providers: manifest.endpoints.map((binding) => { const endpoint = resolveEndpoint(manifest, binding); return { provider: endpoint.provider, source: binding.source, authority: endpoint.authority, ready: endpoint.ready } }) })
     return
   }
   if (subcommand === 'state-inventory') {

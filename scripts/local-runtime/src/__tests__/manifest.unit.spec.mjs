@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process'
 import test from 'node:test'
 import { fingerprint, writeAtomic } from '../canonical.mjs'
 import { writeCredentialBundle, resolveCredentialReference } from '../credentials.mjs'
-import { environmentForOwner, publishManifest, publishStackManifest, reopenCurrentStackManifest, reopenManifest } from '../manifest.mjs'
+import { environmentForOwner, publishManifest, publishStackManifest, reopenCurrentStackManifest, reopenManifest, resolveEndpoint } from '../manifest.mjs'
 import { publishStackState } from '../orchestrator.mjs'
 import { reopenStackLease, stackLeasePath } from '../stack-lease.mjs'
 
@@ -25,6 +25,25 @@ test('manifest publication is readiness-gated, atomic and value-free', () => {
   assert.equal(reopened.resources.length, 0)
   assert.equal(reopened.endpoints[0].authority, undefined)
   assert.throws(() => environmentForOwner(reopened, 'owner-b', resolveCredentialReference), /MANIFEST_OWNER_UNDECLARED/)
+})
+
+test('exact same-provider bindings retain distinct host process authority and owner environment', () => {
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-runtime-manifest-process-bindings-'))
+  const stackKey = 'oes-local-0123456789abcdef'
+  const stackRoot = path.join(stateRoot, 'stacks', stackKey)
+  const directory = path.join(stackRoot, 'runs', 'task_processes', 'run_processes')
+  const stack = publishStackManifest(stackRoot, { lifecycle: 'REGISTERED', stackKey, devStackId: 'machine_a', resources: [], endpoints: [], leases: [] })
+  const endpoints = [
+    { provider: 'host-process', authority: 'pid:101:tcp:41001', ready: true, owners: ['owner-a', 'owner-b'], environment: { AUTH_SERVICE_PORT: '41001' } },
+    { provider: 'host-process', authority: 'pid:102:tcp:41002', ready: true, owners: ['owner-a'], environment: { IDENTITY_SERVICE_PORT: '41002' } }
+  ]
+  const published = publishManifest(directory, { lifecycle: 'REGISTERED', profile: 'DEV', stateRoot, stackRoot, runDirectory: directory, stackKey, devStackId: 'machine_a', taskKey: 'task_processes', runId: 'run_processes', owners: ['owner-a', 'owner-b'], resources: [], stackManifestReference: stack.reference, endpoints })
+  const reopened = reopenManifest(published.file)
+
+  assert.equal(resolveEndpoint(reopened, reopened.endpoints[1]).authority, 'pid:102:tcp:41002')
+  assert.deepEqual(environmentForOwner(reopened, 'owner-a', () => ({})), { NODE_ENV: 'development', OES_TASK_KEY: 'task_processes', OES_RUN_ID: 'run_processes', OES_DEV_STACK_ID: 'machine_a', OES_STACK_KEY: stackKey, AUTH_SERVICE_PORT: '41001', IDENTITY_SERVICE_PORT: '41002' })
+  assert.deepEqual(environmentForOwner(reopened, 'owner-b', () => ({})), { NODE_ENV: 'development', OES_TASK_KEY: 'task_processes', OES_RUN_ID: 'run_processes', OES_DEV_STACK_ID: 'machine_a', OES_STACK_KEY: stackKey, AUTH_SERVICE_PORT: '41001' })
+  assert.throws(() => resolveEndpoint(reopened, { ...reopened.endpoints[0] }), /MANIFEST_ENDPOINT_BINDING_FOREIGN/)
 })
 
 test('concurrent Stack publishers allocate distinct immutable generations', async () => {

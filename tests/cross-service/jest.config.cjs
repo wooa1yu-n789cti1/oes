@@ -5,6 +5,8 @@ module.exports = {
   testEnvironment: 'node',
   setupFiles: ['reflect-metadata'],
   testMatch: ['<rootDir>/tests/cross-service/**/*.journey.spec.ts'],
+  // Keep repository-local scratch and ignored reference projects out of Jest's Haste map.
+  modulePathIgnorePatterns: ['<rootDir>/(?:\\.tmp[^/]*|app/demo)(?:/|$)'],
   testTimeout: 300_000,
   transform: {
     '^.+\\.ts$': [

@@ -122,14 +122,15 @@ export function reopenManifest(file, expected = {}) {
   return value
 }
 
-/** Resolves one endpoint from Run truth plus its exact referenced Stack generation. */
-export function resolveEndpoint(manifest, provider) {
-  const binding = manifest.endpoints.find((endpoint) => endpoint.provider === provider)
+/** Resolves one named or exact endpoint binding from Run truth plus its referenced Stack generation. */
+export function resolveEndpoint(manifest, selector) {
+  const binding = typeof selector === 'string' ? manifest.endpoints.find((endpoint) => endpoint.provider === selector) : selector
   if (!binding) return undefined
+  if (typeof selector !== 'string' && !manifest.endpoints.includes(binding)) throw new Error('MANIFEST_ENDPOINT_BINDING_FOREIGN')
   if (binding.source !== 'STACK') return binding
   const stack = reopenStackManifest(manifest.stackManifestReference, { stackKey: manifest.stackKey, devStackId: manifest.devStackId })
-  const shared = stack.endpoints.find((endpoint) => endpoint.provider === provider && (!binding.pool || endpoint.pool === binding.pool))
-  if (!shared) throw new Error(`STACK_ENDPOINT_REFERENCE_MISSING provider=${provider}`)
+  const shared = stack.endpoints.find((endpoint) => endpoint.provider === binding.provider && (!binding.pool || endpoint.pool === binding.pool))
+  if (!shared) throw new Error(`STACK_ENDPOINT_REFERENCE_MISSING provider=${binding.provider}`)
   return { ...shared, owners: binding.owners, credentialReference: binding.credentialReference || shared.credentialReference, source: 'STACK' }
 }
 
@@ -145,7 +146,7 @@ export function environmentForOwner(manifest, owner, credentialResolver) {
   if (!manifest.owners.includes(owner)) throw new Error(`MANIFEST_OWNER_UNDECLARED owner=${owner}`)
   const output = { NODE_ENV: manifest.profile === 'DEV' ? 'development' : 'test', OES_TASK_KEY: manifest.taskKey, OES_RUN_ID: manifest.runId, OES_DEV_STACK_ID: manifest.devStackId, OES_STACK_KEY: manifest.stackKey }
   for (const binding of manifest.endpoints.filter((entry) => entry.owners.includes(owner))) {
-    const endpoint = resolveEndpoint(manifest, binding.provider)
+    const endpoint = resolveEndpoint(manifest, binding)
     Object.assign(output, endpoint.environment)
     if (endpoint.credentialReference) Object.assign(output, credentialResolver(endpoint.credentialReference, owner))
   }

@@ -2,18 +2,38 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import test from 'node:test'
+import test, { afterEach } from 'node:test'
 import { fingerprint, writeAtomic } from '../canonical.mjs'
 import { publishManifest, publishStackManifest } from '../manifest.mjs'
 import { applyOperatorReconciliation, classifyRuntimeObject, planOperatorReconciliation, reopenOperatorAuthority } from '../operator-status.mjs'
 import { stackLeasePath } from '../stack-lease.mjs'
 
+const fixtureRoots = []
+
+/** Creates one operator-status fixture root owned by the current test process. */
+function fixtureRoot(prefix) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
+  fixtureRoots.push(root)
+  return root
+}
+
+afterEach(() => {
+  for (const root of fixtureRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true })
+})
+
 function labels(scope, extra = {}) {
   return { 'oes.runtime.version': '2', 'oes.runtime.stack-key': 'oes-local-0123456789abcdef', 'oes.runtime.dev-stack-id': 'fixture_machine', 'oes.runtime.scope': scope, 'oes.runtime.pool': scope === 'CI' ? 'ci' : 'test', 'oes.runtime.provider': 'postgres', ...extra }
 }
 
+/** Creates one Docker volume observation and its canonical V2 identity. */
+function volumeObservation(scope, name, extraLabels = {}) {
+  const observed = { type: 'volume', Name: name, CreatedAt: '2026-09-11T00:00:00Z', Driver: 'local', Scope: 'local', Labels: labels(scope, extraLabels) }
+  const objectId = fingerprint({ name: observed.Name, createdAt: observed.CreatedAt, driver: observed.Driver, scope: observed.Scope, labels: observed.Labels })
+  return { observed, objectId }
+}
+
 test('operator projection distinguishes SHARED, RUN, CI, LEGACY, and UNKNOWN through exact joins', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-operator-status-'))
+  const root = fixtureRoot('oes-operator-status-')
   const stackKey = 'oes-local-0123456789abcdef'
   const stackRoot = path.join(root, 'stacks', stackKey)
   const stack = publishStackManifest(stackRoot, { lifecycle: 'REGISTERED', stackKey, devStackId: 'fixture_machine', resources: [{ provider: 'postgres', kind: 'container', scope: 'SHARED', pool: 'test', objectId: 'shared-object' }, { provider: 'postgres', kind: 'container', scope: 'SHARED', pool: 'test', objectId: 'pre-stack-key-object', labelCompatibility: 'PRE_STACK_KEY_V2_EXACT' }], endpoints: [{ provider: 'postgres', pool: 'test', ready: true, authority: 'docker:shared-object:5432/tcp', environment: {} }], leases: [] })
@@ -59,7 +79,7 @@ test('operator projection distinguishes SHARED, RUN, CI, LEGACY, and UNKNOWN thr
 })
 
 test('operator authority rejects a self-fingerprinted lease for a foreign developer Stack', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-operator-foreign-lease-'))
+  const root = fixtureRoot('oes-operator-foreign-lease-')
   const stackKey = 'oes-local-0123456789abcdef'
   const stackRoot = path.join(root, 'stacks', stackKey)
   const stack = publishStackManifest(stackRoot, { lifecycle: 'REGISTERED', stackKey, devStackId: 'fixture_machine', resources: [], endpoints: [], leases: [] })
@@ -67,4 +87,44 @@ test('operator authority rejects a self-fingerprinted lease for a foreign develo
   const leasePath = stackLeasePath(stackRoot, 'task_a', 'run_a')
   writeAtomic(leasePath, { ...leaseRaw, leaseFingerprint: fingerprint(leaseRaw) })
   assert.throws(() => reopenOperatorAuthority({ stackReferences: [stack.reference], leasePaths: [leasePath] }), /STACK_LEASE_IDENTITY_MISMATCH key=devStackId/)
+})
+
+test('operator projection classifies raw Docker volumes through exact nested manifest identity', () => {
+  const root = fixtureRoot('oes-operator-volume-')
+  const stackKey = 'oes-local-0123456789abcdef'
+  const stackRoot = path.join(root, 'stacks', stackKey)
+  const shared = volumeObservation('SHARED', 'shared-postgres-data')
+  const run = volumeObservation('RUN', 'run-postgres-data', { 'oes.runtime.task-key': 'task_volume', 'oes.runtime.run-id': 'run_volume' })
+  const stack = publishStackManifest(stackRoot, {
+    lifecycle: 'REGISTERED',
+    stackKey,
+    devStackId: 'fixture_machine',
+    resources: [{ provider: 'postgres', kind: 'container', scope: 'SHARED', pool: 'test', objectId: 'shared-container', volume: { objectId: shared.objectId, labels: shared.observed.Labels } }],
+    endpoints: [],
+    leases: []
+  })
+  const runRoot = path.join(stackRoot, 'runs', 'task_volume', 'run_volume')
+  const published = publishManifest(runRoot, {
+    lifecycle: 'REGISTERED',
+    profile: 'LOCAL_INTEGRATION',
+    stateRoot: root,
+    stackRoot,
+    runDirectory: runRoot,
+    stackKey,
+    devStackId: 'fixture_machine',
+    taskKey: 'task_volume',
+    runId: 'run_volume',
+    owners: [],
+    resources: [{ provider: 'postgres', kind: 'container', scope: 'RUN', pool: 'test', objectId: 'run-container', volume: { objectId: run.objectId, labels: run.observed.Labels } }],
+    endpoints: [],
+    stackManifestReference: stack.reference
+  })
+  const cleanupRaw = { schemaVersion: 3, kind: 'OES_RUNTIME_RUN_CLEANUP', stackKey, taskKey: 'task_volume', runId: 'run_volume', sourceFingerprint: published.manifest.manifestFingerprint, cleanupResults: [], sharedLeaseCount: 0, result: 'RECONCILED' }
+  writeAtomic(path.join(runRoot, 'cleanup.json'), { ...cleanupRaw, recordFingerprint: fingerprint(cleanupRaw) })
+  const authority = reopenOperatorAuthority({ stackReferences: [stack.reference], runManifestPaths: [published.file], leasePaths: [] })
+
+  assert.equal(classifyRuntimeObject(shared.observed, authority).status, 'SHARED')
+  assert.equal(classifyRuntimeObject(run.observed, authority).status, 'RUN')
+  assert.equal(planOperatorReconciliation([run.observed], authority)[0].action, 'RECONCILE_EXACT_MANIFEST_RESOURCE')
+  assert.equal(classifyRuntimeObject({ ...shared.observed, CreatedAt: '2026-09-11T00:00:01Z' }, authority).status, 'UNKNOWN')
 })

@@ -6,8 +6,10 @@ import {
   integrationOwnersForTests,
   isWorkspacePackage,
   packageScriptsForKind,
-  parseNameStatus
+  parseNameStatus,
+  walkFiles
 } from './test-infrastructure.mjs'
+import { execFileSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -40,6 +42,21 @@ test('discovers every canonical taxonomy suffix exactly once', () => {
     integration: 1,
     journey: 2
   })
+})
+
+test('repository inventory excludes ignored local fixtures and retains untracked delivery files', () => {
+  const root = mkdtempSync(join(tmpdir(), 'oes-repository-inventory-'))
+  execFileSync('git', ['init', '--quiet'], { cwd: root })
+  mkdirSync(join(root, 'app/demo'), { recursive: true })
+  mkdirSync(join(root, 'packages/example/src'), { recursive: true })
+  writeFileSync(join(root, '.gitignore'), 'app/demo/\n')
+  writeFileSync(join(root, 'app/demo/foreign.test.ts'), 'foreign\n')
+  writeFileSync(join(root, 'packages/example/src/new.unit.spec.ts'), 'owned\n')
+
+  const files = walkFiles(root)
+
+  assert.equal(files.includes('app/demo/foreign.test.ts'), false)
+  assert.equal(files.includes('packages/example/src/new.unit.spec.ts'), true)
 })
 
 test('each Journey resolves exactly one declared runtime family and all consumer owners', () => {

@@ -3,7 +3,9 @@ import path from 'node:path'
 import { fingerprint, randomSecret, sha256, writeAtomic } from './canonical.mjs'
 import { writeCredentialBundle, writeMigratorCredentialBundle } from './credentials.mjs'
 import { withExclusiveLock } from './locks.mjs'
+import { reopenCurrentStackManifest } from './manifest.mjs'
 import { runChecked } from './process.mjs'
+import { reopenStackLeases } from './stack-lease.mjs'
 
 const IMAGES = Object.freeze({
   postgres: 'postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685',
@@ -81,6 +83,56 @@ function inspectContainer(name) {
 /** Reopens one Docker volume and returns its exact inspection value. */
 function inspectVolume(name) {
   return JSON.parse(runChecked('docker', ['volume', 'inspect', name], { timeout: 20000 }).stdout)[0]
+}
+
+/** Recognizes an exact Docker absence without treating daemon or permission failures as missing state. */
+export function isMissingDockerObject(error, kind) {
+  const pattern = kind === 'container'
+    ? /No such container:/iu
+    : kind === 'volume'
+      ? /(?:No such volume:|: no such volume(?:\s|$))/iu
+      : null
+  return error?.status === 1 && Boolean(pattern?.test(error.stderr || ''))
+}
+
+/** Permits automatic physical recovery only for the disposable shared TEST provider pool. */
+export function canRecoverMissingSharedTestContainer(context, error) {
+  return context.profile === 'LOCAL_INTEGRATION' && context.pool === 'test' && isMissingDockerObject(error, 'container')
+}
+
+const SHARED_CONTAINER_IDENTITY_KEYS = Object.freeze(['cleanup', 'kind', 'labels', 'name', 'objectId', 'provider', 'publishedPorts', 'scope', 'volume'])
+const MANAGED_VOLUME_IDENTITY_KEYS = Object.freeze(['createdAt', 'driver', 'labels', 'name', 'objectId', 'scope'])
+
+/** Projects one Stack container resource onto the exact provider identity persisted beside it. */
+function stackContainerIdentity(resource) {
+  return Object.fromEntries(SHARED_CONTAINER_IDENTITY_KEYS.map((key) => [key, resource[key]]))
+}
+
+/** Requires one provider identity to be canonical and byte-equivalent in meaning to current sealed Stack authority. */
+export function validateSharedContainerAuthority(context, provider, identity, stackManifest, { ports, volumeTarget }) {
+  const name = sharedResourceName(context.devStackId, context.pool, provider)
+  const labels = runtimeLabels(context, 'SHARED', provider)
+  const identityKeys = identity && typeof identity === 'object' && !Array.isArray(identity) ? Object.keys(identity).sort() : []
+  if (fingerprint(identityKeys) !== fingerprint([...SHARED_CONTAINER_IDENTITY_KEYS].sort())) throw new Error(`SHARED_CONTAINER_IDENTITY_SHAPE_INVALID provider=${provider}`)
+  if (identity.provider !== provider || identity.scope !== 'SHARED' || identity.kind !== 'container' || identity.cleanup !== 'PRESERVE_SHARED' || identity.name !== name) throw new Error(`SHARED_CONTAINER_IDENTITY_INVALID provider=${provider}`)
+  if (fingerprint(identity.labels) !== fingerprint(labels)) throw new Error(`SHARED_CONTAINER_LABELS_INVALID provider=${provider}`)
+  if (!/^[a-f0-9]{64}$/u.test(identity.objectId || '')) throw new Error(`SHARED_CONTAINER_OBJECT_ID_INVALID provider=${provider}`)
+  const expectedPortKeys = [...new Set(ports.map(String))].sort()
+  const publishedPortKeys = identity.publishedPorts && typeof identity.publishedPorts === 'object' && !Array.isArray(identity.publishedPorts) ? Object.keys(identity.publishedPorts).sort() : []
+  if (fingerprint(publishedPortKeys) !== fingerprint(expectedPortKeys) || Object.values(identity.publishedPorts || {}).some((port) => !Number.isInteger(port) || port < 1 || port > 65535)) throw new Error(`SHARED_CONTAINER_PORTS_INVALID provider=${provider}`)
+  if (volumeTarget) {
+    const volume = identity.volume
+    const volumeKeys = volume && typeof volume === 'object' && !Array.isArray(volume) ? Object.keys(volume).sort() : []
+    if (fingerprint(volumeKeys) !== fingerprint([...MANAGED_VOLUME_IDENTITY_KEYS].sort()) || volume.name !== `${name}-data` || !/^[a-f0-9]{64}$/u.test(volume.objectId || '') || typeof volume.createdAt !== 'string' || !volume.createdAt || volume.driver !== 'local' || volume.scope !== 'local' || fingerprint(volume.labels) !== fingerprint(labels)) throw new Error(`SHARED_CONTAINER_VOLUME_IDENTITY_INVALID provider=${provider}`)
+  } else if (identity.volume !== null) {
+    throw new Error(`SHARED_CONTAINER_VOLUME_UNEXPECTED provider=${provider}`)
+  }
+  if (!stackManifest || stackManifest.lifecycle !== 'REGISTERED' || stackManifest.stackKey !== context.stackKey || stackManifest.devStackId !== context.devStackId) throw new Error(`SHARED_CONTAINER_STACK_IDENTITY_INVALID provider=${provider}`)
+  const matches = (stackManifest.resources || []).filter((resource) => resource.provider === provider && resource.pool === context.pool && resource.scope === 'SHARED' && resource.kind === 'container')
+  if (matches.length !== 1) throw new Error(`SHARED_CONTAINER_STACK_AUTHORITY_INVALID provider=${provider} count=${matches.length}`)
+  const authoritative = stackContainerIdentity(matches[0])
+  if (fingerprint(authoritative) !== fingerprint(identity)) throw new Error(`SHARED_CONTAINER_STACK_AUTHORITY_MISMATCH provider=${provider}`)
+  return authoritative
 }
 
 /** Fingerprints the immutable identity fields available for a Docker local volume. */
@@ -165,11 +217,13 @@ function sharedContainerArgs({ name, resourceLabels, image, ports, command, envi
   return args
 }
 
-/** Requires a reopened resource to retain its sealed Docker identity and labels. */
-export function assertDockerIdentity(resource) {
-  const observed = inspectContainer(resource.name)
+/** Reopens a container by sealed object ID and requires its canonical name and complete runtime labels to remain exact. */
+export function assertDockerIdentity(resource, inspect = inspectContainer) {
+  const observed = inspect(resource.objectId)
   if (observed.Id !== resource.objectId) throw new Error(`RESOURCE_OBJECT_ID_MISMATCH name=${resource.name}`)
-  for (const [key, value] of Object.entries(resource.labels)) if (observed.Config.Labels?.[key] !== value) throw new Error(`RESOURCE_LABEL_MISMATCH name=${resource.name} label=${key}`)
+  if (observed.Name !== `/${resource.name}`) throw new Error(`RESOURCE_NAME_MISMATCH name=${resource.name}`)
+  const observedRuntimeLabels = Object.fromEntries(Object.entries(observed.Config?.Labels || {}).filter(([key]) => key.startsWith('oes.runtime.')))
+  if (fingerprint(observedRuntimeLabels) !== fingerprint(resource.labels)) throw new Error(`RESOURCE_LABEL_MISMATCH name=${resource.name}`)
   return observed
 }
 
@@ -180,8 +234,42 @@ async function ensureSharedContainer({ context, provider, image, targetPort, tar
   const identityPath = path.join(providerDirectory, 'identity.json')
   const ports = targetPorts || [targetPort]
   if (fs.existsSync(identityPath)) {
-    const expected = JSON.parse(fs.readFileSync(identityPath, 'utf8'))
-    const observed = assertDockerIdentity(expected)
+    const identity = JSON.parse(fs.readFileSync(identityPath, 'utf8'))
+    const { manifest: currentStackManifest } = reopenCurrentStackManifest(context.stackRoot)
+    const expected = validateSharedContainerAuthority(context, provider, identity, currentStackManifest, { ports, volumeTarget })
+    let observed
+    try {
+      observed = assertDockerIdentity(expected)
+    } catch (error) {
+      if (!canRecoverMissingSharedTestContainer(context, error)) throw error
+      const foreignLeases = reopenStackLeases(context.stackRoot, { stackKey: context.stackKey, devStackId: context.devStackId })
+        .filter((lease) => lease.taskKey !== context.taskKey || lease.runId !== context.runId)
+      if (foreignLeases.length) throw new Error(`SHARED_TEST_PROVIDER_MISSING_WITH_ACTIVE_LEASES provider=${provider} count=${foreignLeases.length}`)
+      let volume = expected.volume || null
+      let volumeRecreated = false
+      if (volume) {
+        try {
+          assertManagedVolumeIdentity(volume)
+        } catch (volumeError) {
+          if (!isMissingDockerObject(volumeError, 'volume')) throw volumeError
+          volume = createManagedVolume(volume.name, volume.labels)
+          volumeRecreated = true
+        }
+      }
+      const args = sharedContainerArgs({ name, resourceLabels: expected.labels, image, ports, command, environment, volume, volumeTarget, mounts, tmpfs, network })
+      try {
+        docker(args, { timeout: 180000 })
+      } catch (replacementError) {
+        if (volumeRecreated) deleteManagedVolume(volume)
+        throw replacementError
+      }
+      const replacement = inspectContainer(name)
+      const resource = { ...expected, objectId: replacement.Id, volume, publishedPorts: publishedPorts(name, ports) }
+      writeAtomic(identityPath, resource)
+      const recovery = { schemaVersion: 2, kind: 'OES_SHARED_TEST_PROVIDER_ABSENCE_RECOVERY', provider, name, previousObjectId: expected.objectId, replacementObjectId: resource.objectId, volumeDisposition: volumeRecreated ? 'RECREATED_ABSENT' : volume ? 'REUSED_EXACT' : 'NOT_APPLICABLE' }
+      writeAtomic(path.join(providerDirectory, 'last-absence-recovery.json'), { ...recovery, recordFingerprint: fingerprint(recovery) })
+      return { resource, created: false, absenceRecovered: true, providerDirectory }
+    }
     const wasStopped = !observed.State.Running
     if (!observed.State.Running) {
       try {
