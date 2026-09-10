@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { verifySystemAdminSeedRuntimeBinding } from '../local-runtime/src/bootstrap.mjs'
@@ -30,11 +31,7 @@ const DATABASE_TARGETS = {
   }
 }
 
-const SERVICE_ORDER = [
-  'identity-service',
-  'auth-service',
-  'permission-service'
-]
+const SERVICE_ORDER = ['identity-service', 'auth-service', 'permission-service']
 
 export const SYSTEM_ADMIN_SEED = {
   identity: {
@@ -55,7 +52,7 @@ export const SYSTEM_ADMIN_SEED = {
     roleCode: 'system.admin',
     roleKind: 'SYSTEM_INSTANCE',
     roleScopeKey: '__SYSTEM__',
-    accountType: 'USER',
+    principalType: 'HUMAN',
     scopeLevel: 'SYSTEM',
     tenantId: null
   }
@@ -76,16 +73,19 @@ export function parseSystemAdminSeedArgs(args) {
 export function buildSystemAdminSeedConfig(env = process.env) {
   const manifestPath = env.OES_RUNTIME_MANIFEST?.trim()
   const serializedBinding = env.OES_SYSTEM_ADMIN_SEED_BINDING?.trim()
-  if (Boolean(manifestPath) !== Boolean(serializedBinding)) throw new Error('SYSTEM_ADMIN_SEED_MANIFEST_BINDING_REQUIRED')
+  if (Boolean(manifestPath) !== Boolean(serializedBinding))
+    throw new Error('SYSTEM_ADMIN_SEED_MANIFEST_BINDING_REQUIRED')
   const runtime = manifestPath
     ? verifySystemAdminSeedRuntimeBinding(manifestPath, serializedBinding, env)
     : null
-  const databaseUrls = runtime?.databaseUrls || Object.fromEntries(
-    Object.entries(DATABASE_TARGETS).map(([key, target]) => [
-      key,
-      target.envKeys.map((envKey) => env[envKey]).find(Boolean) ?? DEFAULT_DATABASE_URLS[key]
-    ])
-  )
+  const databaseUrls =
+    runtime?.databaseUrls ||
+    Object.fromEntries(
+      Object.entries(DATABASE_TARGETS).map(([key, target]) => [
+        key,
+        target.envKeys.map((envKey) => env[envKey]).find(Boolean) ?? DEFAULT_DATABASE_URLS[key]
+      ])
+    )
 
   return {
     databaseUrls,
@@ -126,7 +126,13 @@ export function buildSystemAdminSeedExecutionPlan(config, options) {
       ])
     ),
     seed: {
-      identity: config.seed.identity,
+      identity: {
+        accountScopeLevel: config.seed.identity.accountScopeLevel,
+        accountContextKey: config.seed.identity.accountContextKey,
+        accountTenantId: null,
+        accountEnabled: true,
+        loginIdentifierConfigured: Boolean(config.seed.identity.email)
+      },
       auth: config.seed.auth,
       permission: config.seed.permission
     }
@@ -134,7 +140,7 @@ export function buildSystemAdminSeedExecutionPlan(config, options) {
 }
 
 /** validateAppliedSystemAdminSeed reads the four service stores and reports whether the seed is consistent. */
-export async function validateAppliedSystemAdminSeed(clients, config) {
+export async function validateAppliedSystemAdminSeed(clients, config, now = new Date()) {
   const errors = []
   const state = {
     identity: {},
@@ -153,13 +159,11 @@ export async function validateAppliedSystemAdminSeed(clients, config) {
   } else {
     state.identity = {
       userId: user.id,
-      username: user.username,
-      email: user.email,
       isActive: user.isActive
     }
 
     if (user.username !== config.seed.identity.username) {
-      errors.push(`identity-service: expected username ${config.seed.identity.username}`)
+      errors.push('identity-service: system admin username does not match configured value')
     }
     if (!user.isActive) {
       errors.push('identity-service: expected User.isActive true')
@@ -195,7 +199,9 @@ export async function validateAppliedSystemAdminSeed(clients, config) {
       errors.push('identity-service: expected system UserAccount.tenantId null')
     }
     if (account.displayName !== config.seed.identity.accountDisplayName) {
-      errors.push(`identity-service: expected account displayName ${config.seed.identity.accountDisplayName}`)
+      errors.push(
+        `identity-service: expected account displayName ${config.seed.identity.accountDisplayName}`
+      )
     }
     if (!account.isEnable) {
       errors.push('identity-service: expected UserAccount.isEnable true')
@@ -253,44 +259,86 @@ export async function validateAppliedSystemAdminSeed(clients, config) {
 
   if (!role) {
     errors.push('permission-service: missing system.admin Role')
-  } else if (!role.isEnabled) {
-    errors.push('permission-service: expected system.admin Role.isEnabled true')
+  } else {
+    if (!role.isEnabled) {
+      errors.push('permission-service: expected system.admin Role.isEnabled true')
+    }
+    if (role.tenantId !== null) {
+      errors.push('permission-service: expected system.admin Role.tenantId null')
+    }
   }
 
-  const accountRole =
+  const bindings =
     account &&
     role &&
-    (await clients.permission.accountRole.findUnique({
+    (await clients.permission.principalRoleBinding.findMany({
       where: {
-        accountId_roleId: {
-          accountId: account.id,
-          roleId: role.id
-        }
-      }
+        principalId: account.id,
+        roleId: role.id
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }]
     }))
 
-  if (!accountRole) {
-    errors.push('permission-service: missing sysadmin AccountRole(system.admin)')
-  } else {
+  if (bindings) {
+    const classified = classifySystemAdminPermissionBindings(
+      bindings,
+      config.seed.permission,
+      account.id,
+      role.id,
+      now
+    )
     state.permission = {
-      accountRoleId: accountRole.id,
       roleId: role.id,
       roleCode: role.code,
-      accountId: accountRole.accountId,
-      accountType: accountRole.accountType,
-      scopeLevel: accountRole.scopeLevel,
-      tenantId: accountRole.tenantId
+      principalRoleBindingId: classified.activeCanonical[0]?.id ?? null,
+      candidateBindingCount: bindings.length,
+      activeBindingCount: classified.activeCanonical.length,
+      activeDriftCount: classified.activeDrift.length,
+      revokedBindingCount: classified.revokedCanonical.length,
+      expiredBindingCount: classified.expiredCanonical.length,
+      futureBindingCount: classified.futureCanonical.length
     }
 
-    if (accountRole.accountType !== config.seed.permission.accountType) {
-      errors.push(`permission-service: expected AccountRole.accountType ${config.seed.permission.accountType}`)
+    if (classified.activeDrift.length > 0) {
+      errors.push(
+        `permission-service: ${classified.activeDrift.length} active system.admin PrincipalRoleBinding coordinate drift`
+      )
     }
-    if (accountRole.scopeLevel !== config.seed.permission.scopeLevel) {
-      errors.push(`permission-service: expected AccountRole.scopeLevel ${config.seed.permission.scopeLevel}`)
+    if (classified.activeCanonical.length > 1) {
+      errors.push(
+        `permission-service: duplicate active sysadmin PrincipalRoleBinding(system.admin), count=${classified.activeCanonical.length}`
+      )
     }
-    if (accountRole.tenantId !== null) {
-      errors.push('permission-service: expected AccountRole.tenantId null')
+    if (classified.activeCanonical.length === 0) {
+      if (bindings.length === 0) {
+        errors.push(
+          'permission-service: missing active sysadmin PrincipalRoleBinding(system.admin)'
+        )
+      } else {
+        if (classified.revokedCanonical.length > 0) {
+          errors.push('permission-service: sysadmin PrincipalRoleBinding(system.admin) is revoked')
+        }
+        if (classified.expiredCanonical.length > 0) {
+          errors.push('permission-service: sysadmin PrincipalRoleBinding(system.admin) is expired')
+        }
+        if (classified.futureCanonical.length > 0) {
+          errors.push(
+            'permission-service: sysadmin PrincipalRoleBinding(system.admin) is not yet effective'
+          )
+        }
+        if (
+          classified.revokedCanonical.length === 0 &&
+          classified.expiredCanonical.length === 0 &&
+          classified.futureCanonical.length === 0
+        ) {
+          errors.push(
+            'permission-service: missing active sysadmin PrincipalRoleBinding(system.admin)'
+          )
+        }
+      }
     }
+  } else {
+    errors.push('permission-service: missing active sysadmin PrincipalRoleBinding(system.admin)')
   }
 
   return {
@@ -317,7 +365,8 @@ export function validateSystemAdminSeedConfig(config) {
       errors.push(`${target.label} DATABASE_URL must target localhost, got ${parsed.hostname}`)
     }
 
-    const expectedDatabase = config.runtimeBinding?.targets?.[key]?.database ?? target.expectedDatabase
+    const expectedDatabase =
+      config.runtimeBinding?.targets?.[key]?.database ?? target.expectedDatabase
     if (parsed.database !== expectedDatabase) {
       errors.push(
         `${target.label} DATABASE_URL must target database ${expectedDatabase}, got ${parsed.database || '(empty)'}`
@@ -329,10 +378,14 @@ export function validateSystemAdminSeedConfig(config) {
       errors.push(`${target.label} DATABASE_URL must use runtime owner ${runtimeTarget.runtime}`)
     }
     if (runtimeTarget && (parsed.port || '5432') !== config.runtimeBinding.postgres.port) {
-      errors.push(`${target.label} DATABASE_URL port must match manifest port ${config.runtimeBinding.postgres.port}`)
+      errors.push(
+        `${target.label} DATABASE_URL port must match manifest port ${config.runtimeBinding.postgres.port}`
+      )
     }
     if (runtimeTarget && parsed.hostname !== config.runtimeBinding.postgres.host) {
-      errors.push(`${target.label} DATABASE_URL host must match manifest host ${config.runtimeBinding.postgres.host}`)
+      errors.push(
+        `${target.label} DATABASE_URL host must match manifest host ${config.runtimeBinding.postgres.host}`
+      )
     }
   }
 
@@ -344,13 +397,20 @@ export function validateSystemAdminSeedConfig(config) {
 }
 
 /** applySystemAdminSeed performs the bounded upserts through each service-owned Prisma client. */
-export async function applySystemAdminSeed(clients, config) {
+export async function applySystemAdminSeed(
+  clients,
+  config,
+  now = new Date(),
+  currentTime = () => new Date()
+) {
   const identity = await upsertSystemAdminIdentity(clients.identity, config.seed)
   const auth = await upsertSystemAdminAuthLoginMethod(clients.auth, config.seed, identity.userId)
   const permission = await upsertSystemAdminPermissionBinding(
     clients.permission,
     config.seed,
-    identity.accountId
+    identity.accountId,
+    now,
+    currentTime
   )
 
   return {
@@ -362,9 +422,15 @@ export async function applySystemAdminSeed(clients, config) {
 
 /** createSystemAdminSeedClients loads the service-generated Prisma clients with isolated datasource URLs. */
 export function createSystemAdminSeedClients(config) {
-  const { PrismaClient: IdentityPrismaClient } = require('../../src/services/system/identity-service/prisma/generated/prisma')
-  const { PrismaClient: AuthPrismaClient } = require('../../src/services/system/auth-service/prisma/generated/prisma')
-  const { PrismaClient: PermissionPrismaClient } = require('../../src/services/system/permission-service/prisma/generated/prisma')
+  const {
+    PrismaClient: IdentityPrismaClient
+  } = require('../../src/services/system/identity-service/prisma/generated/prisma')
+  const {
+    PrismaClient: AuthPrismaClient
+  } = require('../../src/services/system/auth-service/prisma/generated/prisma')
+  const {
+    PrismaClient: PermissionPrismaClient
+  } = require('../../src/services/system/permission-service/prisma/generated/prisma')
 
   return {
     identity: new IdentityPrismaClient({
@@ -475,8 +541,14 @@ async function upsertSystemAdminAuthLoginMethod(authClient, seed, userId) {
   }
 }
 
-/** upsertSystemAdminPermissionBinding binds the system account to the protected system.admin instance role. */
-async function upsertSystemAdminPermissionBinding(permissionClient, seed, accountId) {
+/** upsertSystemAdminPermissionBinding creates one immutable active HUMAN binding and reuses it on retries. */
+async function upsertSystemAdminPermissionBinding(
+  permissionClient,
+  seed,
+  accountId,
+  now,
+  currentTime
+) {
   const role = await permissionClient.role.findUnique({
     where: {
       scopeKey_kind_code: {
@@ -492,40 +564,140 @@ async function upsertSystemAdminPermissionBinding(permissionClient, seed, accoun
       `Missing permission role ${seed.permission.roleCode}; run pnpm backend:foundation:sync first.`
     )
   }
+  if (!role.isEnabled || role.tenantId !== null) {
+    throw new Error('SYSTEM_ADMIN_SEED_ROLE_STATE_INVALID')
+  }
 
   const where = {
-    accountId_roleId: {
-      accountId,
+    principalId: accountId,
+    roleId: role.id
+  }
+  const existing = await permissionClient.principalRoleBinding.findMany({
+    where,
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }]
+  })
+  const classified = classifySystemAdminPermissionBindings(
+    existing,
+    seed.permission,
+    accountId,
+    role.id,
+    now
+  )
+  assertSystemAdminBindingCanConverge(classified)
+
+  if (classified.activeCanonical.length === 1) {
+    return {
+      operation: 'unchanged',
+      principalRoleBindingId: classified.activeCanonical[0].id,
+      roleCode: seed.permission.roleCode,
       roleId: role.id
     }
   }
-  const existingAccountRole = await permissionClient.accountRole.findUnique({ where })
-  const accountRole = await permissionClient.accountRole.upsert({
-    where,
-    create: {
-      accountType: seed.permission.accountType,
-      accountId,
-      roleId: role.id,
-      tenantId: seed.permission.tenantId,
-      scopeLevel: seed.permission.scopeLevel,
-      effectiveAt: null,
-      expiresAt: null
-    },
-    update: {
-      accountType: seed.permission.accountType,
-      tenantId: seed.permission.tenantId,
-      scopeLevel: seed.permission.scopeLevel,
-      effectiveAt: null,
-      expiresAt: null
+
+  let binding
+  let operation = existing.length > 0 ? 'recreated' : 'created'
+  try {
+    binding = await permissionClient.principalRoleBinding.create({
+      data: {
+        principalType: seed.permission.principalType,
+        principalId: accountId,
+        roleId: role.id,
+        tenantId: seed.permission.tenantId,
+        scopeLevel: seed.permission.scopeLevel,
+        effectiveAt: now,
+        expiresAt: null,
+        revokedAt: null,
+        createdByOperatorId: 'system-admin-seed',
+        grantAuditEventId: randomUUID()
+      }
+    })
+  } catch (error) {
+    if (!isPrincipalRoleBindingOverlapError(error)) throw error
+    const concurrent = await permissionClient.principalRoleBinding.findMany({
+      where,
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }]
+    })
+    const recoveryTime = currentTime()
+    if (!(recoveryTime instanceof Date) || Number.isNaN(recoveryTime.getTime())) {
+      throw new Error('SYSTEM_ADMIN_SEED_CLOCK_INVALID')
     }
-  })
+    const concurrentClassified = classifySystemAdminPermissionBindings(
+      concurrent,
+      seed.permission,
+      accountId,
+      role.id,
+      recoveryTime
+    )
+    assertSystemAdminBindingCanConverge(concurrentClassified)
+    if (concurrentClassified.activeCanonical.length !== 1) throw error
+    binding = concurrentClassified.activeCanonical[0]
+    operation = 'unchanged'
+  }
 
   return {
-    operation: existingAccountRole ? 'updated' : 'created',
-    accountRoleId: accountRole.id,
+    operation,
+    principalRoleBindingId: binding.id,
     roleCode: seed.permission.roleCode,
     roleId: role.id
   }
+}
+
+/** classifySystemAdminPermissionBindings separates active canonical grants from lifecycle and coordinate drift. */
+export function classifySystemAdminPermissionBindings(bindings, seed, accountId, roleId, now) {
+  const canonical = bindings.filter(
+    (binding) =>
+      binding.principalType === seed.principalType &&
+      binding.principalId === accountId &&
+      binding.roleId === roleId &&
+      binding.scopeLevel === seed.scopeLevel &&
+      binding.tenantId === seed.tenantId
+  )
+  const active = bindings.filter((binding) => isCurrentPrincipalRoleBinding(binding, now))
+  return {
+    activeCanonical: active.filter((binding) => canonical.includes(binding)),
+    activeDrift: active.filter((binding) => !canonical.includes(binding)),
+    revokedCanonical: canonical.filter((binding) => binding.revokedAt !== null),
+    expiredCanonical: canonical.filter(
+      (binding) =>
+        binding.revokedAt === null && binding.expiresAt !== null && binding.expiresAt <= now
+    ),
+    futureCanonical: canonical.filter(
+      (binding) =>
+        binding.revokedAt === null && binding.effectiveAt !== null && binding.effectiveAt > now
+    )
+  }
+}
+
+/** isCurrentPrincipalRoleBinding applies the Permission domain's active time-window semantics. */
+function isCurrentPrincipalRoleBinding(binding, now) {
+  return (
+    binding.revokedAt === null &&
+    (binding.effectiveAt === null || binding.effectiveAt <= now) &&
+    (binding.expiresAt === null || binding.expiresAt > now)
+  )
+}
+
+/** assertSystemAdminBindingCanConverge fails closed on ambiguous or future-overlapping grant state. */
+function assertSystemAdminBindingCanConverge(classified) {
+  if (classified.activeDrift.length > 0) {
+    throw new Error('SYSTEM_ADMIN_SEED_PRINCIPAL_ROLE_BINDING_DRIFT')
+  }
+  if (classified.activeCanonical.length > 1) {
+    throw new Error('SYSTEM_ADMIN_SEED_DUPLICATE_ACTIVE_PRINCIPAL_ROLE_BINDING')
+  }
+  if (classified.activeCanonical.length === 0 && classified.futureCanonical.length > 0) {
+    throw new Error('SYSTEM_ADMIN_SEED_FUTURE_PRINCIPAL_ROLE_BINDING')
+  }
+}
+
+/** isPrincipalRoleBindingOverlapError recognizes Prisma/PostgreSQL overlap races for immutable grants. */
+function isPrincipalRoleBindingOverlapError(error) {
+  return (
+    error?.meta?.constraint === 'principal_role_binding_non_overlapping_window' ||
+    error?.message?.includes('principal_role_binding_non_overlapping_window') === true ||
+    error?.code === 'P2004' ||
+    error?.code === 'P2002'
+  )
 }
 
 /** maskDatabaseUrl redacts credentials while keeping the target database auditable in dry-run output. */
@@ -579,7 +751,7 @@ Seeds the local system admin account across identity, auth, and permission store
 Default mode is dry-run. Use --apply to write and --validate to read-check:
   identity-service   User + UserAccount(SYSTEM)
   auth-service       LoginMethod.EMAIL only; no password credential
-  permission-service AccountRole(system.admin)
+  permission-service active HUMAN PrincipalRoleBinding(system.admin)
 
 This direct entry retains only the legacy fixed-database boundary. For V2 manifests use:
   pnpm runtime:seed:system-admin -- --manifest /ABSOLUTE/RUN/manifest.json [--apply | --validate]
