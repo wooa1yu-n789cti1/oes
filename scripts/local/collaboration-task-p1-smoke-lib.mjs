@@ -52,9 +52,16 @@ export async function runCollaborationTaskP1SmokeFlow({ auditStore, gateway }, s
     identifier: seed.identifier,
     method: 'EMAIL_PASSWORD',
   })
-  const account = login.accountOptions?.[0]
-  if (!account?.accountId) {
-    throw new Error('Task P1 smoke requires one selectable tenant account.')
+  const account = login.accountOptions?.find(
+    (option) =>
+      option.accountId === seed.operatorAccountId &&
+      option.tenantId === seed.tenantId &&
+      option.scopeLevel === 'TENANT',
+  )
+  if (!account) {
+    throw new Error(
+      `Task P1 smoke requires tenant account ${seed.operatorAccountId} in tenant ${seed.tenantId}.`,
+    )
   }
 
   const selected = await gateway.selectAccount({

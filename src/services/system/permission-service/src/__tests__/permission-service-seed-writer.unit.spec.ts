@@ -192,6 +192,8 @@ describe('permission service seed writer', () => {
 
   it('backfills built-in tenant role instance navigation during seed apply', async () => {
     const seed = buildPermissionServiceSeed()
+    let rolePermissionSequence = 0
+    let rolePermissionRows: Array<{ id: string; permissionId: string; roleId: string }> = []
     const permissionIdByCode = new Map(
       seed.permissionCodes.map((permission) => [permission.code, `perm:${permission.code}`])
     )
@@ -210,8 +212,10 @@ describe('permission service seed writer', () => {
           )
             ? [
                 {
+                  code: 'item_master.product_data_manager',
                   id: 'item-role-1',
-                  kind: 'TENANT_INSTANCE'
+                  kind: 'TENANT_INSTANCE',
+                  templateRoleId: null
                 }
               ]
             : []
@@ -220,8 +224,27 @@ describe('permission service seed writer', () => {
       },
       rolePermission: {
         deleteMany: jest.fn(async () => ({})),
-        findMany: jest.fn(async () => []),
-        createMany: jest.fn(async () => ({}))
+        findMany: jest.fn(async (args: any) => {
+          if (args.where.id?.in) {
+            return rolePermissionRows.filter((row) => args.where.id.in.includes(row.id))
+          }
+          if (args.where.roleId?.in && args.where.permissionId?.in) {
+            return rolePermissionRows.filter(
+              (row) =>
+                args.where.roleId.in.includes(row.roleId) &&
+                args.where.permissionId.in.includes(row.permissionId)
+            )
+          }
+          return []
+        }),
+        createMany: jest.fn(async ({ data }: any) => {
+          const rows = data.map((row: any) => ({
+            ...row,
+            id: row.id ?? `template-role-permission-${(rolePermissionSequence += 1)}`
+          }))
+          rolePermissionRows = [...rolePermissionRows, ...rows]
+          return { count: rows.length }
+        })
       },
       navigationEntry: {
         upsert: jest.fn(async () => ({})),

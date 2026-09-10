@@ -100,7 +100,7 @@ describe('permission service seed source', () => {
       'crm.sales',
       'crm.sales_manager'
     ])
-    expect(seed.rolePermissions).toHaveLength(224)
+    expect(seed.rolePermissions).toHaveLength(225)
     expect(seed.navigationEntries).toHaveLength(40)
     expect(seed.roleNavigationVisibility).toHaveLength(52)
     expect(seed.roleLandingPolicies).toHaveLength(9)
@@ -113,7 +113,7 @@ describe('permission service seed source', () => {
       permissionCodeCount: 295,
       deprecatedPermissionCodeCount: 31,
       roleCount: 9,
-      rolePermissionCount: 224,
+      rolePermissionCount: 225,
       navigationEntryCount: 40,
       deprecatedNavigationEntryCount: 2,
       roleNavigationVisibilityCount: 52,

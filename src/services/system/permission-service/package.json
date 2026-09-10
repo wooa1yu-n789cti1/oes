@@ -19,6 +19,7 @@
     "seed:cleanup:dry-run": "node -r ts-node/register ./src/scripts/permission-service-seed-cleanup.ts",
     "seed:validate": "node -r ts-node/register ./src/scripts/permission-service-seed-validate.ts",
     "seed:apply": "node -r ts-node/register ./src/scripts/permission-service-seed-writer.ts",
+    "seed:rollback-role-instance-baseline": "node -r ts-node/register ./src/scripts/role-instance-foundation-rollback.ts",
     "clear:build": "rimraf dist && rimraf tsconfig.tsbuildinfo",
     "clear:nm": "rimraf node_modules",
     "clear": "pnpm run clear:build && pnpm run clear:nm",

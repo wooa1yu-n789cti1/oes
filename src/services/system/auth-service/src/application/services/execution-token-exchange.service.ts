@@ -26,6 +26,9 @@ export interface TrustedExecutionContext {
   readonly sourceTokenId?: string
   readonly sourceAudience?: string
   readonly sourceExpiresAt?: number
+  /** Reopens the exact actor policy already selected by the strict prior-hop subject verifier. */
+  readonly actorWorkloadSpiffeId?: string
+  readonly actorTargetAudience?: string
   readonly requestId?: string
   readonly traceId?: string
   readonly spanId?: string
@@ -188,10 +191,13 @@ export class ExecutionTokenExchangeService {
           input.execution.scopeLevel,
           input.execution.tenantId
         )
+        const actorPolicyWorkload =
+          input.execution.actorWorkloadSpiffeId ?? input.workloadIdentity.spiffeId
+        const actorPolicyTarget = input.execution.actorTargetAudience ?? input.targetAudience
         expectedActorId = this.registry.resolveHumanOboActor(
-          input.workloadIdentity.spiffeId,
+          actorPolicyWorkload,
           input.execution.sourceAudience as string,
-          input.targetAudience
+          actorPolicyTarget
         ).actorMachinePrincipalId
       } catch {
         throw new Error('execution token HUMAN OBO context is invalid')
@@ -207,6 +213,7 @@ export class ExecutionTokenExchangeService {
         !isExact(input.execution.requestId) ||
         !isTraceId(input.execution.traceId) ||
         !isSpanId(input.execution.spanId) ||
+        !oboActorPolicyReferenceIsComplete(input.execution) ||
         !this.audit
       ) {
         throw new Error('execution token HUMAN OBO context is invalid')
@@ -224,6 +231,15 @@ export class ExecutionTokenExchangeService {
     }
     return humanOboScope
   }
+}
+
+/** Accepts either the direct exchange pair or both verifier-retained actor-policy coordinates. */
+function oboActorPolicyReferenceIsComplete(execution: TrustedExecutionContext): boolean {
+  const workload = execution.actorWorkloadSpiffeId
+  const audience = execution.actorTargetAudience
+  return (
+    (workload === undefined && audience === undefined) || (isExact(workload) && isExact(audience))
+  )
 }
 
 /** Accepts only one direct registry-selected SYSTEM MACHINE actor and no caller-built actor chain. */

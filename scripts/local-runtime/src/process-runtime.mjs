@@ -149,9 +149,10 @@ export function inspectProtectedSignerContainer(resource, inspect = runChecked) 
 }
 
 /** Continuously checks proxy, exact container/Docker state, and real signer function until stopped. */
-export function monitorProtectedSigner({ proxyChild, containerResource, socketPath, keyReference, intervalMs = 5000, inspect = inspectProtectedSignerContainer, probe = probeProtectedSigner }) {
+export function monitorProtectedSigner({ proxyChild, containerResource, socketPath, keyReference, intervalMs = 5000, inspect = inspectProtectedSignerContainer, probe = probeProtectedSigner, autoStart = true }) {
   let timer = null
   let stopped = false
+  let started = false
   let rejectFailure
   const failure = new Promise((_, reject) => { rejectFailure = reject })
   void failure.catch(() => {})
@@ -176,10 +177,16 @@ export function monitorProtectedSigner({ proxyChild, containerResource, socketPa
       fail(/^SIGNER_(?:DOCKER|CONTAINER)/u.test(message) ? error : new Error('SIGNER_FUNCTIONAL_PROBE_FAILED'))
     }
   }
-  timer = setTimeout(check, intervalMs)
+  const start = () => {
+    if (stopped || started) return
+    started = true
+    timer = setTimeout(check, intervalMs)
+  }
+  if (autoStart) start()
   return {
     failure,
     check,
+    start,
     stop: () => {
       if (stopped) return
       stopped = true
@@ -215,6 +222,12 @@ export function gatewayReadinessEnvironment(ports, declarations) {
     .filter((owner) => ports[owner])
     .map((owner) => `${owner}=grpcs://${owner}.localhost:${ports[owner]}`)
   return targets.length ? { GATEWAY_READINESS_TARGETS: targets.join(',') } : {}
+}
+
+/** Starts Auth alone before the remaining DEV owners so protected signer bootstrap is not starved by concurrent compilers. */
+export function developmentProcessStartupBatches(owners) {
+  const remaining = owners.filter((owner) => owner !== 'auth-service')
+  return owners.includes('auth-service') ? [['auth-service'], ...(remaining.length ? [remaining] : [])] : [[...owners]]
 }
 
 /** Hashes the exact signer source tree used to build the isolated runtime image. */
@@ -299,7 +312,7 @@ export async function startProtectedSigner(root, manifest, signal) {
         const readinessPath = path.join(work, 'functional-readiness.json')
         writeAtomic(readinessPath, functionalReadiness)
         const readinessReference = { path: readinessPath, sha256: sha256(fs.readFileSync(readinessPath)), fingerprint: functionalReadiness.evidenceFingerprint }
-        monitor = monitorProtectedSigner({ proxyChild, containerResource, socketPath: socket, keyReference })
+        monitor = monitorProtectedSigner({ proxyChild, containerResource, socketPath: socket, keyReference, autoStart: false })
         return { resources: [imageResource, directoryResource, containerResource], children: [{ owner: 'execution-token-signer-proxy', kind: 'support', child: proxyChild }], environment: { AUTH_EXECUTION_SIGNER_SOCKET_PATH: socket, AUTH_EXECUTION_KMS_KEY_REF: keyReference }, endpoint: { provider: 'execution-token-signer', authority: `unix:${socket}`, ready: true, owners: ['auth-service'], environment: {}, credentialReference: null, functionalReadiness: readinessReference }, monitor }
       }
       if (fs.existsSync(ready) && fs.existsSync(containerSocket) && fs.statSync(containerSocket).isSocket() && !proxyChild) {
@@ -409,14 +422,26 @@ export async function startDevelopmentProcesses(manifestPath, { root, selectorPa
           } else {
             await issuerReservation.release()
           }
-          for (const owner of manifest.owners) {
-            await ownerReservations[owner].release()
-            const child = spawn('pnpm', ['--filter', owner, 'dev'], { cwd: root, env: environments[owner], stdio: 'inherit' })
-            attemptChildren.push({ owner, kind: 'service', port: ports[owner], child })
+          for (const batch of developmentProcessStartupBatches(manifest.owners)) {
+            const batchChildren = []
+            for (const owner of batch) {
+              await ownerReservations[owner].release()
+              const child = spawn('pnpm', ['--filter', owner, 'dev'], { cwd: root, env: environments[owner], stdio: 'inherit' })
+              const record = { owner, kind: 'service', port: ports[owner], child }
+              attemptChildren.push(record)
+              batchChildren.push(record)
+            }
+            const batchReadiness = Promise.all(batchChildren.map(({ child, owner, port }) => waitForProcess(child, owner, port, 180000, signal)))
+            if (signer) await Promise.race([batchReadiness, signer.monitor.failure])
+            else await batchReadiness
           }
-          const processReadiness = Promise.all(attemptChildren.filter(({ kind }) => kind === 'service').map(({ child, owner, port }) => waitForProcess(child, owner, port, 180000, signal)))
-          if (signer) await Promise.race([processReadiness, signer.monitor.failure])
-          else await processReadiness
+          if (signer) {
+            await probeProtectedSigner(
+              signer.environment.AUTH_EXECUTION_SIGNER_SOCKET_PATH,
+              signer.environment.AUTH_EXECUTION_KMS_KEY_REF
+            )
+            signer.monitor.start()
+          }
           return { attemptChildren, ports, issuerPort, authHttpPort, attempt }
         } catch (error) {
           lastError = error

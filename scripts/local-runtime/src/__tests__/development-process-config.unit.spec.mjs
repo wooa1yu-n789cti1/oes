@@ -78,6 +78,7 @@ test('all 22 clean owner projections satisfy startup requirements and emit only 
   const report = auditDevelopmentProcessEnvironments(environments, declarations)
   assert.equal(report.ownerCount, 22)
   assert.equal(report.owners.every((entry) => entry.required.length > 0), true)
+  assert.equal(Object.values(environments).every((environment) => JSON.parse(environment.AUTH_EXECUTION_WORKLOAD_POLICIES).length > 0), true)
   const serialized = JSON.stringify(report)
   assert.doesNotMatch(serialized, /asset-secret|redis-secret|nats-secret|postgresql:|pkcs11:fixture/u)
   assert.match(serialized, /SITE_PREVIEW_TOKEN_SECRET/u)
@@ -152,8 +153,8 @@ test('pre-spawn audit fails closed for missing, illegal, and permission-drifted 
   delete signerPending['auth-service'].AUTH_EXECUTION_SIGNER_SOCKET_PATH
   assert.equal(auditDevelopmentProcessEnvironmentInputs(signerPending, declarations).ownerCount, 22)
   assert.throws(() => auditDevelopmentProcessEnvironments(signerPending, declarations), /DEVELOPMENT_PROCESS_CONFIG_MISSING owner=auth-service key=AUTH_EXECUTION_KMS_KEY_REF/u)
-  delete signerPending['auth-service'].AUTH_EXECUTION_WORKLOAD_POLICIES
-  assert.throws(() => auditDevelopmentProcessEnvironmentInputs(signerPending, declarations), /DEVELOPMENT_PROCESS_CONFIG_MISSING owner=auth-service key=AUTH_EXECUTION_WORKLOAD_POLICIES/u)
+  delete signerPending['identity-service'].AUTH_EXECUTION_WORKLOAD_POLICIES
+  assert.throws(() => auditDevelopmentProcessEnvironmentInputs(signerPending, declarations), /DEVELOPMENT_PROCESS_CONFIG_MISSING owner=identity-service key=AUTH_EXECUTION_WORKLOAD_POLICIES/u)
   assert.throws(() => assertDevelopmentProcessEnvironment('asset-service', environments['asset-service'], declarations, owners, ['DATABASE_URL']), /DEVELOPMENT_PROCESS_CONFIG_DEFERRED_KEY_INVALID owner=asset-service key=DATABASE_URL/u)
   const secretFile = path.join(manifest.stackRoot, 'credentials', 'process-runtime', 'site-preview-token.key')
   fs.chmodSync(secretFile, 0o644)

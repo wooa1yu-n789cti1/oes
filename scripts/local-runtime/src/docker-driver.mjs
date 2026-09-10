@@ -21,6 +21,7 @@ const IMAGES = Object.freeze({
 })
 
 export const RUNTIME_DOCKER_IMAGES = IMAGES
+export const REDIS_RUNTIME_ACL_COMMAND_RULES = Object.freeze(['+@read', '+@write', '+ping', '+publish', '+subscribe', '+unsubscribe', '-@admin', '-@dangerous', '+multi', '+exec', '+discard'])
 
 export const NACOS_MYSQL_JDBC_PARAMETERS = 'characterEncoding=utf8&connectTimeout=1000&socketTimeout=3000&autoReconnect=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC'
 
@@ -437,7 +438,7 @@ async function provisionRedis(context, shared) {
     const password = persisted?.password || randomSecret()
     const terminalDeviceUnavailableChannel = `oes:${eventScope}:events:terminal-device.unavailable`
     if (ownerCredentialPath && !persisted) writeAtomic(ownerCredentialPath, { user, password, namespace }, 0o600)
-    docker(['exec', container.name, 'redis-cli', '-a', adminPassword, 'ACL', 'SETUSER', user, 'resetkeys', 'resetchannels', 'on', `>${password}`, `~${namespace}:*`, `&${terminalDeviceUnavailableChannel}`, '+@read', '+@write', '+ping', '+publish', '+subscribe', '+unsubscribe', '-@admin', '-@dangerous'])
+    docker(['exec', container.name, 'redis-cli', '-a', adminPassword, 'ACL', 'SETUSER', user, 'resetkeys', 'resetchannels', 'on', `>${password}`, `~${namespace}:*`, `&${terminalDeviceUnavailableChannel}`, ...REDIS_RUNTIME_ACL_COMMAND_RULES])
     ownerEnvironments[owner] = { REDIS_HOST: '127.0.0.1', REDIS_PORT: String(port), REDIS_USERNAME: user, REDIS_PASSWORD: password, OES_REDIS_NAMESPACE: namespace, TERMINAL_DEVICE_UNAVAILABLE_REDIS_CHANNEL: terminalDeviceUnavailableChannel }
     allocations.push({ provider: 'redis', kind: 'acl-user', scope: shared ? 'SHARED' : context.profile === 'CI' ? 'CI' : 'RUN', owner, user, namespace, containerName: container.name, containerObjectId: container.objectId, containerScope: container.scope, cleanup: shared ? 'PRESERVE_SHARED' : 'DELETED_WITH_OWNED_CONTAINER' })
   }

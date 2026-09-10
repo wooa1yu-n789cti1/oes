@@ -12,7 +12,7 @@ import { writeCredentialBundle } from '../credentials.mjs'
 import { exactResourceToken, exactRunIdentity, isPublishedPortCollision, runtimeLabels } from '../docker-driver.mjs'
 import { publishManifest, publishStackManifest, reopenCurrentStackManifest } from '../manifest.mjs'
 import { classifyRuntimeObject, reopenOperatorAuthority } from '../operator-status.mjs'
-import { cleanupRuntimeDirectory, downstreamEnvironment, endpointEnvironment, gatewayReadinessEnvironment, inspectProtectedSignerContainer, monitorProtectedSigner, probeProtectedSigner, publishDevelopmentProcessManifest, reservePort, signerSourceHash, signerWorkDirectory, waitForProtectedSignerReadiness } from '../process-runtime.mjs'
+import { cleanupRuntimeDirectory, developmentProcessStartupBatches, downstreamEnvironment, endpointEnvironment, gatewayReadinessEnvironment, inspectProtectedSignerContainer, monitorProtectedSigner, probeProtectedSigner, publishDevelopmentProcessManifest, reservePort, signerSourceHash, signerWorkDirectory, waitForProtectedSignerReadiness } from '../process-runtime.mjs'
 import { bindHumanOboPolicies, loadMachineSelectors, loadWorkloadPolicies, selectorEnvironment, trustedProcessEnvironment } from '../trusted-runtime-config.mjs'
 import { startUdsDockerProxy } from '../uds-docker-proxy.mjs'
 
@@ -53,6 +53,16 @@ test('host-process ports remain reserved until explicit child handoff', async ()
     rebound.listen(reservation.port, '127.0.0.1', resolve)
   })
   await new Promise((resolve, reject) => rebound.close((error) => error ? reject(error) : resolve()))
+})
+
+test('Auth starts alone before concurrent DEV owners while non-Auth subsets retain one batch', () => {
+  assert.deepEqual(developmentProcessStartupBatches(['identity-service', 'auth-service', 'permission-service']), [
+    ['auth-service'],
+    ['identity-service', 'permission-service']
+  ])
+  assert.deepEqual(developmentProcessStartupBatches(['identity-service', 'permission-service']), [
+    ['identity-service', 'permission-service']
+  ])
 })
 
 function manifestFixture(directory, owners = ['auth-service', 'api-gateway', 'permission-service']) {
@@ -109,11 +119,13 @@ test('versioned policies bind Human-OBO only to exact provisioned selector facts
 
 test('trusted process environment carries references and policies without signer key material', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'oes-trusted-env-'))
-  const manifest = manifestFixture(directory)
+  const manifest = manifestFixture(directory, ['auth-service', 'identity-service', 'api-gateway', 'permission-service'])
   const environment = trustedProcessEnvironment({ root, manifest, owner: 'auth-service', issuerPort: 45123 })
+  const identityEnvironment = trustedProcessEnvironment({ root, manifest, owner: 'identity-service', issuerPort: 45123 })
   assert.equal(environment.AUTH_EXECUTION_ISSUER, 'https://issuer.local.oes.internal:45123')
   assert.equal(environment.NODE_EXTRA_CA_CERTS, path.join(directory, 'ca.pem'))
   assert.equal(JSON.parse(environment.AUTH_EXECUTION_WORKLOAD_POLICIES).length > 0, true)
+  assert.deepEqual(identityEnvironment.AUTH_EXECUTION_WORKLOAD_POLICIES, environment.AUTH_EXECUTION_WORKLOAD_POLICIES)
   assert.equal(Object.keys(environment).some((key) => /SIGNER|KMS|PASSWORD|SECRET/u.test(key)), false)
 })
 
@@ -249,6 +261,28 @@ test('protected signer monitor fails for proxy, container, Docker, and functiona
   const functional = fixture({ probe: async () => { throw new Error('SIGNER_FUNCTIONAL_PROTOCOL_UNAVAILABLE') } })
   await functional.monitor.check()
   await assert.rejects(functional.monitor.failure, /SIGNER_FUNCTIONAL_PROBE_FAILED/u)
+})
+
+test('protected signer monitor can defer protocol polling until Auth startup readiness completes', async () => {
+  let probes = 0
+  const proxyChild = new EventEmitter()
+  proxyChild.exitCode = null
+  const monitor = monitorProtectedSigner({
+    proxyChild,
+    containerResource: {},
+    socketPath: '/tmp/fixture.sock',
+    keyReference: 'pkcs11:fixture',
+    intervalMs: 5,
+    inspect: () => ({}),
+    probe: async () => { probes += 1 },
+    autoStart: false
+  })
+  await new Promise((resolve) => setTimeout(resolve, 15))
+  assert.equal(probes, 0)
+  monitor.start()
+  await new Promise((resolve) => setTimeout(resolve, 15))
+  assert.ok(probes >= 1)
+  monitor.stop()
 })
 
 test('protected signer container inspection distinguishes identity, exit, and Docker availability', () => {
