@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { after } from 'node:test'
 import { canonicalJson, objectFingerprint, sha256 } from '../canonical.ts'
+import { createDecisionCard, createHumanConfirmationReceipt } from '../confirmation.ts'
 import type {
   RemoteActionAuthorization,
   RemoteAuthorizationRoot,
@@ -56,10 +57,46 @@ export function cleanupTrust(value: CoordinationCleanupAuthorization): RemoteTru
 export function authorizeRemoteBinding(binding: RemoteDriverBinding): RemoteDriverBinding {
   const authorizationRoot = fixtureTempDir('oes-remote-authorization-test-')
   const admissionRoot = fixtureTempDir('oes-remote-admission-test-')
-  if (binding.admission?.mode === 'serial-latest-main')
-    binding.admission.lockPath = join(admissionRoot, 'latest-main.lock')
+  const card = createDecisionCard({
+    projectKey: 'oes',
+    decisionKind: 'DELIVERY',
+    objective: 'Execute the exact remote delivery transition',
+    ownerTopology: 'ONE_DO',
+    executionMode: 'REPOSITORY',
+    scope: ['remote delivery transition'],
+    protectedScope: ['unrelated repository state'],
+    acceptance: ['remote transition reaches its declared postcondition'],
+    integrationContract: [],
+    risk: 'MEDIUM',
+    designImpact: 'NONE',
+    coupling: 'COHESIVE',
+    prTopology: 'ONE_DO_PR',
+    approvedCiLevel: 'FULL',
+    stopPoint: 'verified merge and cleanup'
+  })
+  const cardPath = join(authorizationRoot, 'decision-card.json')
+  const cardBytes = `${canonicalJson(card)}\n`
+  writeFileSync(cardPath, cardBytes)
+  const receipt = createHumanConfirmationReceipt({
+    projectKey: card.projectKey,
+    confirmedAt: '2026-09-11T00:00:00.000Z',
+    card: {
+      path: cardPath,
+      sha256: sha256(cardBytes),
+      fingerprint: card.cardFingerprint
+    }
+  })
+  const receiptPath = join(authorizationRoot, 'human-confirmation.json')
+  const receiptBytes = `${canonicalJson(receipt)}\n`
+  writeFileSync(receiptPath, receiptBytes)
+  const decisionConfirmation = {
+    path: receiptPath,
+    sha256: sha256(receiptBytes),
+    fingerprint: receipt.confirmationFingerprint
+  }
+  binding.scopeFingerprint = card.materialDecisionFingerprint
   const rootRecord: RemoteAuthorizationRoot = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     kind: 'OES_REMOTE_AUTHORIZATION_ROOT',
     recordFingerprint: '',
     status: 'ACTIVE',
@@ -68,7 +105,8 @@ export function authorizeRemoteBinding(binding: RemoteDriverBinding): RemoteDriv
     expectedState: binding.expectedState,
     stateVersion: binding.stateVersion,
     transitionId: binding.transitionId,
-    rootConfirmationFingerprint: 'e'.repeat(64),
+    decisionConfirmation,
+    rootConfirmationFingerprint: receipt.confirmationFingerprint,
     scopeFingerprint: binding.scopeFingerprint,
     truthBaseline: binding.truthBaseline,
     repositoryRoot: binding.repositoryRoot,
@@ -101,7 +139,7 @@ export function authorizeRemoteBinding(binding: RemoteDriverBinding): RemoteDriv
     '__none__'
   )
   const authority: RemoteActionAuthorization = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     kind: 'OES_REMOTE_ACTION_AUTHORIZATION',
     authorizationFingerprint: '',
     status: 'ISSUED',
@@ -116,7 +154,8 @@ export function authorizeRemoteBinding(binding: RemoteDriverBinding): RemoteDriv
     expectedState: binding.expectedState,
     stateVersion: binding.stateVersion,
     transitionId: binding.transitionId,
-    rootConfirmationFingerprint: 'e'.repeat(64),
+    decisionConfirmation,
+    rootConfirmationFingerprint: receipt.confirmationFingerprint,
     scopeFingerprint: binding.scopeFingerprint,
     truthBaseline: binding.truthBaseline,
     integrationBase: binding.integrationBase,
@@ -152,6 +191,7 @@ export function authorizeRemoteBinding(binding: RemoteDriverBinding): RemoteDriv
     'bindingFingerprint'
   )
   trustByBinding.set(binding, {
+    projectKey: 'oes',
     authorizationRoot,
     admissionRoot,
     profilePath: '/fixture/installed-profile.toml',
@@ -417,6 +457,7 @@ export function trustedCleanupAuthorization(
     `${canonicalJson(current)}\n`
   )
   const trust: RemoteTrustRoots = {
+    projectKey: 'oes',
     authorizationRoot,
     admissionRoot: join(authorizationRoot, 'admission'),
     profilePath: join(authorizationRoot, 'profile.toml'),
@@ -501,6 +542,7 @@ export function trustedChildCleanupAuthorization(
     `${canonicalJson(current)}\n`
   )
   const trust: RemoteTrustRoots = {
+    projectKey: 'oes',
     authorizationRoot,
     admissionRoot: join(authorizationRoot, 'admission'),
     profilePath: join(authorizationRoot, 'profile.toml'),

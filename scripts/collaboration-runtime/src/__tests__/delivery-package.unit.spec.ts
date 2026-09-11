@@ -31,8 +31,13 @@ import {
   type DeliveryPackage
 } from '../delivery-package.ts'
 import { validateJsonSchema } from '../schema-validation.ts'
+import { createReviewSession } from '../review-session.ts'
 import { loadOwnerResourceBindingReference, stableOwnerTaskTempLeaf } from '../resource-topology.ts'
 import type { OwnerResourceBinding } from '../resource-topology.types.ts'
+import {
+  deliveryDecisionInput,
+  persistTrustedConfirmation
+} from './trusted-confirmation-fixture.ts'
 
 const schema = (name: string) =>
   JSON.parse(
@@ -83,6 +88,28 @@ function persistedEvidence(
   const bytes = `${canonicalJson(value)}\n`
   writeFileSync(path, bytes, { flag: 'wx' })
   return { path, sha256: sha256(bytes), fingerprint: value.evidenceFingerprint }
+}
+
+/** Persists the stable visible RV subagent identity for one exact reviewed generation. */
+function persistedReviewSession(
+  root: string,
+  name: string,
+  deliveryKey: string,
+  ownerTaskId: string,
+  reviewedSubject: string
+) {
+  mkdirSync(root, { recursive: true })
+  const value = createReviewSession({
+    deliveryKey,
+    ownerTaskId,
+    reviewerAgentId: `${ownerTaskId}/rv`,
+    candidateGenerations: [reviewedSubject],
+    state: 'ACTIVE'
+  })
+  const path = join(root, name)
+  const bytes = `${canonicalJson(value)}\n`
+  writeFileSync(path, bytes, { flag: 'wx' })
+  return { path, sha256: sha256(bytes), fingerprint: value.sessionFingerprint }
 }
 
 /** Persists and reopens the exact owner binding required by repository package cleanup. */
@@ -138,7 +165,10 @@ function repositoryDraft(): Parameters<typeof createDeliveryPackage>[0] {
     artifactRoot: '/stable/artifacts/do-runtime',
     packagePath: '/stable/artifacts/do-runtime/delivery-package.json',
     activation: {
+      confirmation: reference('/stable/authorization/human-confirmation.json', 'a'),
       confirmationFingerprint: 'a'.repeat(64),
+      materialDecisionFingerprint: 'b'.repeat(64),
+      approvedCiLevel: 'FULL',
       objective: 'Deliver the collaboration runtime',
       scope: ['runtime and schemas'],
       nonGoals: ['merge'],
@@ -167,6 +197,9 @@ function repositoryDraft(): Parameters<typeof createDeliveryPackage>[0] {
         basisFingerprint: null,
         evidence: reference('/stable/artifacts/do-runtime/self-test.json', 'c')
       },
+      reviewSession: null,
+      reviewerTaskId: null,
+      reviewHistory: [],
       rv: pending(),
       ci: pending(),
       postCheck: pending(),
@@ -200,7 +233,10 @@ function aggregateDraft(): Parameters<typeof createAggregateDeliveryPackage>[0] 
     executionMode: 'REPOSITORY',
     artifactRoot: '/stable/artifacts/co-release',
     packagePath: '/stable/artifacts/co-release/aggregate-delivery-package.json',
+    confirmation: reference('/stable/authorization/human-confirmation.json', 'd'),
     confirmationFingerprint: 'd'.repeat(64),
+    materialDecisionFingerprint: 'e'.repeat(64),
+    approvedCiLevel: 'FULL',
     childRoster: reference('/stable/artifacts/co-release/child-roster.json', 'e'),
     deliveryPackages: ['api', 'web'].map((deliveryKey, index) => ({
       deliveryKey,
@@ -224,6 +260,9 @@ function aggregateDraft(): Parameters<typeof createAggregateDeliveryPackage>[0] 
         mergeSha: null
       },
       hostLocal: null,
+      reviewSession: null,
+      reviewerTaskId: null,
+      reviewHistory: [],
       aggregateRv: pending(),
       aggregateCi: pending(),
       postCheck: pending(),
@@ -262,6 +301,18 @@ test('repository DP is stable-artifact state and PR body is only a generated sum
   templateHeadings.forEach((heading) => assert.match(summary, new RegExp(`^${heading}$`, 'm')))
   assert.doesNotMatch(summary, /designReferences|evidenceGeneration/)
   assert.doesNotMatch(summary, /\/stable\//)
+})
+
+test('v2 active package state requires an explicit cutover instead of silent reinterpretation', () => {
+  assert.throws(
+    () => validateDeliveryPackage({ schemaVersion: 2, deliveryKey: 'runtime' } as never),
+    /V3_PACKAGE_CUTOVER_REQUIRED/
+  )
+  assert.throws(
+    () =>
+      validateAggregateDeliveryPackage({ schemaVersion: 2, coordinationKey: 'release' } as never),
+    /V3_PACKAGE_CUTOVER_REQUIRED/
+  )
 })
 
 test('scope, design, dependency, and candidate changes invalidate bound DP evidence', () => {
@@ -360,6 +411,20 @@ test('host-local DP uses the same schema without Git candidate, PR, Merge Queue,
 
 test('ADP binds every DP, dependency order, integration contract, accepted candidates, and exact RV input', () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'oes-package-rv-test-')))
+  const { confirmation, authorizationRoot } = persistTrustedConfirmation(
+    deliveryDecisionInput({
+      ownerTopology: 'CO_WITH_DOS',
+      coupling: 'INDEPENDENT_COORDINATED',
+      prTopology: 'ONE_AGGREGATE_CO_PR',
+      objective: 'Coordinate api and web delivery',
+      scope: ['api', 'web'],
+      protectedScope: ['unrelated product code'],
+      acceptance: ['combined journey passes'],
+      integrationContract: ['api before web'],
+      risk: 'HIGH'
+    }),
+    join(root, 'authorization')
+  )
   const childDesigns: { path: string; bytes: string }[] = []
   const childReferences = ['api', 'web'].map((deliveryKey, index) => {
     const draft = repositoryDraft()
@@ -367,6 +432,11 @@ test('ADP binds every DP, dependency order, integration contract, accepted candi
     draft.ownerTaskId = `/root/co-release/do-${deliveryKey}`
     draft.artifactRoot = join(root, deliveryKey)
     draft.packagePath = join(draft.artifactRoot, 'delivery-package.json')
+    draft.activation.confirmation = confirmation.reference
+    draft.activation.confirmationFingerprint = confirmation.receipt.confirmationFingerprint
+    draft.activation.materialDecisionFingerprint = confirmation.card.materialDecisionFingerprint
+    draft.activation.scope = [deliveryKey]
+    draft.activation.acceptance = [...confirmation.card.acceptance]
     mkdirSync(draft.artifactRoot, { recursive: true })
     const designPath = join(draft.artifactRoot, 'design.md')
     const designBytes = `design:${deliveryKey}\n`
@@ -381,6 +451,15 @@ test('ADP binds every DP, dependency order, integration contract, accepted candi
     draft.execution.repository.worktree = join(root, 'owners', deliveryKey, 'oes')
     draft.execution.repository.candidateSha = String(index + 2).repeat(40)
     draft.execution.rv = pending()
+    draft.execution.reviewSession = persistedReviewSession(
+      draft.artifactRoot,
+      'rv-session.json',
+      deliveryKey,
+      draft.ownerTaskId,
+      draft.execution.repository.candidateSha
+    )
+    draft.execution.reviewerTaskId = `${draft.ownerTaskId}/rv`
+    draft.execution.reviewHistory = [draft.execution.repository.candidateSha]
     if (deliveryKey === 'api')
       draft.activation.dependencies = [
         {
@@ -450,6 +529,11 @@ test('ADP binds every DP, dependency order, integration contract, accepted candi
   const draft = aggregateDraft()
   draft.artifactRoot = join(root, 'coordination')
   draft.packagePath = join(draft.artifactRoot, 'aggregate-delivery-package.json')
+  draft.confirmation = confirmation.reference
+  draft.confirmationFingerprint = confirmation.receipt.confirmationFingerprint
+  draft.materialDecisionFingerprint = confirmation.card.materialDecisionFingerprint
+  draft.integrationContract = [...confirmation.card.integrationContract]
+  draft.aggregateAcceptance = [...confirmation.card.acceptance]
   draft.deliveryPackages = childReferences
   const childRoster = createAggregateDeliveryChildRoster({
     confirmationFingerprint: draft.confirmationFingerprint,
@@ -487,7 +571,7 @@ test('ADP binds every DP, dependency order, integration contract, accepted candi
     sha256: sha256(aggregateBytes),
     fingerprint: value.packageFingerprint
   }
-  const trusted = loadAggregateDeliveryPackageReference(aggregateReference)
+  const trusted = loadAggregateDeliveryPackageReference(aggregateReference, authorizationRoot)
   assert.throws(
     () => createAggregateRvInput({ ...aggregateReference, sha256: 'f'.repeat(64) }, trusted),
     /AGGREGATE_RV_TRUSTED_PACKAGE_REQUIRED/
@@ -536,6 +620,11 @@ test('ADP binds every DP, dependency order, integration contract, accepted candi
   const incompleteDraft = aggregateDraft()
   incompleteDraft.artifactRoot = incompleteRoot
   incompleteDraft.packagePath = join(incompleteRoot, 'aggregate-delivery-package.json')
+  incompleteDraft.confirmation = confirmation.reference
+  incompleteDraft.confirmationFingerprint = confirmation.receipt.confirmationFingerprint
+  incompleteDraft.materialDecisionFingerprint = confirmation.card.materialDecisionFingerprint
+  incompleteDraft.integrationContract = [...confirmation.card.integrationContract]
+  incompleteDraft.aggregateAcceptance = [...confirmation.card.acceptance]
   incompleteDraft.deliveryPackages = childReferences
   incompleteDraft.childRoster = {
     path: completeRosterPath,
@@ -547,11 +636,14 @@ test('ADP binds every DP, dependency order, integration contract, accepted candi
   writeFileSync(incomplete.packagePath, incompleteBytes)
   assert.throws(
     () =>
-      loadAggregateDeliveryPackageReference({
-        path: incomplete.packagePath,
-        sha256: sha256(incompleteBytes),
-        fingerprint: incomplete.packageFingerprint
-      }),
+      loadAggregateDeliveryPackageReference(
+        {
+          path: incomplete.packagePath,
+          sha256: sha256(incompleteBytes),
+          fingerprint: incomplete.packageFingerprint
+        },
+        authorizationRoot
+      ),
     /AGGREGATE_CHILD_ROSTER_COVERAGE_MISMATCH/
   )
 
@@ -564,6 +656,11 @@ test('ADP binds every DP, dependency order, integration contract, accepted candi
     'aggregate-delivery-package.json'
   )
   aggregateEvidenceDraft.deliveryPackages = childReferences
+  aggregateEvidenceDraft.confirmation = confirmation.reference
+  aggregateEvidenceDraft.confirmationFingerprint = confirmation.receipt.confirmationFingerprint
+  aggregateEvidenceDraft.materialDecisionFingerprint = confirmation.card.materialDecisionFingerprint
+  aggregateEvidenceDraft.integrationContract = [...confirmation.card.integrationContract]
+  aggregateEvidenceDraft.aggregateAcceptance = [...confirmation.card.acceptance]
   const aggregateEvidenceRosterPath = join(aggregateEvidenceRoot, 'child-roster.json')
   writeFileSync(aggregateEvidenceRosterPath, childRosterBytes)
   aggregateEvidenceDraft.childRoster = {
@@ -571,6 +668,17 @@ test('ADP binds every DP, dependency order, integration contract, accepted candi
     sha256: sha256(childRosterBytes),
     fingerprint: childRoster.rosterFingerprint
   }
+  aggregateEvidenceDraft.execution.reviewSession = persistedReviewSession(
+    aggregateEvidenceRoot,
+    'aggregate-rv-session.json',
+    aggregateEvidenceDraft.coordinationKey,
+    aggregateEvidenceDraft.ownerTaskId,
+    aggregateEvidenceDraft.execution.repository?.aggregateCandidateSha ?? ''
+  )
+  aggregateEvidenceDraft.execution.reviewerTaskId = `${aggregateEvidenceDraft.ownerTaskId}/rv`
+  aggregateEvidenceDraft.execution.reviewHistory = [
+    aggregateEvidenceDraft.execution.repository?.aggregateCandidateSha ?? ''
+  ]
   const aggregateInitial = createAggregateDeliveryPackage(aggregateEvidenceDraft)
   const wrongAggregateRv = persistedEvidence(aggregateEvidenceRoot, 'wrong-aggregate-rv.json', {
     evidenceType: 'AGGREGATE_RV',
@@ -599,17 +707,20 @@ test('ADP binds every DP, dependency order, integration contract, accepted candi
   writeFileSync(aggregateWithWrongEvidence.packagePath, aggregateWithWrongEvidenceBytes)
   assert.throws(
     () =>
-      loadAggregateDeliveryPackageReference({
-        path: aggregateWithWrongEvidence.packagePath,
-        sha256: sha256(aggregateWithWrongEvidenceBytes),
-        fingerprint: aggregateWithWrongEvidence.packageFingerprint
-      }),
+      loadAggregateDeliveryPackageReference(
+        {
+          path: aggregateWithWrongEvidence.packagePath,
+          sha256: sha256(aggregateWithWrongEvidenceBytes),
+          fingerprint: aggregateWithWrongEvidence.packageFingerprint
+        },
+        authorizationRoot
+      ),
     /PACKAGE_EVIDENCE_APPLICABILITY_MISMATCH/
   )
 
   writeFileSync(childDesigns[0].path, 'changed design bytes\n')
   assert.throws(
-    () => loadAggregateDeliveryPackageReference(aggregateReference),
+    () => loadAggregateDeliveryPackageReference(aggregateReference, authorizationRoot),
     /DELIVERY_DESIGN_REFERENCE_SHA_MISMATCH/
   )
   writeFileSync(childDesigns[0].path, childDesigns[0].bytes)
@@ -621,7 +732,7 @@ test('ADP binds every DP, dependency order, integration contract, accepted candi
   if (!selfTestPath) throw new Error('self-test fixture reference absent')
   writeFileSync(selfTestPath, '{}\n')
   assert.throws(
-    () => loadAggregateDeliveryPackageReference(aggregateReference),
+    () => loadAggregateDeliveryPackageReference(aggregateReference, authorizationRoot),
     /PACKAGE_EVIDENCE_REFERENCE_SHA_MISMATCH/
   )
 })
@@ -661,13 +772,35 @@ test('host-local ADP requires two independent packages plus parallelism or cross
 
 test('typed evidence rejects stale failed RV reattachment and wrong evidence types', () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'oes-package-evidence-test-')))
+  const { confirmation, authorizationRoot } = persistTrustedConfirmation(
+    deliveryDecisionInput({
+      objective: 'Deliver the collaboration runtime',
+      scope: ['runtime and schemas'],
+      protectedScope: ['unrelated product code'],
+      acceptance: ['focused checks pass'],
+      risk: 'HIGH'
+    }),
+    join(root, 'authorization')
+  )
   const draft = repositoryDraft()
   draft.artifactRoot = join(root, 'artifacts')
   draft.packagePath = join(draft.artifactRoot, 'delivery-package.json')
+  draft.activation.confirmation = confirmation.reference
+  draft.activation.confirmationFingerprint = confirmation.receipt.confirmationFingerprint
+  draft.activation.materialDecisionFingerprint = confirmation.card.materialDecisionFingerprint
   draft.execution.selfTest = pending()
   draft.execution.rv = pending()
   if (!draft.execution.repository) throw new Error('repository fixture absent')
   draft.execution.repository.worktree = join(root, 'repository')
+  draft.execution.reviewSession = persistedReviewSession(
+    draft.artifactRoot,
+    'rv-session.json',
+    draft.deliveryKey,
+    draft.ownerTaskId,
+    draft.execution.repository.candidateSha ?? ''
+  )
+  draft.execution.reviewerTaskId = `${draft.ownerTaskId}/rv`
+  draft.execution.reviewHistory = [draft.execution.repository.candidateSha ?? '']
   const initial = createDeliveryPackage(draft)
   const oldRv = persistedEvidence(draft.artifactRoot, 'old-rv.json', {
     evidenceType: 'RV',
@@ -689,6 +822,33 @@ test('typed evidence rejects stale failed RV reattachment and wrong evidence typ
   changedDraft.packageVersion += 1
   if (!changedDraft.execution.repository) throw new Error('repository fixture absent')
   changedDraft.execution.repository.candidateSha = '8'.repeat(40)
+  const firstSession = createReviewSession({
+    deliveryKey: draft.deliveryKey,
+    ownerTaskId: draft.ownerTaskId,
+    reviewerAgentId: `${draft.ownerTaskId}/rv`,
+    candidateGenerations: ['2'.repeat(40)],
+    state: 'ACTIVE'
+  })
+  const advancedSession = createReviewSession(
+    {
+      deliveryKey: draft.deliveryKey,
+      ownerTaskId: draft.ownerTaskId,
+      reviewerAgentId: `${draft.ownerTaskId}/rv`,
+      candidateGenerations: ['2'.repeat(40), '8'.repeat(40)],
+      state: 'ACTIVE'
+    },
+    firstSession
+  )
+  const sessionPath = changedDraft.execution.reviewSession?.path
+  if (!sessionPath) throw new Error('review session fixture absent')
+  const advancedSessionBytes = `${canonicalJson(advancedSession)}\n`
+  writeFileSync(sessionPath, advancedSessionBytes)
+  changedDraft.execution.reviewSession = {
+    path: sessionPath,
+    sha256: sha256(advancedSessionBytes),
+    fingerprint: advancedSession.sessionFingerprint
+  }
+  changedDraft.execution.reviewHistory = ['2'.repeat(40), '8'.repeat(40)]
   const changed = createDeliveryPackage(changedDraft, initial)
   const currentSelfTest = persistedEvidence(draft.artifactRoot, 'current-self-test.json', {
     evidenceType: 'SELF_TEST',
@@ -723,7 +883,7 @@ test('typed evidence rejects stale failed RV reattachment and wrong evidence typ
     acceptedOperationFingerprint: null
   }
   assert.throws(
-    () => loadDeliveryPackageReference(reference, 'REPOSITORY'),
+    () => loadDeliveryPackageReference(reference, 'REPOSITORY', authorizationRoot),
     /PACKAGE_EVIDENCE_APPLICABILITY_MISMATCH/
   )
 
@@ -757,7 +917,8 @@ test('typed evidence rejects stale failed RV reattachment and wrong evidence typ
           packageSha256: sha256(wrongVerdictBytes),
           packageFingerprint: wrongVerdict.packageFingerprint
         },
-        'REPOSITORY'
+        'REPOSITORY',
+        authorizationRoot
       ),
     /PACKAGE_EVIDENCE_APPLICABILITY_MISMATCH/
   )
@@ -790,8 +951,44 @@ test('typed evidence rejects stale failed RV reattachment and wrong evidence typ
     packageFingerprint: wrongType.packageFingerprint
   }
   assert.throws(
-    () => loadDeliveryPackageReference(wrongTypeReference, 'REPOSITORY'),
+    () => loadDeliveryPackageReference(wrongTypeReference, 'REPOSITORY', authorizationRoot),
     /PACKAGE_EVIDENCE_APPLICABILITY_MISMATCH/
+  )
+
+  const wrongReviewerDraft = deliveryUpdate(changed)
+  wrongReviewerDraft.packageVersion += 1
+  wrongReviewerDraft.execution.selfTest = resealDraft.execution.selfTest
+  wrongReviewerDraft.execution.rv = {
+    status: 'PASSED',
+    basisFingerprint: null,
+    evidence: persistedEvidence(draft.artifactRoot, 'wrong-reviewer-rv.json', {
+      evidenceType: 'RV',
+      subjectKey: draft.deliveryKey,
+      ownerTaskId: draft.ownerTaskId,
+      reviewerTaskId: `${draft.ownerTaskId}/rv-other`,
+      executionMode: 'REPOSITORY',
+      evidenceGeneration: changed.evidenceGeneration,
+      basisFingerprint: changed.evidenceBasisFingerprint,
+      candidateSha: changed.execution.repository?.candidateSha ?? null,
+      operationFingerprint: null,
+      result: 'PASSED'
+    })
+  }
+  const wrongReviewer = createDeliveryPackage(wrongReviewerDraft, changed)
+  const wrongReviewerBytes = `${canonicalJson(wrongReviewer)}\n`
+  writeFileSync(wrongReviewer.packagePath, wrongReviewerBytes)
+  assert.throws(
+    () =>
+      loadDeliveryPackageReference(
+        {
+          ...reference,
+          packageSha256: sha256(wrongReviewerBytes),
+          packageFingerprint: wrongReviewer.packageFingerprint
+        },
+        'REPOSITORY',
+        authorizationRoot
+      ),
+    /PACKAGE_RV_REVIEWER_SESSION_MISMATCH/
   )
 
   const outsidePackage = join(root, 'outside-delivery-package.json')
@@ -799,8 +996,45 @@ test('typed evidence rejects stale failed RV reattachment and wrong evidence typ
   rmSync(wrongType.packagePath)
   symlinkSync(outsidePackage, wrongType.packagePath)
   assert.throws(
-    () => loadDeliveryPackageReference(wrongTypeReference, 'REPOSITORY'),
+    () => loadDeliveryPackageReference(wrongTypeReference, 'REPOSITORY', authorizationRoot),
     /OWNER_RESOURCE_PHYSICAL_PATH_ALIAS/
+  )
+})
+
+test('DP keeps one RV path, reviewer, and append-only candidate history even after FAILED RV', () => {
+  const draft = repositoryDraft()
+  const withoutSession = structuredClone(draft)
+  withoutSession.execution.rv = {
+    status: 'FAILED',
+    basisFingerprint: null,
+    evidence: reference('/stable/artifacts/do-runtime/failed-rv.json', 'f')
+  }
+  assert.throws(() => createDeliveryPackage(withoutSession), /DELIVERY_PACKAGE_RV_SESSION_REQUIRED/)
+
+  draft.execution.reviewSession = reference(
+    '/stable/artifacts/do-runtime/runtime.rv-session.json',
+    'e'
+  )
+  draft.execution.reviewerTaskId = '/root/do-runtime/rv'
+  draft.execution.reviewHistory = ['2'.repeat(40)]
+  const first = createDeliveryPackage(draft)
+  const changed = deliveryUpdate(first)
+  changed.packageVersion += 1
+  changed.execution.reviewSession = reference(
+    '/stable/artifacts/do-runtime/replacement.rv-session.json',
+    'd'
+  )
+  changed.execution.reviewHistory = ['2'.repeat(40), '3'.repeat(40)]
+  assert.throws(
+    () => createDeliveryPackage(changed, first),
+    /DELIVERY_PACKAGE_RV_SESSION_IMMUTABLE/
+  )
+
+  changed.execution.reviewSession = first.execution.reviewSession
+  changed.execution.reviewHistory = ['3'.repeat(40)]
+  assert.throws(
+    () => createDeliveryPackage(changed, first),
+    /DELIVERY_PACKAGE_RV_SESSION_IMMUTABLE/
   )
 })
 

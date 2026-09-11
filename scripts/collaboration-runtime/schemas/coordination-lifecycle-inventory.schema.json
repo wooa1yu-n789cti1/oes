@@ -44,7 +44,7 @@
       }
     },
     "rosterAuthorityFingerprint": { "$ref": "#/$defs/sha256" },
-    "taskReadbackSource": { "const": "CODEX_TASK_NATIVE" },
+    "taskReadbackSource": { "enum": ["CODEX_TASK_NATIVE", "CODEX_EXECUTION_NATIVE"] },
     "readbackRosterFingerprint": { "$ref": "#/$defs/sha256" },
     "readbackRoster": {
       "type": "array",

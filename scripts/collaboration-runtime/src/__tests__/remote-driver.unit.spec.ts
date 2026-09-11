@@ -1,14 +1,16 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { RemoteDriver, type RemoteAdapter } from '../remote-driver.ts'
+import { RemoteMutationLock } from '../checkpoint-store.ts'
+import { objectFingerprint, writeJsonAtomic } from '../canonical.ts'
 import type {
   RemoteDriverBinding,
   RemoteReceipt,
   RemoteTruth,
   RemoteVerification
 } from '../types.ts'
-import { remoteBinding, remoteTrust } from './helpers.ts'
+import { authorizeRemoteBinding, remoteBinding, remoteTrust } from './helpers.ts'
 
 class FakeRemote implements RemoteAdapter {
   truth: RemoteTruth
@@ -105,6 +107,53 @@ test('remote mutation success followed by process loss resumes from truth withou
 
   const idempotent = await new RemoteDriver(remote, remoteTrust(binding)).run(binding)
   assert.deepEqual(idempotent, resumed)
+  assert.equal(remote.mutationCount, 1)
+})
+
+test('remote mutation lock covers read-mutate-checkpoint and rejects concurrent duplicate execution', async () => {
+  const binding = remoteBinding()
+  let entered!: () => void
+  let release!: () => void
+  const mutationEntered = new Promise<void>((resolve) => {
+    entered = resolve
+  })
+  const mutationRelease = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  class BlockingRemote extends FakeRemote {
+    override async mutate(current: RemoteDriverBinding): Promise<RemoteReceipt> {
+      entered()
+      await mutationRelease
+      return super.mutate(current)
+    }
+  }
+  const remote = new BlockingRemote(binding)
+  const first = new RemoteDriver(remote, remoteTrust(binding)).run(binding)
+  await mutationEntered
+  await assert.rejects(
+    new RemoteDriver(remote, remoteTrust(binding)).run(binding),
+    /REMOTE_ACTION_BUSY/
+  )
+  release()
+  const result = await first
+  assert.equal(result.status, 'REMOTE_VERIFIED')
+  assert.equal(remote.mutationCount, 1)
+})
+
+test('same binding reclaims a dead lock while a different binding fails closed', async () => {
+  const binding = remoteBinding()
+  const held = RemoteMutationLock.acquire(binding)
+  const other = structuredClone(binding)
+  other.bindingFingerprint = 'f'.repeat(64)
+  other.singleUseNonce = 'other-nonce'
+  assert.throws(() => RemoteMutationLock.acquire(other), /REMOTE_ACTION_BUSY/)
+  const stale = JSON.parse(readFileSync(held.path, 'utf8')) as Record<string, unknown>
+  stale.pid = 2147483647
+  stale.lockFingerprint = objectFingerprint(stale, 'lockFingerprint')
+  writeJsonAtomic(held.path, stale)
+  const remote = new FakeRemote(binding)
+  const result = await new RemoteDriver(remote, remoteTrust(binding)).run(binding)
+  assert.equal(result.status, 'REMOTE_VERIFIED')
   assert.equal(remote.mutationCount, 1)
 })
 
@@ -357,7 +406,7 @@ test('process loss after a fast queue merge reconstructs group inputs from merge
   assert.equal(remote.mutationCount, 1)
 })
 
-test('serial latest-main preflight failure releases an uncheckpointed lock for refreshed admission', async () => {
+test('direct serial merge is unavailable and points to Merge Queue', async () => {
   const binding = remoteBinding({
     action: 'merge-pr',
     pullRequest: {
@@ -370,19 +419,16 @@ test('serial latest-main preflight failure releases an uncheckpointed lock for r
     },
     mergeAuthorizationFingerprint: 'f'.repeat(64),
     admission: {
-      mode: 'serial-latest-main',
-      lockPath: '/pending',
+      mode: 'merge-queue',
+      lockPath: null,
       mergeGroupSha: null,
       mergeGroupBaseSha: null
     }
   })
-  const remote = new FakeRemote(binding)
-  remote.preflight = async () => {
-    throw new Error('LATEST_MAIN_DRIFT')
-  }
+  ;(binding.admission as unknown as { mode: string }).mode = 'serial-latest-main'
+  authorizeRemoteBinding(binding)
   await assert.rejects(
-    new RemoteDriver(remote, remoteTrust(binding)).run(binding),
-    /LATEST_MAIN_DRIFT/
+    new RemoteDriver(new FakeRemote(binding), remoteTrust(binding)).run(binding),
+    /MERGE_QUEUE_REQUIRED/
   )
-  assert.equal(existsSync(binding.admission?.lockPath ?? ''), false)
 })

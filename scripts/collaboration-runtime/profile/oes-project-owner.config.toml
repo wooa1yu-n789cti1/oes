@@ -7,6 +7,7 @@ NPM_CONFIG_SHELL_EMULATOR = "true"
 TMPDIR = "{{TASK_TEMP_PATH}}"
 
 [collaboration_runtime]
+project_key = "{{PROJECT_KEY}}"
 owner_task_id = "{{OWNER_TASK_ID}}"
 transition_id = "{{TRANSITION_ID}}"
 approval_mode = "{{APPROVAL_MODE}}"

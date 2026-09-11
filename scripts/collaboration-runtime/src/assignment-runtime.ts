@@ -313,6 +313,20 @@ function requireWipWithinCeiling(wip: AssignmentWipSnapshot, ceiling: Assignment
   }
 }
 
+/** Returns the one RV identity retained across every candidate generation in a delivery state. */
+function stableRvChildTaskId(state: AssignmentRuntimeState): string | null {
+  const identities = new Set(
+    [
+      ...state.activeAssignments,
+      ...state.resultTombstones.map((tombstone) => tombstone.assignment)
+    ]
+      .filter((assignment) => assignment.childKind === 'RV')
+      .map((assignment) => assignment.childTaskId)
+  )
+  if (identities.size > 1) fail('ASSIGNMENT_RV_IDENTITY_CHANGED', state.deliveryKey)
+  return identities.values().next().value ?? null
+}
+
 /** Verifies one persisted active assignment and its immutable route. */
 function validateActiveAssignment(assignment: ActiveChildAssignment): void {
   requireExactKeys(
@@ -539,6 +553,7 @@ export function validateAssignmentRuntimeState(
     fail('ASSIGNMENT_TOMBSTONE_REQUEST_CONFLICT', state.deliveryKey)
   if (completedRequests.some((request) => activeRequests.includes(request)))
     fail('ASSIGNMENT_ACTIVE_COMPLETED_REQUEST_CONFLICT', state.deliveryKey)
+  stableRvChildTaskId(state)
   if (
     [...assignmentIds].sort().join() !== assignmentIds.join() ||
     [...completedIds].sort().join() !== completedIds.join()
@@ -580,7 +595,10 @@ export function validateAssignmentRuntimeState(
     fail('ASSIGNMENT_STATE_MARKER_MISMATCH', `${state.status}/${expectedStatus}`)
   if (
     state.status === 'DELIVERY_TOPOLOGY_REQUIRED' &&
-    state.nextLegalAction !== 'RETURN_DELIVERY_TOPOLOGY_REQUIRED_TO_OWNER'
+    ![
+      'RETURN_DELIVERY_TOPOLOGY_REQUIRED_TO_OWNER',
+      'RETURN_DELIVERY_TOPOLOGY_REQUIRED_TO_DA'
+    ].includes(state.nextLegalAction)
   )
     fail('ASSIGNMENT_NEXT_ACTION_STATE_MISMATCH', state.nextLegalAction)
   return state
@@ -1305,7 +1323,7 @@ export function decideDeliveryTopology(
       deliveries: request.oldTopology.deliveries.map((delivery) => ({ ...delivery }))
     },
     nextLegalAction: independent
-      ? ('RETURN_DELIVERY_TOPOLOGY_REQUIRED_TO_OWNER' as const)
+      ? ('RETURN_DELIVERY_TOPOLOGY_REQUIRED_TO_DA' as const)
       : ('CONTINUE_ORIGINAL_DELIVERY_WITH_BOUNDED_HELPERS' as const),
     reason: independent
       ? 'all sibling deliveries are independently candidateable, reviewable, publishable, safely mergeable, and within the frozen ceiling'
@@ -1469,6 +1487,21 @@ export class AssignmentRuntimeStore {
         fail('ASSIGNMENT_CHILD_ALREADY_ACTIVE', request.childTaskId)
       if (request.childTaskId === state.owner.taskId)
         fail('ASSIGNMENT_SELF_CHILD_ROUTE', request.childTaskId)
+      if (
+        request.childKind === 'RV' &&
+        state.activeAssignments.some(
+          (assignment) =>
+            assignment.childKind === 'RV' && assignment.deliveryKey === request.deliveryKey
+        )
+      )
+        fail('ASSIGNMENT_RV_WIP_EXCEEDED', request.deliveryKey)
+      const boundRvChildTaskId = stableRvChildTaskId(state)
+      if (
+        request.childKind === 'RV' &&
+        boundRvChildTaskId !== null &&
+        request.childTaskId !== boundRvChildTaskId
+      )
+        fail('ASSIGNMENT_RV_IDENTITY_CHANGED', boundRvChildTaskId)
       if (
         request.childKind === 'DO' &&
         state.activeAssignments.some(

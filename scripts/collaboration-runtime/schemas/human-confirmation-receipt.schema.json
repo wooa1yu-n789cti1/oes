@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oes.local/schemas/human-confirmation-receipt.schema.json",
+  "title": "OES trusted Human confirmation receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "projectKey",
+    "decision",
+    "confirmedBy",
+    "confirmedAt",
+    "card",
+    "confirmationFingerprint"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "kind": { "const": "OES_HUMAN_CONFIRMATION_RECEIPT" },
+    "projectKey": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "decision": { "const": "CONFIRMED" },
+    "confirmedBy": { "const": "HUMAN" },
+    "confirmedAt": { "type": "string", "minLength": 1 },
+    "card": { "$ref": "#/$defs/reference" },
+    "confirmationFingerprint": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "fingerprint"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^/" },
+        "sha256": { "$ref": "#/$defs/digest" },
+        "fingerprint": { "$ref": "#/$defs/digest" }
+      }
+    }
+  }
+}

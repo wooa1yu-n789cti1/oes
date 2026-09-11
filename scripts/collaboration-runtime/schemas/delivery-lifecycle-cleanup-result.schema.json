@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oes.local/schemas/delivery-lifecycle-cleanup-result.schema.json",
+  "title": "OES single-delivery lifecycle cleanup result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "deliveryKey",
+    "ownerTaskId",
+    "executionMode",
+    "terminalPackageFingerprint",
+    "reviewSessionFingerprint",
+    "reviewerTaskId",
+    "reviewSessionState",
+    "packagePath",
+    "resourceCleanup",
+    "repositoryDiff",
+    "resultFingerprint"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "kind": { "const": "OES_DELIVERY_LIFECYCLE_CLEANUP_RESULT" },
+    "deliveryKey": { "type": "string", "minLength": 1 },
+    "ownerTaskId": { "type": "string", "minLength": 1 },
+    "executionMode": { "enum": ["REPOSITORY", "HOST_LOCAL"] },
+    "terminalPackageFingerprint": { "$ref": "#/$defs/digest" },
+    "reviewSessionFingerprint": { "$ref": "#/$defs/digest" },
+    "reviewerTaskId": { "type": "string", "minLength": 1 },
+    "reviewSessionState": { "const": "TERMINAL" },
+    "packagePath": { "type": "string", "pattern": "^/" },
+    "resourceCleanup": { "const": "VERIFIED" },
+    "repositoryDiff": { "type": "array", "maxItems": 0 },
+    "resultFingerprint": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

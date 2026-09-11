@@ -78,7 +78,7 @@ function authority(): CoordinationLifecycleRosterAuthority {
     coordinationOwnerTaskId: '/root/co',
     transitionId: 'coordination:cleanup:1',
     coordinationCleanupAuthorizationFingerprint: 'b'.repeat(64),
-    source: 'TASK_NATIVE_CREATION_RECEIPTS' as const,
+    source: 'EXECUTION_NATIVE_CREATION_RECEIPTS' as const,
     createdRoster
   }
   return {
@@ -187,7 +187,7 @@ test('archive planning reopens the exact complete cleanup result set before ARCH
     coordinationOwnerTaskId: cleanup.coordinationOwnerTaskId,
     transitionId: cleanup.transitionId,
     coordinationCleanupAuthorizationFingerprint: cleanup.authorizationFingerprint,
-    source: 'TASK_NATIVE_CREATION_RECEIPTS' as const,
+    source: 'EXECUTION_NATIVE_CREATION_RECEIPTS' as const,
     createdRoster
   }
   const trustedRoster = loadTrustedCoordinationLifecycleRosterAuthority(
@@ -212,7 +212,7 @@ test('archive planning reopens the exact complete cleanup result set before ARCH
     resourceCleanup: 'VERIFIED' as const,
     cleanupResult: cleanupResultReference,
     rosterAuthorityFingerprint: trustedRoster.authorityFingerprint,
-    taskReadbackSource: 'CODEX_TASK_NATIVE' as const,
+    taskReadbackSource: 'CODEX_EXECUTION_NATIVE' as const,
     readbackRosterFingerprint: objectFingerprint(
       readbackRoster as unknown as Record<string, unknown>,
       '__none__'
@@ -226,7 +226,14 @@ test('archive planning reopens the exact complete cleanup result set before ARCH
     cleanup,
     trust
   )
-  assert.equal(planCoordinationLifecycle(trustedRoster, trustedInventory).status, 'ARCHIVE_READY')
+  const lifecycle = planCoordinationLifecycle(trustedRoster, trustedInventory)
+  assert.equal(lifecycle.status, 'ARCHIVE_READY')
+  assert.equal(
+    lifecycle.decisions
+      .filter((decision) => decision.taskKind === 'RV')
+      .every((decision) => decision.decision === 'SKIP_TERMINATED_SUBAGENT'),
+    true
+  )
 
   const missingProof = { ...inventory, cleanupResult: null, inventoryFingerprint: '' }
   missingProof.inventoryFingerprint = objectFingerprint(
@@ -261,7 +268,7 @@ test('inventory binds every terminal task to the immutable creation roster', () 
       fingerprint: 'd'.repeat(64)
     },
     rosterAuthorityFingerprint: auth.authorityFingerprint,
-    taskReadbackSource: 'CODEX_TASK_NATIVE' as const,
+    taskReadbackSource: 'CODEX_EXECUTION_NATIVE' as const,
     readbackRosterFingerprint: objectFingerprint(
       readbackRoster as unknown as Record<string, unknown>,
       '__none__'

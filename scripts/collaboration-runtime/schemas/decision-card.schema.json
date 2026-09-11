@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oes.local/schemas/decision-card.schema.json",
+  "title": "OES decision card",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "projectKey",
+    "decisionKind",
+    "objective",
+    "ownerTopology",
+    "executionMode",
+    "scope",
+    "protectedScope",
+    "acceptance",
+    "integrationContract",
+    "risk",
+    "designImpact",
+    "coupling",
+    "prTopology",
+    "approvedCiLevel",
+    "stopPoint",
+    "coveredActions",
+    "scopeFingerprint",
+    "materialDecisionFingerprint",
+    "cardFingerprint"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "kind": { "const": "OES_DECISION_CARD" },
+    "projectKey": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "decisionKind": { "enum": ["PROPOSAL", "DELIVERY"] },
+    "objective": { "type": "string", "minLength": 1 },
+    "ownerTopology": { "enum": ["DA_UD", "ONE_DO", "CO_WITH_DOS"] },
+    "executionMode": { "enum": ["REPOSITORY", "HOST_LOCAL"] },
+    "scope": { "$ref": "#/$defs/nonEmptyUniqueStrings" },
+    "protectedScope": { "$ref": "#/$defs/nonEmptyUniqueStrings" },
+    "acceptance": { "$ref": "#/$defs/nonEmptyUniqueStrings" },
+    "integrationContract": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "risk": { "enum": ["LOW", "MEDIUM", "HIGH"] },
+    "designImpact": { "enum": ["NONE", "CANONICAL"] },
+    "coupling": { "enum": ["COHESIVE", "INDEPENDENT_COORDINATED"] },
+    "prTopology": {
+      "enum": ["NONE", "ONE_DESIGN_PR", "ONE_DO_PR", "ONE_AGGREGATE_CO_PR", "INDEPENDENT_DO_PRS"]
+    },
+    "approvedCiLevel": { "enum": ["DOCS", "SCOPED", "FULL"] },
+    "stopPoint": { "type": "string", "minLength": 1 },
+    "coveredActions": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "UD_AUDIT",
+          "CANONICAL_WRITE",
+          "IMPLEMENT",
+          "REPAIR_WITHIN_SCOPE",
+          "RV_CREATE_OR_REVIEW",
+          "CI_RUN_OR_RERUN",
+          "PUBLISH_PR",
+          "MERGE_QUEUE_ENQUEUE",
+          "MERGE_VERIFY",
+          "TASK_OWNED_CLEANUP"
+        ]
+      }
+    },
+    "scopeFingerprint": { "$ref": "#/$defs/digest" },
+    "materialDecisionFingerprint": { "$ref": "#/$defs/digest" },
+    "cardFingerprint": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "nonEmptyUniqueStrings": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}

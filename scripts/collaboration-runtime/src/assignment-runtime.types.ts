@@ -260,6 +260,7 @@ export interface DeliveryTopologyDecision {
   newTopology: AssignmentWipSnapshot
   nextLegalAction:
     | 'RETURN_DELIVERY_TOPOLOGY_REQUIRED_TO_OWNER'
+    | 'RETURN_DELIVERY_TOPOLOGY_REQUIRED_TO_DA'
     | 'CONTINUE_ORIGINAL_DELIVERY_WITH_BOUNDED_HELPERS'
   reason: string
 }

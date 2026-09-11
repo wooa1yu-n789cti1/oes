@@ -11,7 +11,7 @@ import {
   loadTrustedCoordinationLifecycleRosterAuthority,
   planCoordinationLifecycle
 } from './coordination-lifecycle.ts'
-import { fail, RuntimeContractError } from './errors.ts'
+import { fail, RuntimeContractError, runtimeErrorResult } from './errors.ts'
 import {
   loadRemoteTrustRootsFromProfileReport,
   verifyEffectiveProfileReport
@@ -105,6 +105,6 @@ async function main(args: string[]): Promise<void> {
   fail('CLEANUP_CLI_COMMAND_UNKNOWN', command ?? 'NONE')
 }
 main(process.argv.slice(2)).catch((error: unknown) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`)
+  process.stderr.write(`${canonicalJson(runtimeErrorResult(error))}\n`)
   process.exitCode = error instanceof RuntimeContractError ? 2 : 1
 })

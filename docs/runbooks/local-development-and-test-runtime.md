@@ -140,7 +140,7 @@ Every other object is preserved.
 
 ## 7. CI parity
 
-`test:run` selects the same dependency plan. CI chooses profile `CI`, writes state beneath the job temp directory, creates job-private providers, and checks `oes.runtime.task-key` residue. The workflow bounds runtime work at two and reports through the single required `CI / Baseline Checks` context. A PR `FULL_REQUIRED` plan still requires its separate exact-head Human confirmation.
+`test:run` selects the same dependency plan. CI chooses profile `CI`, writes state beneath the job temp directory, creates job-private providers, and checks `oes.runtime.task-key` residue. The workflow bounds runtime work at two and reports through the single required `CI / Baseline Checks` context. A PR `FULL_REQUIRED` plan reuses the delivery's trusted scope-bound FULL confirmation across exact-head repairs and reruns; only a higher level or material scope/risk change creates a new decision.
 
 ## 8. A0 infrastructure pilot
 
@@ -271,7 +271,7 @@ pnpm runtime:legacy:residue -- --plan /ABSOLUTE/cleanup-plan.json \
 
 A name, prefix, Compose label, stopped state, or unused appearance is discovery evidence only. Each object is exactly one of `VALID_DEV_DATA`, `ACTIVE_OWNER_HELD`, `CONFIRMED_IDLE_LEGACY_RESIDUE`, or `UNKNOWN_OR_INSUFFICIENT_EVIDENCE`. Without positive exact owner/lease/data/lifecycle evidence, the tool preserves and reports it. `VALID_DEV_DATA` receives a verified read-only archive before any later migration decision.
 
-Real deletion is a later Collaboration Framework `Cleanup` confirmation. Only that boundary may provide a confirmation artifact bound to the sealed plan:
+These legacy host resources are not task-owned disposal. Their real deletion is therefore the explicit unowned-resource Human-decision exception in the Collaboration Framework. Only that boundary may provide a confirmation artifact bound to the sealed plan:
 
 ```bash
 pnpm runtime:legacy:apply -- --plan /ABSOLUTE/cleanup-plan.json \

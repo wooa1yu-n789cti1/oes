@@ -1,4 +1,10 @@
 import { objectFingerprint } from './canonical.ts'
+import {
+  materialDecisionFingerprint,
+  requireTrustedDecisionConfirmation,
+  type DecisionCardInput,
+  type TrustedDecisionConfirmation
+} from './confirmation.ts'
 import { fail } from './errors.ts'
 
 export const TEST_CLASSES = [
@@ -13,7 +19,7 @@ export type TestClass = (typeof TEST_CLASSES)[number]
 
 export interface VerificationTopologyInput {
   candidateSha: string
-  ownerRole: 'DO' | 'CO'
+  ownerRole: 'UD' | 'DO' | 'CO'
   changedRiskClasses: TestClass[]
   selfTestClasses: TestClass[]
   rvClasses: TestClass[]
@@ -22,20 +28,22 @@ export interface VerificationTopologyInput {
   fullRequired: boolean
   fullReason: string | null
   estimatedFullCost: string | null
-  fullConfirmed: boolean
+  confirmation: TrustedDecisionConfirmation
+  currentDecision: DecisionCardInput
 }
 
 export interface VerificationTopology {
   schemaVersion: 2
   kind: 'OES_V2_VERIFICATION_TOPOLOGY'
   candidateSha: string
-  doSelfTest: { owner: 'DO' | 'CO'; classes: TestClass[] }
+  doSelfTest: { owner: 'UD' | 'DO' | 'CO'; classes: TestClass[] }
   rv: { owner: 'RV'; independent: true; exactCandidateSha: string; classes: TestClass[] }
   ci: { requiredStatus: 'Baseline Checks'; exactCandidateSha: string; classes: TestClass[] }
   parallelRvAndCi: boolean
   fullDisposition: 'NOT_REQUIRED' | 'HUMAN_CONFIRMATION_REQUIRED' | 'CONFIRMED'
   fullReason: string | null
   estimatedFullCost: string | null
+  confirmationFingerprint: string
   runnable: boolean
   planFingerprint: string
 }
@@ -45,6 +53,15 @@ const SHA = /^[0-9a-f]{40}$/
 /** Builds the three-layer, exact-candidate verification topology without mechanically selecting every class. */
 export function createVerificationTopology(input: VerificationTopologyInput): VerificationTopology {
   if (!SHA.test(input.candidateSha)) fail('VERIFICATION_CANDIDATE_SHA_INVALID', input.candidateSha)
+  const confirmation = requireTrustedDecisionConfirmation(input.confirmation)
+  const card = confirmation.card
+  if (card.executionMode !== 'REPOSITORY')
+    fail('VERIFICATION_REPOSITORY_CONFIRMATION_REQUIRED', card.cardFingerprint)
+  if (
+    (card.decisionKind === 'PROPOSAL' && input.ownerRole !== 'UD') ||
+    (card.decisionKind === 'DELIVERY' && input.ownerRole === 'UD')
+  )
+    fail('VERIFICATION_OWNER_DECISION_MISMATCH', input.ownerRole)
   for (const [name, values] of Object.entries({
     selfTestClasses: input.selfTestClasses,
     rvClasses: input.rvClasses,
@@ -62,9 +79,18 @@ export function createVerificationTopology(input: VerificationTopologyInput): Ve
   if (missing.length) fail('VERIFICATION_RISK_UNCOVERED', missing.join(','))
   if (input.fullRequired && (!input.fullReason?.trim() || !input.estimatedFullCost?.trim()))
     fail('VERIFICATION_FULL_DISCLOSURE_REQUIRED', input.candidateSha)
+  const currentMaterialDecisionFingerprint = materialDecisionFingerprint(input.currentDecision)
+  const fullAuthorized =
+    card.approvedCiLevel === 'FULL' &&
+    card.materialDecisionFingerprint === currentMaterialDecisionFingerprint
+  if (
+    !input.fullRequired &&
+    card.materialDecisionFingerprint !== currentMaterialDecisionFingerprint
+  )
+    fail('VERIFICATION_MATERIAL_DECISION_MISMATCH', input.candidateSha)
   const fullDisposition: VerificationTopology['fullDisposition'] = !input.fullRequired
     ? 'NOT_REQUIRED'
-    : input.fullConfirmed
+    : fullAuthorized
       ? 'CONFIRMED'
       : 'HUMAN_CONFIRMATION_REQUIRED'
   const base = {
@@ -87,6 +113,7 @@ export function createVerificationTopology(input: VerificationTopologyInput): Ve
     fullDisposition,
     fullReason: input.fullReason,
     estimatedFullCost: input.estimatedFullCost,
+    confirmationFingerprint: confirmation.receipt.confirmationFingerprint,
     runnable: fullDisposition !== 'HUMAN_CONFIRMATION_REQUIRED'
   }
   return {

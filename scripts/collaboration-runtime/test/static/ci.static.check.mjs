@@ -253,12 +253,51 @@ assert.doesNotMatch(activeFramework, legacyRolePattern)
 assert.match(routing, /route: 'DISCUSSION' \| 'DA_UD' \| 'DO' \| 'CO'/)
 assert.match(routing, /ONE_AGGREGATE_CO_PR/)
 assert.match(routing, /INDEPENDENT_DO_PRS/)
-assert.match(routing, /independentPrExceptionConfirmed/)
+assert.match(routing, /confirmationMatches/)
+assert.match(routing, /requireTrustedDecisionConfirmation/)
 const verification = readBase('src/verification-topology.ts')
 assert.match(verification, /requiredStatus: 'Baseline Checks'/)
 assert.match(verification, /parallelRvAndCi: input\.pullRequestCandidateExists/)
 assert.match(verification, /HUMAN_CONFIRMATION_REQUIRED/)
 assert.match(verification, /VERIFICATION_FULL_DISCLOSURE_REQUIRED/)
+assert.match(verification, /card\.materialDecisionFingerprint === currentMaterialDecisionFingerprint/)
+assert.match(verification, /requireTrustedDecisionConfirmation/)
+
+// One confirmation persists across covered mechanical stages; only material decisions return to Human.
+const confirmation = readBase('src/confirmation.ts')
+assert.match(confirmation, /REPAIR_WITHIN_SCOPE/)
+assert.match(confirmation, /MERGE_QUEUE_ENQUEUE/)
+assert.match(confirmation, /TASK_OWNED_CLEANUP/)
+assert.match(confirmation, /CANONICAL_DESIGN_CHANGED/)
+assert.match(confirmation, /HUMAN_CONFIRMATION_RECEIPT/)
+assert.match(confirmation, /TRUSTED_HUMAN_CONFIRMATION_REQUIRED/)
+assert.doesNotMatch(
+  activeFramework,
+  /Initial execution, Proposal submission, delivery activation, merge, abandonment, and cleanup are separate confirmation boundaries/
+)
+
+// Current UD and RV are stable singleton identities; RV remains visible without a sidebar task.
+const udBinding = readBase('src/ud-binding.ts')
+const reviewSession = readBase('src/review-session.ts')
+const singletonCli = readBase('src/cli.ts')
+assert.match(udBinding, /UD_ALREADY_ACTIVE/)
+assert.match(reviewSession, /VISIBLE_SUBAGENT/)
+assert.match(reviewSession, /ASSIGNMENT_RV_WIP_EXCEEDED/)
+assert.match(singletonCli, /FileUdBindingStore/)
+assert.match(singletonCli, /FileReviewSessionStore/)
+assert.match(singletonCli, /command === 'ud-binding-read'/)
+assert.doesNotMatch(singletonCli, /command === 'ud-binding-bind'/)
+assert.doesNotMatch(singletonCli, /createUdBinding|createReviewSession/)
+
+// Agent-facing capabilities expose one legal next action and only Merge Queue admission.
+const capabilities = readBase('src/capabilities.ts')
+const errors = readBase('src/errors.ts')
+assert.match(capabilities, /oes-remote-driver.*MERGE_QUEUE_BINDING/)
+assert.doesNotMatch(capabilities, /direct[-_ ]merge|merge\.direct/i)
+assert.match(errors, /nextActionFor/)
+assert.match(errors, /nextAction:/)
+assert.match(errors, /SEND_PROPOSAL_TO_BOUND_UD/)
+assert.match(readBase('src/binding.ts'), /MERGE_QUEUE_REQUIRED/)
 
 // CO integration requires independent DO ownership, scoped RV, ordered integration,
 // one aggregate branch by default, and an explicit releasability exception otherwise.
@@ -289,6 +328,9 @@ assert.match(packages, /SCOPE_CHANGED/)
 assert.match(packages, /DESIGN_CHANGED/)
 assert.match(packages, /DEPENDENCY_CHANGED/)
 assert.match(packages, /CANDIDATE_CHANGED/)
+assert.match(packages, /schemaVersion: 3/)
+assert.match(packages, /loadTrustedDecisionConfirmation/)
+assert.match(packages, /reviewHistory/)
 assert.match(readRepo('docs/plans/deliveries/README.md'), /not an active V2 state source/)
 
 // Assignment and lifecycle distinguish task roles from the bounded-helper mechanism.
@@ -307,7 +349,19 @@ assert.match(
 assert.match(lifecycle, /COORDINATION_LIFECYCLE_SCOPED_RV_MISSING/)
 assert.match(lifecycle, /COORDINATION_LIFECYCLE_AGGREGATE_RV_MISSING/)
 assert.match(lifecycle, /depth\(b\) - depth\(a\)/)
+assert.match(lifecycle, /SKIP_TERMINATED_SUBAGENT/)
 assert.doesNotMatch(lifecycle, /setInterval|setTimeout|writeFile/)
+
+// One public structured verification entry replaces per-agent evidence shell assembly.
+const verifyEntry = readBase('bin/oes-verify')
+const verifyRunner = readBase('src/verification-runner.ts')
+assert.match(verifyEntry, /src\/verification-cli\.ts/)
+assert.match(verifyRunner, /modified-artifact\.json/)
+assert.match(verifyRunner, /change\.patch/)
+assert.match(verifyRunner, /verification\.json/)
+assert.match(verifyRunner, /rollback\.mjs/)
+assert.match(verifyRunner, /THIN_VERIFY_UNDECLARED_DIRTY_PATH/)
+assert.doesNotMatch(verifyRunner, /shell:\s*true/)
 
 // Cleanup is an isolated entrypoint with only disposal planning/verification commands.
 const generalCli = readBase('src/cli.ts')

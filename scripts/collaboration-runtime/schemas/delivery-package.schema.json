@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://oes.local/schemas/collaboration-runtime/delivery-package-v2.json",
-  "title": "OES V2 Delivery Package",
+  "$id": "https://oes.local/schemas/collaboration-runtime/delivery-package-v3.json",
+  "title": "OES V3 Delivery Package",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -22,7 +22,7 @@
     "execution"
   ],
   "properties": {
-    "schemaVersion": { "const": 2 },
+    "schemaVersion": { "const": 3 },
     "kind": { "const": "OES_DELIVERY_PACKAGE" },
     "packageFingerprint": { "$ref": "#/$defs/digest" },
     "packageVersion": { "type": "integer", "minimum": 1 },
@@ -129,7 +129,10 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "confirmation",
         "confirmationFingerprint",
+        "materialDecisionFingerprint",
+        "approvedCiLevel",
         "objective",
         "scope",
         "nonGoals",
@@ -142,7 +145,10 @@
         "rollback"
       ],
       "properties": {
+        "confirmation": { "$ref": "#/$defs/reference" },
         "confirmationFingerprint": { "$ref": "#/$defs/digest" },
+        "materialDecisionFingerprint": { "$ref": "#/$defs/digest" },
+        "approvedCiLevel": { "enum": ["DOCS", "SCOPED", "FULL"] },
         "objective": { "type": "string", "minLength": 1 },
         "scope": { "$ref": "#/$defs/nonEmptyStringList" },
         "nonGoals": { "$ref": "#/$defs/stringList" },
@@ -251,6 +257,9 @@
         "repository",
         "hostLocal",
         "selfTest",
+        "reviewSession",
+        "reviewerTaskId",
+        "reviewHistory",
         "rv",
         "ci",
         "postCheck",
@@ -262,6 +271,13 @@
         "repository": { "type": ["object", "null"] },
         "hostLocal": { "type": ["object", "null"] },
         "selfTest": { "$ref": "#/$defs/evidence" },
+        "reviewSession": { "$ref": "#/$defs/nullableReference" },
+        "reviewerTaskId": { "type": ["string", "null"] },
+        "reviewHistory": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" }
+        },
         "rv": { "$ref": "#/$defs/evidence" },
         "ci": { "$ref": "#/$defs/evidence" },
         "postCheck": { "$ref": "#/$defs/evidence" },

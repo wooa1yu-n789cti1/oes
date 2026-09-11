@@ -296,6 +296,7 @@ function renderedProfile(
   root = realpathSync(root)
   const installedRoot = join(root, 'installed')
   const values = {
+    PROJECT_KEY: 'oes',
     OWNER_PATH: join(root, 'owner'),
     ARTIFACT_PATH: join(root, 'artifacts'),
     TASK_TEMP_PATH: join(root, 'task-temp'),

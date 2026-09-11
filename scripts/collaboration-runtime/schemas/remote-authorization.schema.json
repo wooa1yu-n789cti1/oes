@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://oes.local/schemas/collaboration-runtime/remote-authorization-v1.json",
+  "$id": "https://oes.local/schemas/collaboration-runtime/remote-authorization-v2.json",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -15,6 +15,7 @@
     "expectedState",
     "stateVersion",
     "transitionId",
+    "decisionConfirmation",
     "rootConfirmationFingerprint",
     "scopeFingerprint",
     "truthBaseline",
@@ -32,7 +33,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": 1
+      "const": 2
     },
     "kind": {
       "const": "OES_REMOTE_ACTION_AUTHORIZATION"
@@ -68,6 +69,7 @@
       "type": "string",
       "minLength": 1
     },
+    "decisionConfirmation": { "$ref": "#/$defs/reference" },
     "rootConfirmationFingerprint": {
       "$ref": "#/$defs/sha256"
     },

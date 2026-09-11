@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://oes.local/schemas/collaboration-runtime/aggregate-delivery-package-v2.json",
-  "title": "OES V2 Aggregate Delivery Package",
+  "$id": "https://oes.local/schemas/collaboration-runtime/aggregate-delivery-package-v3.json",
+  "title": "OES V3 Aggregate Delivery Package",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -16,7 +16,10 @@
     "executionMode",
     "artifactRoot",
     "packagePath",
+    "confirmation",
     "confirmationFingerprint",
+    "materialDecisionFingerprint",
+    "approvedCiLevel",
     "childRoster",
     "deliveryPackages",
     "dependencyOrder",
@@ -26,7 +29,7 @@
     "execution"
   ],
   "properties": {
-    "schemaVersion": { "const": 2 },
+    "schemaVersion": { "const": 3 },
     "kind": { "const": "OES_AGGREGATE_DELIVERY_PACKAGE" },
     "packageFingerprint": { "$ref": "#/$defs/digest" },
     "packageVersion": { "type": "integer", "minimum": 1 },
@@ -44,7 +47,10 @@
       "type": "string",
       "pattern": "^/.+/aggregate-delivery-package\\.json$"
     },
+    "confirmation": { "$ref": "#/$defs/reference" },
     "confirmationFingerprint": { "$ref": "#/$defs/digest" },
+    "materialDecisionFingerprint": { "$ref": "#/$defs/digest" },
+    "approvedCiLevel": { "enum": ["DOCS", "SCOPED", "FULL"] },
     "childRoster": { "$ref": "#/$defs/reference" },
     "deliveryPackages": {
       "type": "array",
@@ -218,6 +224,9 @@
       "required": [
         "repository",
         "hostLocal",
+        "reviewSession",
+        "reviewerTaskId",
+        "reviewHistory",
         "aggregateRv",
         "aggregateCi",
         "postCheck",
@@ -227,6 +236,13 @@
       "properties": {
         "repository": { "type": ["object", "null"] },
         "hostLocal": { "type": ["object", "null"] },
+        "reviewSession": { "$ref": "#/$defs/nullableReference" },
+        "reviewerTaskId": { "type": ["string", "null"] },
+        "reviewHistory": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" }
+        },
         "aggregateRv": { "$ref": "#/$defs/evidence" },
         "aggregateCi": { "$ref": "#/$defs/evidence" },
         "postCheck": { "$ref": "#/$defs/evidence" },

@@ -166,7 +166,7 @@
       "required": ["mode", "lockPath", "mergeGroupSha", "mergeGroupBaseSha"],
       "properties": {
         "mode": {
-          "enum": ["merge-queue", "serial-latest-main"]
+          "const": "merge-queue"
         },
         "lockPath": {
           "type": ["string", "null"]

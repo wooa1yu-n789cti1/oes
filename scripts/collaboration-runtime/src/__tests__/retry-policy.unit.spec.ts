@@ -16,6 +16,7 @@ import type { RemoteTrustRoots, TrustedAuthorizationReference } from '../types.t
 /** Creates one profile-derived CI trust context for immutable observation fixtures. */
 function ciTrust(root: string): RemoteTrustRoots {
   const trust: RemoteTrustRoots = {
+    projectKey: 'oes',
     authorizationRoot: join(root, 'trusted'),
     admissionRoot: join(root, 'admission'),
     profilePath: join(root, 'profile.toml'),

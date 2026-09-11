@@ -30,7 +30,7 @@ export interface PullRequestBinding {
 }
 
 export interface RemoteAdmissionBinding {
-  mode: 'merge-queue' | 'serial-latest-main'
+  mode: 'merge-queue'
   lockPath: string | null
   mergeGroupSha: string | null
   mergeGroupBaseSha: string | null
@@ -43,6 +43,7 @@ export interface TrustedAuthorizationReference {
 }
 
 export interface RemoteTrustRoots {
+  projectKey: string
   authorizationRoot: string
   admissionRoot: string
   profilePath: string
@@ -53,7 +54,7 @@ export interface RemoteTrustRoots {
 }
 
 export interface RemoteAuthorizationRoot {
-  schemaVersion: 1
+  schemaVersion: 2
   kind: 'OES_REMOTE_AUTHORIZATION_ROOT'
   recordFingerprint: string
   status: 'ACTIVE'
@@ -62,6 +63,7 @@ export interface RemoteAuthorizationRoot {
   expectedState: string
   stateVersion: number
   transitionId: string
+  decisionConfirmation: TrustedAuthorizationReference
   rootConfirmationFingerprint: string
   scopeFingerprint: string
   truthBaseline: string
@@ -74,7 +76,7 @@ export interface RemoteAuthorizationRoot {
 }
 
 export interface RemoteActionAuthorization {
-  schemaVersion: 1
+  schemaVersion: 2
   kind: 'OES_REMOTE_ACTION_AUTHORIZATION'
   authorizationFingerprint: string
   status: 'ISSUED'
@@ -85,6 +87,7 @@ export interface RemoteActionAuthorization {
   expectedState: string
   stateVersion: number
   transitionId: string
+  decisionConfirmation: TrustedAuthorizationReference
   rootConfirmationFingerprint: string
   scopeFingerprint: string
   truthBaseline: string
@@ -634,7 +637,7 @@ export interface CoordinationLifecycleRosterAuthority {
   coordinationOwnerTaskId: string
   transitionId: string
   coordinationCleanupAuthorizationFingerprint: string
-  source: 'TASK_NATIVE_CREATION_RECEIPTS'
+  source: 'TASK_NATIVE_CREATION_RECEIPTS' | 'EXECUTION_NATIVE_CREATION_RECEIPTS'
   createdRoster: CoordinationLifecycleCreatedTask[]
 }
 
@@ -651,7 +654,7 @@ export interface CoordinationLifecycleInventory {
   resourceCleanup: 'PENDING' | 'VERIFIED' | 'PARTIAL_FAILURE'
   cleanupResult: TrustedAuthorizationReference | null
   rosterAuthorityFingerprint: string
-  taskReadbackSource: 'CODEX_TASK_NATIVE'
+  taskReadbackSource: 'CODEX_TASK_NATIVE' | 'CODEX_EXECUTION_NATIVE'
   readbackRosterFingerprint: string
   readbackRoster: CoordinationLifecycleTask[]
   terminalTaskIds: string[]
@@ -681,7 +684,7 @@ export interface CoordinationArchiveResultSet {
 export interface CoordinationArchiveDecision {
   taskId: string
   taskKind: CoordinationLifecycleTaskKind
-  decision: 'ARCHIVE' | 'SKIP_ARCHIVED' | 'PRESERVE_BLOCKED'
+  decision: 'ARCHIVE' | 'SKIP_ARCHIVED' | 'SKIP_TERMINATED_SUBAGENT' | 'PRESERVE_BLOCKED'
   reason: string
 }
 

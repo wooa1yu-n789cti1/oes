@@ -23,6 +23,7 @@ export const APPROVAL_MODE_PAIRS: Readonly<
 })
 
 const PROFILE_TEMPLATE_KEYS = [
+  'PROJECT_KEY',
   'OWNER_PATH',
   'ARTIFACT_PATH',
   'TASK_TEMP_PATH',

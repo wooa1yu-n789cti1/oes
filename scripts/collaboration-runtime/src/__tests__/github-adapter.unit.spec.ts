@@ -132,6 +132,14 @@ class ScenarioRunner implements CommandRunner {
           })
         )
       if (endpoint.includes('/rulesets/7')) return ok(JSON.stringify(this.ruleset))
+      if (endpoint.includes('/compare/'))
+        return ok(
+          JSON.stringify({
+            status: this.nonAncestorHeads.has(endpoint.split('...').at(-1) ?? '')
+              ? 'diverged'
+              : 'ahead'
+          })
+        )
       if (endpoint.includes('/rulesets?'))
         return ok(
           JSON.stringify([{ id: 7, name: 'protect-main', target: 'branch', enforcement: 'active' }])
@@ -487,6 +495,57 @@ test('preflight rejects latest-main drift before merge or publication', async ()
     reviewGate: emptyGate
   }
   await assert.rejects(adapter.preflight(binding, truth), /LATEST_MAIN_DRIFT/)
+})
+
+test('Merge Queue admission accepts a normally advanced main and delegates integration to the group', async () => {
+  const advancedMain = '9'.repeat(40)
+  const binding = remoteBinding({
+    action: 'merge-pr',
+    pullRequest: {
+      baseRef: 'main',
+      draft: false,
+      number: 77,
+      requiredChecks: ['Baseline Checks'],
+      title: 'Runtime',
+      body: 'Exact candidate'
+    },
+    mergeAuthorizationFingerprint: 'f'.repeat(64),
+    admission: {
+      mode: 'merge-queue',
+      lockPath: null,
+      mergeGroupSha: null,
+      mergeGroupBaseSha: null
+    }
+  })
+  const runner = new ScenarioRunner(binding.candidateSha, advancedMain)
+  runner.pullExists = true
+  runner.pullNumber = 77
+  runner.pullDraft = false
+  const adapter = new GitHubRemoteAdapter(runner)
+  const truth: RemoteTruth = {
+    ...publishTruth(binding, binding.candidateSha, { number: 77, draft: false }),
+    mainHead: advancedMain,
+    requiredChecks: [
+      {
+        id: 1,
+        sha: binding.candidateSha,
+        name: 'Baseline Checks',
+        status: 'completed',
+        conclusion: 'success'
+      }
+    ]
+  }
+  await adapter.mutate(binding, truth)
+  assert.equal(
+    runner.commands.some((command) => command.includes('/merge-async')),
+    true
+  )
+  assert.equal(
+    runner.commands.some((command) =>
+      command.includes(`/compare/${binding.integrationBase}...${advancedMain}`)
+    ),
+    true
+  )
 })
 
 test('main verification rejects a merge whose second parent is not the confirmed PR head', async () => {

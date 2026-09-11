@@ -23,7 +23,7 @@
     "coordinationOwnerTaskId": { "$ref": "#/$defs/token" },
     "transitionId": { "$ref": "#/$defs/token" },
     "coordinationCleanupAuthorizationFingerprint": { "$ref": "#/$defs/sha256" },
-    "source": { "const": "TASK_NATIVE_CREATION_RECEIPTS" },
+    "source": { "enum": ["TASK_NATIVE_CREATION_RECEIPTS", "EXECUTION_NATIVE_CREATION_RECEIPTS"] },
     "createdRoster": {
       "type": "array",
       "minItems": 4,

@@ -596,6 +596,36 @@ test('canonical 3 DOs, 3 bounded helpers per delivery, and 1 RV ceilings never m
   assert.deepEqual(readFileSync(coordination.store.statePath), before)
 })
 
+test('completed RV generations retain one child identity instead of dispatching a duplicate RV', (t) => {
+  const { store, state } = runtime(t)
+  const first = store.dispatchChild(child(state.stateVersion, 'task-rv-stable', 'RV'))
+  store.consumeResult(result(first.activeAssignments[0]))
+  const completed = store.load()
+  const before = readFileSync(store.statePath)
+  assert.throws(
+    () => store.dispatchChild(child(completed.stateVersion, 'task-rv-duplicate', 'RV')),
+    /ASSIGNMENT_RV_IDENTITY_CHANGED/
+  )
+  assert.deepEqual(readFileSync(store.statePath), before)
+
+  const nextGeneration = store.dispatchChild(
+    child(completed.stateVersion, 'task-rv-stable', 'RV', {
+      scopeFingerprint: '9'.repeat(64)
+    })
+  )
+  assert.equal(
+    nextGeneration.activeAssignments.find((assignment) => assignment.childKind === 'RV')
+      ?.childTaskId,
+    'task-rv-stable'
+  )
+  assert.equal(
+    nextGeneration.resultTombstones.find(
+      (tombstone) => tombstone.assignment.childKind === 'RV'
+    )?.assignment.childTaskId,
+    'task-rv-stable'
+  )
+})
+
 test('self-child and duplicate active Delivery Ownership fail before any state bytes change', (t) => {
   const delivery = runtime(t)
   let before = readFileSync(delivery.store.statePath)
@@ -815,7 +845,7 @@ test('complete independent proof within the ceiling yields exact DELIVERY_TOPOLO
   const decision = decideDeliveryTopology(request)
   assert.equal(decision.decision, 'DELIVERY_TOPOLOGY_REQUIRED')
   assert.equal(decision.newTopology.activeDeliveryOwners, 2)
-  assert.equal(decision.nextLegalAction, 'RETURN_DELIVERY_TOPOLOGY_REQUIRED_TO_OWNER')
+  assert.equal(decision.nextLegalAction, 'RETURN_DELIVERY_TOPOLOGY_REQUIRED_TO_DA')
   assert.equal(decision.request.invalidationConditions.length, 9)
   validateDeliveryTopologyDecision(decision, request)
   validateJsonSchema(schema('assignment-delivery-topology.schema.json'), request)
