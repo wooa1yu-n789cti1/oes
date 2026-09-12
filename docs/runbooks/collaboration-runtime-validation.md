@@ -35,7 +35,7 @@ Each `createValidationPlan` request has one tier:
 
 Every command appears in exactly one of `runActions` or `reuseActions`. A semantic conflict returns `DESIGN_GAP` with no runnable/reusable action.
 
-FULL is exceptional. If the PR change planner marks FULL required, persist and present the exact reason, affected scope, estimated phases, time, and cost, then stop before execution until the Human explicitly confirms it. Scheduled, manual, and release FULL retain their separately invoked contract.
+FULL is exceptional. If the PR change planner marks FULL required above the confirmed CI level, persist and present the exact reason, affected scope, estimated phases, time, and cost once. A confirmed FULL level remains runnable for later candidate repairs and reruns while the confirmed scope and risk remain unchanged. Scheduled, manual, and release FULL retain their separately invoked contract.
 
 ## 4. Design risk scan
 
@@ -46,14 +46,24 @@ FULL is exceptional. If the PR change planner marks FULL required, persist and p
 Each exact candidate has three non-substitutable layers:
 
 1. DO/CO self-test for fast changed-scope feedback.
-2. Independent RV for design conformance, correctness, maintainability, simplicity, efficiency, robustness, security, and risk-selected tests.
+2. One stable visible RV subagent, independent of the owner, for design conformance, correctness, maintainability, simplicity, efficiency, robustness, security, and risk-selected tests. The same RV identity serially re-reviews later candidate generations.
 3. CI with stable required status `Baseline Checks`.
 
 When a PR candidate exists, RV and CI run in parallel. A CO candidate additionally requires scoped RV for each DO before integration and aggregate RV on the integrated candidate.
 
 Applicable classes are static, unit, component, contract, integration, and critical business journey. Selection follows risk; every class is not run mechanically.
 
-## 6. Commands
+## 6. One public verification entry
+
+Agents use one structured, shell-free entry. It records declared temporary inputs, exact argv, literal output and exit status, and emits the modified-artifact reference, binary patch, verification record, and Node rollback program:
+
+```bash
+scripts/collaboration-runtime/bin/oes-verify run --input VERIFICATION_RUN.json
+```
+
+Formal candidates require a clean exact-candidate worktree. Temporary verification assembly may contain only explicitly declared inputs such as dependency or Prisma links; NUL-delimited Git status rejects every undeclared dirty path, and declared directories are fingerprinted from their recursive names, entry kinds, link targets, and file bytes. These inputs do not redefine candidate cleanliness. The entry delegates to the existing test planner and package scripts rather than duplicating test logic.
+
+## 7. Underlying commands
 
 Focused runtime development:
 
@@ -77,10 +87,10 @@ pnpm test:plan -- --base BASE_SHA --head HEAD
 
 Persist command text, literal output, exit status, candidate/base, environment identity, selected coverage, and resulting evidence fingerprint.
 
-## 7. Failure routing
+## 8. Failure routing
 
 - Invalid/tampered evidence: regenerate from literal inputs.
-- Missing evidence: schedule the required command at the current tier.
+- Missing evidence: schedule the required command at the current tier through `oes-verify`.
 - Implementation or test failure: return to the exact DO or CO candidate owner.
-- Frozen semantic conflict: return the pinpointed gap through DA/UD while preserving delivery resources.
+- Frozen semantic conflict: return the pinpointed gap once through DA/UD while preserving delivery resources.
 - Candidate/dependency movement: create a new affected matrix and reuse only exact still-applicable evidence.

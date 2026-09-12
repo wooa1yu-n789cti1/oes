@@ -1,6 +1,5 @@
 import { existsSync } from 'node:fs'
-import { RemoteCheckpointStore } from './checkpoint-store.ts'
-import { SerialAdmissionLock } from './admission.ts'
+import { RemoteCheckpointStore, RemoteMutationLock } from './checkpoint-store.ts'
 import { loadRemoteBinding, validateRemoteBinding } from './binding.ts'
 import { objectFingerprint, readJson, writeJsonAtomic } from './canonical.ts'
 import { fail } from './errors.ts'
@@ -155,25 +154,21 @@ export class RemoteDriver {
   /** Runs or idempotently resumes an exact binding. */
   async run(input: RemoteDriverBinding): Promise<RemoteDriverResult> {
     const binding = validateRemoteBinding(input, this.trust)
-    const admission =
-      binding.action === 'merge-pr' && binding.admission?.mode === 'serial-latest-main'
-        ? new SerialAdmissionLock(binding)
-        : null
-    admission?.acquire()
-    try {
-      const result = await this.runBound(binding)
-      if (result.status === 'REMOTE_VERIFIED') admission?.release()
-      return result
-    } catch (error) {
-      // A failure before the preflight checkpoint cannot conceal a mutation and must not strand
-      // latest-main admission. Once checkpointed, keep the lock for exact-binding recovery.
-      if (admission && new RemoteCheckpointStore(binding).read() === null) admission.release()
-      throw error
-    }
+    return this.runBound(binding)
   }
 
   /** Runs the checkpoint transaction after any required serial admission is held. */
   private async runBound(binding: RemoteDriverBinding): Promise<RemoteDriverResult> {
+    const lock = MUTATING_ACTIONS.has(binding.action) ? RemoteMutationLock.acquire(binding) : null
+    try {
+      return await this.runTransaction(binding)
+    } finally {
+      lock?.release()
+    }
+  }
+
+  /** Executes the complete remote read-mutate-checkpoint transaction while its lock is held. */
+  private async runTransaction(binding: RemoteDriverBinding): Promise<RemoteDriverResult> {
     const store = new RemoteCheckpointStore(binding)
     let checkpoint = store.read()
     if (checkpoint?.phase === 'REMOTE_VERIFIED') {

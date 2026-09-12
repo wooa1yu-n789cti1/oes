@@ -1,4 +1,3 @@
-import { readFileSync, realpathSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import {
   CAPABILITY_NAMES,
@@ -7,18 +6,17 @@ import {
   type RemoteActionAuthorization,
   type RemoteAuthorizationRoot,
   type RemoteDriverBinding,
-  type RemoteTrustRoots,
-  type TrustedAuthorizationReference
+  type RemoteTrustRoots
 } from './types.ts'
 import {
   assertPathWithin,
   canonicalJson,
   isInvalidated,
   objectFingerprint,
-  readJson,
-  sha256
+  readJson
 } from './canonical.ts'
 import { fail } from './errors.ts'
+import { loadTrustedDecisionConfirmation, type ContinuousAction } from './confirmation.ts'
 import {
   loadOwnerResourceBindingReference,
   stableRemoteActionRoot,
@@ -27,6 +25,8 @@ import {
   validateOwnerResourceReference
 } from './resource-topology.ts'
 import { RESOURCE_TOPOLOGY_VERSIONS } from './resource-topology.types.ts'
+import { verifyTrustedReference } from './trusted-reference.ts'
+export { verifyTrustedReference } from './trusted-reference.ts'
 
 const SHA256 = /^[0-9a-f]{64}$/
 const GIT_SHA = /^[0-9a-f]{40}$/
@@ -127,28 +127,6 @@ function validateRemoteResourceTopology(
     fail('REMOTE_STABLE_ACTION_PATH_MISMATCH', actionRoot)
 }
 
-/** Verifies one immutable artifact reference within the configured authorization root. */
-export function verifyTrustedReference(
-  reference: TrustedAuthorizationReference,
-  authorizationRoot: string,
-  fingerprintField: string
-): Record<string, unknown> {
-  requireExactKeys(reference, ['path', 'sha256', 'fingerprint'], 'authorizationReference')
-  if (!isAbsolute(reference.path)) fail('AUTHORIZATION_PATH_NOT_ABSOLUTE', reference.path)
-  assertPathWithin(authorizationRoot, reference.path)
-  assertPathWithin(realpathSync(authorizationRoot), realpathSync(reference.path))
-  requireFingerprint(reference.sha256, 'authorization.sha256')
-  requireFingerprint(reference.fingerprint, 'authorization.fingerprint')
-  const bytes = readFileSync(reference.path)
-  if (sha256(bytes) !== reference.sha256) fail('AUTHORIZATION_SHA_MISMATCH', reference.path)
-  const record = JSON.parse(bytes.toString('utf8')) as Record<string, unknown>
-  if (record[fingerprintField] !== reference.fingerprint)
-    fail('AUTHORIZATION_FINGERPRINT_MISMATCH', reference.path)
-  if (objectFingerprint(record, fingerprintField) !== reference.fingerprint)
-    fail('AUTHORIZATION_CANONICAL_FINGERPRINT_MISMATCH', reference.path)
-  return record
-}
-
 /** Compares the binding to an independently stored, profile-read-only action authorization. */
 function validateTrustedAuthorization(
   binding: RemoteDriverBinding,
@@ -163,6 +141,8 @@ function validateTrustedAuthorization(
     'authorizationFingerprint'
   )
   const authority = raw as unknown as RemoteActionAuthorization
+  if ((authority as { schemaVersion?: number }).schemaVersion === 1)
+    fail('V2_REMOTE_AUTHORIZATION_CUTOVER_REQUIRED', binding.authorization.path)
   requireExactKeys(
     authority,
     [
@@ -177,6 +157,7 @@ function validateTrustedAuthorization(
       'expectedState',
       'stateVersion',
       'transitionId',
+      'decisionConfirmation',
       'rootConfirmationFingerprint',
       'scopeFingerprint',
       'truthBaseline',
@@ -199,7 +180,7 @@ function validateTrustedAuthorization(
     'remoteAuthorization'
   )
   if (
-    authority.schemaVersion !== 1 ||
+    authority.schemaVersion !== 2 ||
     authority.kind !== 'OES_REMOTE_ACTION_AUTHORIZATION' ||
     authority.status !== 'ISSUED' ||
     authority.issuedBeforeRemoteMutation !== true
@@ -210,6 +191,8 @@ function validateTrustedAuthorization(
     authorizationRoot,
     'recordFingerprint'
   ) as unknown as RemoteAuthorizationRoot
+  if ((root as { schemaVersion?: number }).schemaVersion === 1)
+    fail('V2_REMOTE_AUTHORIZATION_CUTOVER_REQUIRED', authority.rootAuthorization.path)
   requireExactKeys(
     root,
     [
@@ -222,6 +205,7 @@ function validateTrustedAuthorization(
       'expectedState',
       'stateVersion',
       'transitionId',
+      'decisionConfirmation',
       'rootConfirmationFingerprint',
       'scopeFingerprint',
       'truthBaseline',
@@ -237,7 +221,7 @@ function validateTrustedAuthorization(
     'remoteAuthorizationRoot'
   )
   if (
-    root.schemaVersion !== 1 ||
+    root.schemaVersion !== 2 ||
     root.kind !== 'OES_REMOTE_AUTHORIZATION_ROOT' ||
     root.status !== 'ACTIVE'
   )
@@ -257,6 +241,21 @@ function validateTrustedAuthorization(
   requireFingerprint(root.scopeFingerprint, 'root.scopeFingerprint')
   requireGitSha(root.truthBaseline, 'root.truthBaseline')
   requireFingerprint(authority.rootConfirmationFingerprint, 'rootConfirmationFingerprint')
+  const confirmation = loadTrustedDecisionConfirmation(root.decisionConfirmation, authorizationRoot)
+  if (
+    canonicalJson(root.decisionConfirmation) !== canonicalJson(authority.decisionConfirmation) ||
+    confirmation.receipt.confirmationFingerprint !== root.rootConfirmationFingerprint ||
+    confirmation.card.materialDecisionFingerprint !== root.scopeFingerprint ||
+    confirmation.card.executionMode !== 'REPOSITORY' ||
+    (root.owner.role === 'UD'
+      ? confirmation.card.decisionKind !== 'PROPOSAL' || confirmation.card.ownerTopology !== 'DA_UD'
+      : root.owner.role === 'CO'
+        ? confirmation.card.decisionKind !== 'DELIVERY' ||
+          confirmation.card.ownerTopology !== 'CO_WITH_DOS'
+        : confirmation.card.decisionKind !== 'DELIVERY' ||
+          !['ONE_DO', 'CO_WITH_DOS'].includes(confirmation.card.ownerTopology))
+  )
+    fail('REMOTE_DECISION_CONFIRMATION_MISMATCH', authority.allowedAction)
   const exactPairs: Array<[unknown, unknown, string]> = [
     [root.issuerTaskId, authority.issuerTaskId, 'issuerTaskId'],
     [root.owner.role, authority.owner.role, 'root.owner.role'],
@@ -264,6 +263,11 @@ function validateTrustedAuthorization(
     [root.expectedState, authority.expectedState, 'root.expectedState'],
     [root.stateVersion, authority.stateVersion, 'root.stateVersion'],
     [root.transitionId, authority.transitionId, 'root.transitionId'],
+    [
+      canonicalJson(root.decisionConfirmation),
+      canonicalJson(authority.decisionConfirmation),
+      'decisionConfirmation'
+    ],
     [
       root.rootConfirmationFingerprint,
       authority.rootConfirmationFingerprint,
@@ -315,6 +319,15 @@ function validateTrustedAuthorization(
     root.cleanupAuthorizationFingerprint !== authority.cleanupAuthorizationFingerprint
   )
     fail('REMOTE_AUTHORIZATION_HUMAN_GATE_MISMATCH', authority.allowedAction)
+  const decisionActions: Partial<Record<string, ContinuousAction>> = {
+    'publish-pr': 'PUBLISH_PR',
+    'verify-pr': 'CI_RUN_OR_RERUN',
+    'merge-pr': 'MERGE_QUEUE_ENQUEUE',
+    'verify-main': 'MERGE_VERIFY'
+  }
+  const requiredDecisionAction = decisionActions[authority.allowedAction]
+  if (requiredDecisionAction && !confirmation.card.coveredActions.includes(requiredDecisionAction))
+    fail('REMOTE_ACTION_NOT_DECISION_CONFIRMED', authority.allowedAction)
   const version = trustTopologyVersion(trust)
   if (version === 'owner-exclusive-v2') {
     if (
@@ -452,17 +465,7 @@ export function validateRemoteBinding(
       ['mode', 'lockPath', 'mergeGroupSha', 'mergeGroupBaseSha'],
       'admission'
     )
-    if (binding.admission.mode === 'serial-latest-main') {
-      if (!binding.admission.lockPath) fail('SERIAL_ADMISSION_LOCK_REQUIRED', binding.headRef)
-      const admissionRoot = trust.admissionRoot
-      if (!admissionRoot || !isAbsolute(admissionRoot))
-        fail('SERIAL_ADMISSION_ROOT_REQUIRED', 'runtime trust context')
-      assertPathWithin(admissionRoot, binding.admission.lockPath)
-      if (binding.admission.lockPath !== join(admissionRoot, 'latest-main.lock'))
-        fail('SERIAL_ADMISSION_LOCK_IDENTITY_MISMATCH', binding.admission.lockPath)
-      if (binding.admission.mergeGroupSha !== null || binding.admission.mergeGroupBaseSha !== null)
-        fail('SERIAL_ADMISSION_MERGE_GROUP_FORBIDDEN', binding.headRef)
-    } else if (binding.admission.mode === 'merge-queue') {
+    if (binding.admission.mode === 'merge-queue') {
       if (binding.admission.lockPath !== null)
         fail('MERGE_QUEUE_MUST_NOT_USE_LOCAL_LOCK', binding.headRef)
       if (
@@ -474,7 +477,7 @@ export function validateRemoteBinding(
         requireGitSha(binding.admission.mergeGroupSha, 'admission.mergeGroupSha')
         requireGitSha(binding.admission.mergeGroupBaseSha, 'admission.mergeGroupBaseSha')
       }
-    } else fail('INVALID_ADMISSION_MODE', String(binding.admission.mode))
+    } else fail('MERGE_QUEUE_REQUIRED', String(binding.admission.mode))
   }
   if (binding.action === 'verify-main') {
     requireGitSha(binding.expectedMergeSha, 'expectedMergeSha')

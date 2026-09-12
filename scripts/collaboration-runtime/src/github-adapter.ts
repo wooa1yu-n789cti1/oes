@@ -127,10 +127,7 @@ export class GitHubRemoteAdapter implements RemoteAdapter {
     if (binding.action !== 'verify-main' && branch !== binding.headRef)
       fail('LOCAL_BRANCH_MISMATCH', branch)
     this.verifyRepositoryBaseline(binding)
-    if (
-      ['preflight', 'publish-pr', 'verify-pr'].includes(binding.action) ||
-      (binding.action === 'merge-pr' && binding.admission?.mode === 'serial-latest-main')
-    ) {
+    if (['preflight', 'publish-pr', 'verify-pr'].includes(binding.action)) {
       if (truth.mainHead !== binding.integrationBase)
         fail('LATEST_MAIN_DRIFT', `${truth.mainHead} != ${binding.integrationBase}`)
       checked(
@@ -282,40 +279,23 @@ export class GitHubRemoteAdapter implements RemoteAdapter {
       }
     } else if (binding.action === 'merge-pr') {
       this.requireMergeGate(binding, truth)
-      if (binding.admission?.mode === 'merge-queue')
-        checked(
-          this.runner,
-          this.gh,
-          [
-            'api',
-            '--method',
-            'PUT',
-            `repos/${binding.repositorySlug}/pulls/${binding.pullRequest.number}/merge-async`,
-            '-f',
-            `sha=${binding.candidateSha}`,
-            '-f',
-            'merge_method=merge',
-            '-f',
-            'merge_action=merge_queue'
-          ],
-          cwd
-        )
-      else
-        checked(
-          this.runner,
-          this.gh,
-          [
-            'api',
-            '--method',
-            'PUT',
-            `repos/${binding.repositorySlug}/pulls/${binding.pullRequest.number}/merge`,
-            '-f',
-            'merge_method=merge',
-            '-f',
-            `sha=${binding.candidateSha}`
-          ],
-          cwd
-        )
+      checked(
+        this.runner,
+        this.gh,
+        [
+          'api',
+          '--method',
+          'PUT',
+          `repos/${binding.repositorySlug}/pulls/${binding.pullRequest.number}/merge-async`,
+          '-f',
+          `sha=${binding.candidateSha}`,
+          '-f',
+          'merge_method=merge',
+          '-f',
+          'merge_action=merge_queue'
+        ],
+        cwd
+      )
     } else fail('READ_ONLY_ACTION_MUTATION_REQUESTED', binding.action)
     const after = await this.readTruth(binding)
     return {
@@ -510,7 +490,9 @@ export class GitHubRemoteAdapter implements RemoteAdapter {
 
   /** Requires all non-Human merge gates visible before admission. */
   private requireMergeGate(binding: RemoteDriverBinding, truth: RemoteTruth): void {
-    if (truth.mainHead !== binding.integrationBase) fail('LATEST_MAIN_DRIFT', truth.mainHead)
+    if (binding.admission?.mode !== 'merge-queue')
+      fail('MERGE_QUEUE_REQUIRED', String(binding.admission?.mode))
+    this.verifyRemoteAncestor(binding, binding.integrationBase, truth.mainHead)
     if (!truth.pullRequest || truth.pullRequest.draft)
       fail('PULL_REQUEST_NOT_MERGE_READY', binding.headRef)
     this.requireExactPull(binding, truth.pullRequest)

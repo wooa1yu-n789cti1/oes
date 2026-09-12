@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oes.local/schemas/collaboration-runtime/ud-binding-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "projectKey",
+    "taskId",
+    "generation",
+    "state",
+    "bindingFingerprint"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "kind": { "const": "OES_CURRENT_UD_BINDING" },
+    "projectKey": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "taskId": { "type": "string", "minLength": 1 },
+    "generation": { "type": "integer", "minimum": 1 },
+    "state": { "enum": ["ACTIVE", "TERMINAL"] },
+    "bindingFingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

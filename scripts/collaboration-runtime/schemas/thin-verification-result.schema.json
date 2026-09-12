@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oes.local/schemas/collaboration-runtime/thin-verification-result-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "status",
+    "baselineSha",
+    "candidateSha",
+    "candidateTreeSha",
+    "formalCandidate",
+    "packageReference",
+    "declaredInputs",
+    "commands",
+    "artifacts",
+    "resultFingerprint"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "kind": { "const": "OES_THIN_VERIFICATION_RESULT" },
+    "status": { "enum": ["PASSED", "FAILED"] },
+    "baselineSha": { "$ref": "#/$defs/sha" },
+    "candidateSha": { "$ref": "#/$defs/sha" },
+    "candidateTreeSha": { "$ref": "#/$defs/sha" },
+    "formalCandidate": { "type": "boolean" },
+    "packageReference": { "type": ["string", "null"] },
+    "declaredInputs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "kind", "fingerprint"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "kind": { "enum": ["SYMLINK", "FILE", "DIRECTORY", "OTHER"] },
+          "fingerprint": { "$ref": "#/$defs/digest" }
+        }
+      }
+    },
+    "commands": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "executable",
+          "args",
+          "coverageIds",
+          "stdout",
+          "stderr",
+          "exitCode",
+          "logPath"
+        ],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "executable": { "type": "string", "minLength": 1 },
+          "args": { "type": "array", "items": { "type": "string" } },
+          "coverageIds": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "stdout": { "type": "string" },
+          "stderr": { "type": "string" },
+          "exitCode": { "type": "integer" },
+          "logPath": { "$ref": "#/$defs/absolutePath" }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modifiedArtifact", "patch", "verification", "rollback"],
+      "properties": {
+        "modifiedArtifact": { "$ref": "#/$defs/absolutePath" },
+        "patch": { "$ref": "#/$defs/absolutePath" },
+        "verification": { "$ref": "#/$defs/absolutePath" },
+        "rollback": { "$ref": "#/$defs/absolutePath" }
+      }
+    },
+    "resultFingerprint": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "absolutePath": { "type": "string", "pattern": "^/" }
+  }
+}

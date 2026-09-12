@@ -805,8 +805,13 @@ export function loadRemoteTrustRootsFromProfileReport(
   }
   const authorizationRoot = collaboration.get('trusted_authorization_root') ?? ''
   const admissionRoot = collaboration.get('serial_admission_root') ?? ''
+  const projectKey = collaboration.get('project_key') ?? ''
   const installedIdentity = readInstalledProfileIdentity(report.profile.path)
-  if (!isAbsolute(authorizationRoot) || !isAbsolute(admissionRoot))
+  if (
+    !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(projectKey) ||
+    !isAbsolute(authorizationRoot) ||
+    !isAbsolute(admissionRoot)
+  )
     fail('INSTALLED_RUNTIME_TRUST_ROOT_INVALID', report.profile.path)
   if (
     authorizationRoot === admissionRoot ||
@@ -818,6 +823,7 @@ export function loadRemoteTrustRootsFromProfileReport(
     fail('AUTHORIZATION_ROOT_MUST_NOT_BE_WORKSPACE_ROOT', authorizationRoot)
   requireProfileReadOnlyControl(report.profile.path, authorizationRoot)
   return {
+    projectKey,
     authorizationRoot,
     admissionRoot,
     profilePath: report.profile.path,

@@ -86,6 +86,7 @@ function trustFixture(root: string): RemoteTrustRoots {
   mkdirSync(authorizationRoot, { recursive: true })
   mkdirSync(admissionRoot, { recursive: true })
   return {
+    projectKey: 'oes',
     authorizationRoot,
     admissionRoot,
     profilePath: join(root, 'profile.toml'),

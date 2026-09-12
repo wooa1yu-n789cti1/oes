@@ -2,7 +2,9 @@ import { lstatSync, readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { canonicalJson, objectFingerprint, sha256 } from './canonical.ts'
+import { loadTrustedDecisionConfirmation, type DecisionCard } from './confirmation.ts'
 import { fail } from './errors.ts'
+import { validateReviewSession, type ReviewSession } from './review-session.ts'
 import {
   physicalIdentityForPotentialPath,
   requireExactPhysicalPath,
@@ -26,7 +28,10 @@ export interface DeliveryPackageDependency {
 }
 
 export interface DeliveryActivation {
+  confirmation: TrustedAuthorizationReference
   confirmationFingerprint: string
+  materialDecisionFingerprint: string
+  approvedCiLevel: 'DOCS' | 'SCOPED' | 'FULL'
   objective: string
   scope: string[]
   nonGoals: string[]
@@ -98,6 +103,9 @@ export interface DeliveryExecution {
   repository: RepositoryDeliveryState | null
   hostLocal: HostLocalDeliveryState | null
   selfTest: DeliveryEvidence
+  reviewSession: TrustedAuthorizationReference | null
+  reviewerTaskId: string | null
+  reviewHistory: string[]
   rv: DeliveryEvidence
   ci: DeliveryEvidence
   postCheck: DeliveryEvidence
@@ -106,7 +114,7 @@ export interface DeliveryExecution {
 }
 
 export interface DeliveryPackage {
-  schemaVersion: 2
+  schemaVersion: 3
   kind: 'OES_DELIVERY_PACKAGE'
   packageFingerprint: string
   packageVersion: number
@@ -152,6 +160,9 @@ export interface AggregateHostLocalState {
 export interface AggregateExecution {
   repository: AggregateRepositoryState | null
   hostLocal: AggregateHostLocalState | null
+  reviewSession: TrustedAuthorizationReference | null
+  reviewerTaskId: string | null
+  reviewHistory: string[]
   aggregateRv: DeliveryEvidence
   aggregateCi: DeliveryEvidence
   postCheck: DeliveryEvidence
@@ -160,7 +171,7 @@ export interface AggregateExecution {
 }
 
 export interface AggregateDeliveryPackage {
-  schemaVersion: 2
+  schemaVersion: 3
   kind: 'OES_AGGREGATE_DELIVERY_PACKAGE'
   packageFingerprint: string
   packageVersion: number
@@ -171,7 +182,10 @@ export interface AggregateDeliveryPackage {
   executionMode: DeliveryExecutionMode
   artifactRoot: string
   packagePath: string
+  confirmation: TrustedAuthorizationReference
   confirmationFingerprint: string
+  materialDecisionFingerprint: string
+  approvedCiLevel: 'DOCS' | 'SCOPED' | 'FULL'
   childRoster: TrustedAuthorizationReference
   deliveryPackages: DeliveryPackageReference[]
   dependencyOrder: string[]
@@ -256,6 +270,15 @@ export function createDeliveryPackage(
       draft.packagePath !== previous.packagePath)
   )
     fail('DELIVERY_PACKAGE_IDENTITY_IMMUTABLE', draft.deliveryKey)
+  if (
+    previous?.execution.reviewSession &&
+    (draft.execution.reviewSession?.path !== previous.execution.reviewSession.path ||
+      draft.execution.reviewerTaskId !== previous.execution.reviewerTaskId ||
+      canonicalJson(
+        draft.execution.reviewHistory.slice(0, previous.execution.reviewHistory.length)
+      ) !== canonicalJson(previous.execution.reviewHistory))
+  )
+    fail('DELIVERY_PACKAGE_RV_SESSION_IMMUTABLE', draft.deliveryKey)
   const activationFingerprint = objectFingerprint(
     draft.activation as unknown as Record<string, unknown>,
     '__none__'
@@ -270,7 +293,8 @@ export function createDeliveryPackage(
     : []
   if (
     previous &&
-    previous.activationFingerprint !== activationFingerprint &&
+    activationMaterialControlFingerprint(previous.activation) !==
+      activationMaterialControlFingerprint(draft.activation) &&
     previous.activation.confirmationFingerprint === draft.activation.confirmationFingerprint
   )
     fail('DELIVERY_PACKAGE_ACTIVATION_RECONFIRMATION_REQUIRED', draft.deliveryKey)
@@ -278,7 +302,7 @@ export function createDeliveryPackage(
   if (invalidation.length) invalidateEvidence(execution, EVIDENCE_NAMES, evidenceBasisFingerprint)
   else normalizeEvidenceBasis(execution, EVIDENCE_NAMES, evidenceBasisFingerprint)
   const raw: Omit<DeliveryPackage, 'packageFingerprint'> = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     kind: 'OES_DELIVERY_PACKAGE',
     packageVersion: draft.packageVersion,
     evidenceGeneration: draft.evidenceGeneration + (invalidation.length ? 1 : 0),
@@ -301,6 +325,8 @@ export function createDeliveryPackage(
 
 /** Validates the closed DP contract for repository and host-local execution modes. */
 export function validateDeliveryPackage(value: DeliveryPackage): DeliveryPackage {
+  if ((value as { schemaVersion?: number })?.schemaVersion === 2)
+    fail('V3_PACKAGE_CUTOVER_REQUIRED', value.deliveryKey ?? 'delivery')
   requireExactKeys(
     value,
     [
@@ -323,7 +349,7 @@ export function validateDeliveryPackage(value: DeliveryPackage): DeliveryPackage
     'deliveryPackage'
   )
   if (
-    value.schemaVersion !== 2 ||
+    value.schemaVersion !== 3 ||
     value.kind !== 'OES_DELIVERY_PACKAGE' ||
     !Number.isSafeInteger(value.packageVersion) ||
     value.packageVersion < 1 ||
@@ -387,6 +413,15 @@ export function createAggregateDeliveryPackage(
       draft.packagePath !== previous.packagePath)
   )
     fail('AGGREGATE_PACKAGE_IDENTITY_IMMUTABLE', draft.coordinationKey)
+  if (
+    previous?.execution.reviewSession &&
+    (draft.execution.reviewSession?.path !== previous.execution.reviewSession.path ||
+      draft.execution.reviewerTaskId !== previous.execution.reviewerTaskId ||
+      canonicalJson(
+        draft.execution.reviewHistory.slice(0, previous.execution.reviewHistory.length)
+      ) !== canonicalJson(previous.execution.reviewHistory))
+  )
+    fail('AGGREGATE_PACKAGE_RV_SESSION_IMMUTABLE', draft.coordinationKey)
   const evidenceBasisFingerprint = aggregateEvidenceBasis(draft)
   const invalidation = previous
     ? aggregateInvalidationReasons(previous, draft, evidenceBasisFingerprint)
@@ -394,18 +429,20 @@ export function createAggregateDeliveryPackage(
   const controlChanged =
     previous !== null &&
     canonicalJson({
-      deliveryPackages: previous.deliveryPackages,
       childRoster: previous.childRoster,
       dependencyOrder: previous.dependencyOrder,
       integrationContract: previous.integrationContract,
-      aggregateAcceptance: previous.aggregateAcceptance
+      aggregateAcceptance: previous.aggregateAcceptance,
+      materialDecisionFingerprint: previous.materialDecisionFingerprint,
+      approvedCiLevel: previous.approvedCiLevel
     }) !==
       canonicalJson({
-        deliveryPackages: draft.deliveryPackages,
         childRoster: draft.childRoster,
         dependencyOrder: draft.dependencyOrder,
         integrationContract: draft.integrationContract,
-        aggregateAcceptance: draft.aggregateAcceptance
+        aggregateAcceptance: draft.aggregateAcceptance,
+        materialDecisionFingerprint: draft.materialDecisionFingerprint,
+        approvedCiLevel: draft.approvedCiLevel
       })
   if (controlChanged && previous?.confirmationFingerprint === draft.confirmationFingerprint)
     fail('AGGREGATE_PACKAGE_RECONFIRMATION_REQUIRED', draft.coordinationKey)
@@ -414,7 +451,7 @@ export function createAggregateDeliveryPackage(
     invalidateEvidence(execution, AGGREGATE_EVIDENCE_NAMES, evidenceBasisFingerprint)
   else normalizeEvidenceBasis(execution, AGGREGATE_EVIDENCE_NAMES, evidenceBasisFingerprint)
   const raw: Omit<AggregateDeliveryPackage, 'packageFingerprint'> = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     kind: 'OES_AGGREGATE_DELIVERY_PACKAGE',
     packageVersion: draft.packageVersion,
     evidenceGeneration: draft.evidenceGeneration + (invalidation.length ? 1 : 0),
@@ -424,7 +461,10 @@ export function createAggregateDeliveryPackage(
     executionMode: draft.executionMode,
     artifactRoot: draft.artifactRoot,
     packagePath: draft.packagePath,
+    confirmation: clone(draft.confirmation),
     confirmationFingerprint: draft.confirmationFingerprint,
+    materialDecisionFingerprint: draft.materialDecisionFingerprint,
+    approvedCiLevel: draft.approvedCiLevel,
     childRoster: clone(draft.childRoster),
     deliveryPackages: clone(draft.deliveryPackages),
     dependencyOrder: [...draft.dependencyOrder],
@@ -525,6 +565,8 @@ export function validateAggregateDeliveryChildRoster(
 export function validateAggregateDeliveryPackage(
   value: AggregateDeliveryPackage
 ): AggregateDeliveryPackage {
+  if ((value as { schemaVersion?: number })?.schemaVersion === 2)
+    fail('V3_PACKAGE_CUTOVER_REQUIRED', value.coordinationKey ?? 'aggregate')
   requireExactKeys(
     value,
     [
@@ -539,7 +581,10 @@ export function validateAggregateDeliveryPackage(
       'executionMode',
       'artifactRoot',
       'packagePath',
+      'confirmation',
       'confirmationFingerprint',
+      'materialDecisionFingerprint',
+      'approvedCiLevel',
       'childRoster',
       'deliveryPackages',
       'dependencyOrder',
@@ -550,8 +595,9 @@ export function validateAggregateDeliveryPackage(
     ],
     'aggregateDeliveryPackage'
   )
+  validateReference(value.confirmation, 'aggregateDeliveryPackage.confirmation')
   if (
-    value.schemaVersion !== 2 ||
+    value.schemaVersion !== 3 ||
     value.kind !== 'OES_AGGREGATE_DELIVERY_PACKAGE' ||
     !Number.isSafeInteger(value.packageVersion) ||
     value.packageVersion < 1 ||
@@ -563,6 +609,8 @@ export function validateAggregateDeliveryPackage(
     !KEY.test(value.coordinationKey) ||
     !TASK.test(value.ownerTaskId) ||
     !DIGEST.test(value.confirmationFingerprint) ||
+    !DIGEST.test(value.materialDecisionFingerprint) ||
+    !['DOCS', 'SCOPED', 'FULL'].includes(value.approvedCiLevel) ||
     !['REPOSITORY', 'HOST_LOCAL'].includes(value.executionMode) ||
     !Array.isArray(value.deliveryPackages) ||
     value.deliveryPackages.length < 2 ||
@@ -605,7 +653,8 @@ export function validateAggregateDeliveryPackage(
 /** Reopens an exact DP reference and checks its owner, mode, and accepted candidate identity. */
 export function loadDeliveryPackageReference(
   reference: DeliveryPackageReference,
-  executionMode: DeliveryExecutionMode
+  executionMode: DeliveryExecutionMode,
+  authorizationRoot: string
 ): DeliveryPackage {
   validatePackageReference(reference, executionMode)
   const bytes = readFileSync(reference.packagePath)
@@ -613,6 +662,7 @@ export function loadDeliveryPackageReference(
     fail('DELIVERY_PACKAGE_REFERENCE_SHA_MISMATCH', reference.deliveryKey)
   const value = validateDeliveryPackage(JSON.parse(bytes.toString('utf8')) as DeliveryPackage)
   validatePackageArtifactIdentity(value.artifactRoot, value.packagePath, value.deliveryKey)
+  reopenDeliveryConfirmation(value, authorizationRoot)
   reopenDesignReferences(value.activation.designReferences, value.deliveryKey)
   if (
     value.deliveryKey !== reference.deliveryKey ||
@@ -641,12 +691,27 @@ export function loadDeliveryPackageReference(
     operationFingerprint: value.execution.hostLocal?.operationFingerprint ?? null,
     aggregate: false
   })
+  if (value.execution.rv.status === 'PASSED') {
+    const session = reopenReviewSession(
+      value.execution.reviewSession,
+      value.deliveryKey,
+      value.ownerTaskId,
+      value.artifactRoot,
+      value.execution.repository?.candidateSha ??
+        value.execution.hostLocal?.operationFingerprint ??
+        null,
+      value.execution.reviewerTaskId,
+      value.execution.reviewHistory
+    )
+    requireRvEvidenceReviewer(value.execution.rv.evidence, session, value.deliveryKey)
+  }
   return deepFreeze(value)
 }
 
 /** Reopens an ADP and every exact accepted DP before it may drive Aggregate RV. */
 export function loadAggregateDeliveryPackageReference(
-  reference: TrustedAuthorizationReference
+  reference: TrustedAuthorizationReference,
+  authorizationRoot: string
 ): AggregateDeliveryPackage {
   validateReference(reference, 'aggregateDeliveryPackageReference')
   const bytes = readFileSync(reference.path)
@@ -656,15 +721,17 @@ export function loadAggregateDeliveryPackageReference(
     JSON.parse(bytes.toString('utf8')) as AggregateDeliveryPackage
   )
   validatePackageArtifactIdentity(value.artifactRoot, value.packagePath, value.coordinationKey)
+  const aggregateCard = reopenAggregateConfirmation(value, authorizationRoot)
   if (value.packagePath !== reference.path || value.packageFingerprint !== reference.fingerprint)
     fail('AGGREGATE_PACKAGE_REFERENCE_BINDING_MISMATCH', value.coordinationKey)
   const childRoster = loadAggregateDeliveryChildRoster(value.childRoster, value)
   const packages = new Map(
     value.deliveryPackages.map((item) => [
       item.deliveryKey,
-      loadDeliveryPackageReference(item, value.executionMode)
+      loadDeliveryPackageReference(item, value.executionMode, authorizationRoot)
     ])
   )
+  validateAggregateMaterialConfirmation(value, aggregateCard, childRoster, packages)
   validateLoadedDependencyOrder(value, packages, childRoster)
   reopenCompletedEvidence({
     execution: value.execution,
@@ -679,6 +746,20 @@ export function loadAggregateDeliveryPackageReference(
     operationFingerprint: value.execution.hostLocal?.operationSetFingerprint ?? null,
     aggregate: true
   })
+  if (value.execution.aggregateRv.status === 'PASSED') {
+    const session = reopenReviewSession(
+      value.execution.reviewSession,
+      value.coordinationKey,
+      value.ownerTaskId,
+      value.artifactRoot,
+      value.execution.repository?.aggregateCandidateSha ??
+        value.execution.hostLocal?.operationSetFingerprint ??
+        null,
+      value.execution.reviewerTaskId,
+      value.execution.reviewHistory
+    )
+    requireRvEvidenceReviewer(value.execution.aggregateRv.evidence, session, value.coordinationKey)
+  }
   const frozen = deepFreeze(value)
   trustedAggregatePackages.set(frozen, canonicalJson(reference))
   return frozen
@@ -808,10 +889,7 @@ export function verifyPackageCleanup(
   if (pathEntryExists(value.packagePath))
     fail('PACKAGE_CLEANUP_ABSENCE_NOT_VERIFIED', value.packagePath)
   if (placement.repositoryPhysical && placement.gitDirectoryPhysical)
-    verifyObservedRepositoryClean(
-      placement.repositoryPhysical,
-      placement.gitDirectoryPhysical
-    )
+    verifyObservedRepositoryClean(placement.repositoryPhysical, placement.gitDirectoryPhysical)
   return { packagePath: value.packagePath, repositoryDiff: [], status: 'PACKAGE_CLEANUP_VERIFIED' }
 }
 
@@ -820,7 +898,10 @@ function validateActivation(value: DeliveryActivation, mode: DeliveryExecutionMo
   requireExactKeys(
     value,
     [
+      'confirmation',
       'confirmationFingerprint',
+      'materialDecisionFingerprint',
+      'approvedCiLevel',
       'objective',
       'scope',
       'nonGoals',
@@ -834,7 +915,11 @@ function validateActivation(value: DeliveryActivation, mode: DeliveryExecutionMo
     ],
     'deliveryActivation'
   )
+  validateReference(value.confirmation, 'activation.confirmation')
   validateFingerprint(value.confirmationFingerprint, 'activation.confirmationFingerprint')
+  validateFingerprint(value.materialDecisionFingerprint, 'activation.materialDecisionFingerprint')
+  if (!['DOCS', 'SCOPED', 'FULL'].includes(value.approvedCiLevel))
+    fail('DELIVERY_PACKAGE_CI_LEVEL_INVALID', value.objective)
   if (
     !value.objective ||
     !nonEmptyStrings(value.scope) ||
@@ -891,6 +976,21 @@ function validateDependency(
   }
 }
 
+/** Keeps the full candidate history beside the mutable canonical RV session reference. */
+function validateReviewHistory(
+  history: string[],
+  session: TrustedAuthorizationReference | null,
+  key: string
+): void {
+  if (
+    !Array.isArray(history) ||
+    new Set(history).size !== history.length ||
+    history.some((subject) => !SHA.test(subject) && !DIGEST.test(subject)) ||
+    (session === null ? history.length !== 0 : history.length === 0)
+  )
+    fail('PACKAGE_RV_SESSION_HISTORY_INVALID', key)
+}
+
 /** Enforces mutually exclusive repository and host-local execution state. */
 function validateDeliveryExecution(
   value: DeliveryExecution,
@@ -904,6 +1004,9 @@ function validateDeliveryExecution(
       'repository',
       'hostLocal',
       'selfTest',
+      'reviewSession',
+      'reviewerTaskId',
+      'reviewHistory',
       'rv',
       'ci',
       'postCheck',
@@ -914,6 +1017,15 @@ function validateDeliveryExecution(
   )
   if (!Array.isArray(value.slices) || !Array.isArray(value.remainingRisk))
     fail('DELIVERY_PACKAGE_EXECUTION_INVALID', key)
+  if (value.reviewSession !== null)
+    validateReference(value.reviewSession, 'deliveryExecution.reviewSession')
+  if ((value.reviewSession === null) !== (value.reviewerTaskId === null))
+    fail('DELIVERY_PACKAGE_RV_SESSION_IDENTITY_INCOMPLETE', key)
+  validateReviewHistory(value.reviewHistory, value.reviewSession, key)
+  if (value.reviewerTaskId !== null && !TASK.test(value.reviewerTaskId))
+    fail('DELIVERY_PACKAGE_RV_REVIEWER_INVALID', key)
+  if (['PASSED', 'FAILED'].includes(value.rv.status) && value.reviewSession === null)
+    fail('DELIVERY_PACKAGE_RV_SESSION_REQUIRED', key)
   const slices = new Set<string>()
   for (const slice of value.slices) {
     requireExactKeys(slice, ['sliceId', 'status'], 'deliveryExecution.slice')
@@ -997,6 +1109,9 @@ function validateAggregateExecution(
     [
       'repository',
       'hostLocal',
+      'reviewSession',
+      'reviewerTaskId',
+      'reviewHistory',
       'aggregateRv',
       'aggregateCi',
       'postCheck',
@@ -1007,6 +1122,15 @@ function validateAggregateExecution(
   )
   if (!Array.isArray(value.remainingRisk) || !['PENDING', 'VERIFIED'].includes(value.cleanup))
     fail('AGGREGATE_PACKAGE_EXECUTION_INVALID', key)
+  if (value.reviewSession !== null)
+    validateReference(value.reviewSession, 'aggregateExecution.reviewSession')
+  if ((value.reviewSession === null) !== (value.reviewerTaskId === null))
+    fail('AGGREGATE_PACKAGE_RV_SESSION_IDENTITY_INCOMPLETE', key)
+  validateReviewHistory(value.reviewHistory, value.reviewSession, key)
+  if (value.reviewerTaskId !== null && !TASK.test(value.reviewerTaskId))
+    fail('AGGREGATE_PACKAGE_RV_REVIEWER_INVALID', key)
+  if (['PASSED', 'FAILED'].includes(value.aggregateRv.status) && value.reviewSession === null)
+    fail('AGGREGATE_PACKAGE_RV_SESSION_REQUIRED', key)
   if (mode === 'REPOSITORY') {
     if (!value.repository || value.hostLocal !== null)
       fail('AGGREGATE_PACKAGE_REPOSITORY_STATE_REQUIRED', key)
@@ -1198,7 +1322,10 @@ function deliveryEvidenceBasis(
       mode,
       activationFingerprint,
       candidateSha: execution.repository?.candidateSha ?? null,
-      operationFingerprint: execution.hostLocal?.operationFingerprint ?? null
+      operationFingerprint: execution.hostLocal?.operationFingerprint ?? null,
+      reviewSessionPath: execution.reviewSession?.path ?? null,
+      reviewerTaskId: execution.reviewerTaskId,
+      reviewHistory: execution.reviewHistory
     },
     '__none__'
   )
@@ -1214,6 +1341,7 @@ function aggregateEvidenceBasis(
     | 'dependencyOrder'
     | 'integrationContract'
     | 'aggregateAcceptance'
+    | 'approvedCiLevel'
     | 'execution'
   >
 ): string {
@@ -1225,6 +1353,10 @@ function aggregateEvidenceBasis(
       dependencyOrder: value.dependencyOrder,
       integrationContract: value.integrationContract,
       aggregateAcceptance: value.aggregateAcceptance,
+      approvedCiLevel: value.approvedCiLevel,
+      reviewSessionPath: value.execution.reviewSession?.path ?? null,
+      reviewerTaskId: value.execution.reviewerTaskId,
+      reviewHistory: value.execution.reviewHistory,
       aggregateCandidateSha: value.execution.repository?.aggregateCandidateSha ?? null,
       aggregateOperationSetFingerprint: value.execution.hostLocal?.operationSetFingerprint ?? null
     },
@@ -1269,6 +1401,22 @@ function deliveryInvalidationReasons(
   return reasons
 }
 
+/** Hashes only activation fields that represent a new Human decision rather than evidence repair. */
+function activationMaterialControlFingerprint(value: DeliveryActivation): string {
+  return objectFingerprint(
+    {
+      materialDecisionFingerprint: value.materialDecisionFingerprint,
+      approvedCiLevel: value.approvedCiLevel,
+      objective: value.objective,
+      scope: value.scope,
+      acceptance: value.acceptance,
+      protectedScope: value.protectedScope,
+      riskLevel: value.risk.level
+    },
+    '__none__'
+  )
+}
+
 /** Returns precise ADP invalidation reasons for DP, order, integration, or aggregate drift. */
 function aggregateInvalidationReasons(
   previous: AggregateDeliveryPackage,
@@ -1280,6 +1428,7 @@ function aggregateInvalidationReasons(
     | 'integrationContract'
     | 'aggregateAcceptance'
     | 'executionMode'
+    | 'approvedCiLevel'
     | 'execution'
   >,
   basis: string
@@ -1293,6 +1442,7 @@ function aggregateInvalidationReasons(
     reasons.push('DEPENDENCY_ORDER_CHANGED')
   if (canonicalJson(previous.integrationContract) !== canonicalJson(next.integrationContract))
     reasons.push('INTEGRATION_CONTRACT_CHANGED')
+  if (previous.approvedCiLevel !== next.approvedCiLevel) reasons.push('CI_LEVEL_CHANGED')
   if (
     previous.executionMode !== next.executionMode ||
     previous.execution.repository?.aggregateCandidateSha !==
@@ -1304,6 +1454,140 @@ function aggregateInvalidationReasons(
   if (previous.evidenceBasisFingerprint !== basis && reasons.length === 0)
     reasons.push('AGGREGATE_EVIDENCE_BASIS_CHANGED')
   return reasons
+}
+
+/** Reopens the Human receipt that activated one DP and rejects a caller-computed card hash. */
+function reopenDeliveryConfirmation(value: DeliveryPackage, authorizationRoot: string): void {
+  const confirmation = loadTrustedDecisionConfirmation(
+    value.activation.confirmation,
+    authorizationRoot
+  )
+  const card = confirmation.card
+  if (
+    confirmation.receipt.confirmationFingerprint !== value.activation.confirmationFingerprint ||
+    card.materialDecisionFingerprint !== value.activation.materialDecisionFingerprint ||
+    card.decisionKind !== 'DELIVERY' ||
+    card.executionMode !== value.executionMode ||
+    card.approvedCiLevel !== value.activation.approvedCiLevel ||
+    !['ONE_DO', 'CO_WITH_DOS'].includes(card.ownerTopology) ||
+    canonicalJson([...card.protectedScope].sort()) !==
+      canonicalJson([...value.activation.protectedScope].sort()) ||
+    riskOrdinal(value.activation.risk.level) > riskOrdinal(card.risk) ||
+    (card.ownerTopology === 'ONE_DO'
+      ? card.objective !== value.activation.objective ||
+        canonicalJson([...card.scope].sort()) !==
+          canonicalJson([...value.activation.scope].sort()) ||
+        canonicalJson([...card.acceptance].sort()) !==
+          canonicalJson([...value.activation.acceptance].sort())
+      : value.activation.scope.some((item) => !card.scope.includes(item)) ||
+        value.activation.acceptance.some((item) => !card.acceptance.includes(item)))
+  )
+    fail('DELIVERY_PACKAGE_CONFIRMATION_BINDING_MISMATCH', value.deliveryKey)
+}
+
+/** Reopens the Human receipt that authorized the exact CO topology and CI ceiling. */
+function reopenAggregateConfirmation(
+  value: AggregateDeliveryPackage,
+  authorizationRoot: string
+): DecisionCard {
+  const confirmation = loadTrustedDecisionConfirmation(value.confirmation, authorizationRoot)
+  const card = confirmation.card
+  if (
+    confirmation.receipt.confirmationFingerprint !== value.confirmationFingerprint ||
+    card.materialDecisionFingerprint !== value.materialDecisionFingerprint ||
+    card.decisionKind !== 'DELIVERY' ||
+    card.ownerTopology !== 'CO_WITH_DOS' ||
+    card.executionMode !== value.executionMode ||
+    card.approvedCiLevel !== value.approvedCiLevel
+  )
+    fail('AGGREGATE_PACKAGE_CONFIRMATION_BINDING_MISMATCH', value.coordinationKey)
+  return card
+}
+
+/** Binds the reopened CO card to the complete roster, aggregate controls, and child scope union. */
+function validateAggregateMaterialConfirmation(
+  value: AggregateDeliveryPackage,
+  card: DecisionCard,
+  roster: AggregateDeliveryChildRoster,
+  packages: Map<string, DeliveryPackage>
+): void {
+  const loadedScope = [
+    ...new Set([...packages.values()].flatMap((delivery) => delivery.activation.scope))
+  ].sort()
+  if (
+    roster.confirmationFingerprint !== value.confirmationFingerprint ||
+    canonicalJson([...value.integrationContract].sort()) !==
+      canonicalJson([...card.integrationContract].sort()) ||
+    canonicalJson([...value.aggregateAcceptance].sort()) !==
+      canonicalJson([...card.acceptance].sort()) ||
+    loadedScope.some((item) => !card.scope.includes(item))
+  )
+    fail('AGGREGATE_PACKAGE_MATERIAL_DECISION_MISMATCH', value.coordinationKey)
+}
+
+/** Orders risk levels so child packages may narrow but never exceed the confirmed aggregate risk. */
+function riskOrdinal(value: 'LOW' | 'MEDIUM' | 'HIGH'): number {
+  return ['LOW', 'MEDIUM', 'HIGH'].indexOf(value)
+}
+
+/** Reopens the one visible RV subagent identity and binds its latest generation to the reviewed subject. */
+function reopenReviewSession(
+  reference: TrustedAuthorizationReference | null,
+  subjectKey: string,
+  ownerTaskId: string,
+  artifactRoot: string,
+  reviewedSubject: string | null,
+  reviewerTaskId: string | null,
+  reviewHistory: string[]
+): ReviewSession {
+  if (!reference || !reviewedSubject) fail('PACKAGE_RV_SESSION_EXACT_SUBJECT_REQUIRED', subjectKey)
+  validateReference(reference, 'reviewSessionReference')
+  if (!isWithin(artifactRoot, reference.path))
+    fail('PACKAGE_RV_SESSION_OUTSIDE_ARTIFACT_ROOT', subjectKey)
+  const artifactPhysical = requireExactPhysicalPath(
+    artifactRoot,
+    'reviewSession.artifactRoot',
+    physicalIdentityForPotentialPath
+  )
+  const sessionPhysical = requireExactPhysicalPath(
+    reference.path,
+    'reviewSession.path',
+    physicalIdentityForPotentialPath
+  )
+  if (!isWithin(artifactPhysical, sessionPhysical))
+    fail('PACKAGE_RV_SESSION_OUTSIDE_ARTIFACT_ROOT', subjectKey)
+  const bytes = readFileSync(reference.path)
+  if (sha256(bytes) !== reference.sha256) fail('PACKAGE_RV_SESSION_SHA_MISMATCH', subjectKey)
+  const session = validateReviewSession(JSON.parse(bytes.toString('utf8')) as ReviewSession)
+  if (
+    session.sessionFingerprint !== reference.fingerprint ||
+    session.deliveryKey !== subjectKey ||
+    session.ownerTaskId !== ownerTaskId ||
+    session.reviewerAgentId !== reviewerTaskId ||
+    canonicalJson(session.candidateGenerations) !== canonicalJson(reviewHistory) ||
+    session.candidateGenerations.at(-1) !== reviewedSubject
+  )
+    fail('PACKAGE_RV_SESSION_BINDING_MISMATCH', subjectKey)
+  return session
+}
+
+/** Binds an accepted RV evidence record to the exact visible reviewer session identity. */
+function requireRvEvidenceReviewer(
+  reference: TrustedAuthorizationReference | null,
+  session: ReviewSession,
+  subjectKey: string
+): void {
+  if (!reference) fail('PACKAGE_RV_EVIDENCE_REFERENCE_REQUIRED', subjectKey)
+  const bytes = readFileSync(reference.path)
+  if (sha256(bytes) !== reference.sha256) fail('PACKAGE_RV_EVIDENCE_SHA_MISMATCH', subjectKey)
+  const evidence = validatePackageEvidenceRecord(
+    JSON.parse(bytes.toString('utf8')) as PackageEvidenceRecord
+  )
+  if (
+    evidence.evidenceFingerprint !== reference.fingerprint ||
+    evidence.reviewerTaskId !== session.reviewerAgentId
+  )
+    fail('PACKAGE_RV_REVIEWER_SESSION_MISMATCH', subjectKey)
 }
 
 /** Marks previously applicable evidence invalid and binds its replacement slot to the new basis. */
@@ -1353,7 +1637,7 @@ function validateEvidenceBindings(
   }
 }
 
-/** Seals a typed evidence envelope that binds verdict and artifacts to one exact package basis. */
+/** Seals a typed evidence record that binds verdict and artifacts to one exact package basis. */
 export function createPackageEvidenceRecord(
   draft: Omit<PackageEvidenceRecord, 'schemaVersion' | 'kind' | 'evidenceFingerprint'>
 ): PackageEvidenceRecord {
@@ -1378,7 +1662,7 @@ export function createPackageEvidenceRecord(
   })
 }
 
-/** Validates and rehashes one typed package evidence envelope and all of its source artifacts. */
+/** Validates and rehashes one typed package evidence record and all of its source artifacts. */
 export function validatePackageEvidenceRecord(value: PackageEvidenceRecord): PackageEvidenceRecord {
   requireExactKeys(
     value,
@@ -1647,10 +1931,7 @@ function verifyBoundRepositoryIdentity(repositoryRoot: string, gitDirectory: str
     physicalIdentityForPotentialPath
   )
   if (observedRepository !== repositoryRoot || observedGitDirectory !== gitDirectory)
-    fail(
-      'PACKAGE_CLEANUP_GIT_IDENTITY_MISMATCH',
-      `${observedRepository}:${observedGitDirectory}`
-    )
+    fail('PACKAGE_CLEANUP_GIT_IDENTITY_MISMATCH', `${observedRepository}:${observedGitDirectory}`)
 }
 
 /** Observes the explicitly bound repository and requires a byte-empty porcelain result. */

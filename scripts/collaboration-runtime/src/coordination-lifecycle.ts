@@ -145,7 +145,7 @@ export function validateCoordinationLifecycleRosterAuthority(
   if (
     value.schemaVersion !== 2 ||
     value.kind !== 'OES_COORDINATION_LIFECYCLE_ROSTER_AUTHORITY' ||
-    value.source !== 'TASK_NATIVE_CREATION_RECEIPTS' ||
+    !['TASK_NATIVE_CREATION_RECEIPTS', 'EXECUTION_NATIVE_CREATION_RECEIPTS'].includes(value.source) ||
     !value.coordinationKey ||
     !value.coordinationOwnerTaskId ||
     !value.transitionId ||
@@ -203,7 +203,7 @@ export function validateCoordinationLifecycleInventory(
       (!value.cleanupResult.path ||
         !DIGEST.test(value.cleanupResult.sha256) ||
         !DIGEST.test(value.cleanupResult.fingerprint))) ||
-    value.taskReadbackSource !== 'CODEX_TASK_NATIVE' ||
+    !['CODEX_TASK_NATIVE', 'CODEX_EXECUTION_NATIVE'].includes(value.taskReadbackSource) ||
     value.coordinationKey !== authority.coordinationKey ||
     value.coordinationOwnerTaskId !== authority.coordinationOwnerTaskId ||
     value.transitionId !== authority.transitionId ||
@@ -350,6 +350,7 @@ export function planCoordinationLifecycle(
     const task = tasks.get(result.taskId)
     if (
       !task ||
+      task.taskKind === 'RV' ||
       task.taskKind !== result.taskKind ||
       prior.has(result.taskId) ||
       result.inventoryFingerprint !== inventory.inventoryFingerprint
@@ -384,7 +385,7 @@ export function planCoordinationLifecycle(
     return result
   }
   const remaining = inventory.readbackRoster.filter(
-    (task) => prior.get(task.taskId)?.state !== 'ARCHIVED'
+    (task) => task.taskKind !== 'RV' && prior.get(task.taskId)?.state !== 'ARCHIVED'
   )
   if (!remaining.length)
     return {
@@ -392,8 +393,11 @@ export function planCoordinationLifecycle(
       decisions: inventory.readbackRoster.map((task) => ({
         taskId: task.taskId,
         taskKind: task.taskKind,
-        decision: 'SKIP_ARCHIVED',
-        reason: 'prior exact archive result was verified'
+        decision: task.taskKind === 'RV' ? 'SKIP_TERMINATED_SUBAGENT' : 'SKIP_ARCHIVED',
+        reason:
+          task.taskKind === 'RV'
+            ? 'visible RV subagent is already terminal and has no sidebar archive action'
+            : 'prior exact archive result was verified'
       }))
     }
   const activeDepth = Math.max(...remaining.map(depth))
@@ -403,6 +407,13 @@ export function planCoordinationLifecycle(
   const decisions = [...inventory.readbackRoster]
     .sort((a, b) => depth(b) - depth(a) || a.taskId.localeCompare(b.taskId))
     .map((task): CoordinationArchiveDecision => {
+      if (task.taskKind === 'RV')
+        return {
+          taskId: task.taskId,
+          taskKind: task.taskKind,
+          decision: 'SKIP_TERMINATED_SUBAGENT',
+          reason: 'visible RV subagent is terminal and is not a sidebar task'
+        }
       const result = prior.get(task.taskId)
       if (result?.state === 'ARCHIVED')
         return {

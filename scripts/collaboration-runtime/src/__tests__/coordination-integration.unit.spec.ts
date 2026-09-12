@@ -225,6 +225,7 @@ function integrationFixture(
     fingerprint: ownerBinding.bindingFingerprint
   }
   const trust: RemoteTrustRoots = {
+    projectKey: 'oes',
     authorizationRoot,
     admissionRoot: join(root, 'admission'),
     profilePath: join(root, 'profile.toml'),

@@ -57,12 +57,12 @@ ADR 解释高影响选择的原因，architecture 解释当前方案。bounded c
 ### 3.4 Governance 与 runbook
 
 - `AGENTS.md` 与 `docs/governance/**` 定义当前协作、执行和文档纪律。
-- UD 是唯一 canonical design writer；DA 提交 Human-confirmed Proposal，UD 独立审计并把接受结论放入规范真相源。
+- 项目只允许一个 active UD；UD 是唯一 canonical design writer。DA 提交一次 Human-confirmed Proposal，UD 基于当前 architecture、ADR、contracts 与 governance 独立审计并把接受结论放入规范真相源。
 - DO、CO、RV、bounded helper、请求来源和父 task 都不成为 canonical design writer。
 - Runbook 只保存当前可执行的操作、故障处理与恢复步骤。
 - 技术 binding、task 状态、进度、一次性复盘和已完成治理项目不进入长期治理文档。
 
-DA、UD、DO、CO、RV 的身份、可见性和 parent binding 遵循执行模型。Human-visible task 与 Git worktree 相互独立；host-local 操作不为可见性创建 repository record、branch、candidate 或 PR。
+DA、UD、DO、CO 是 Human-visible task；RV 是可查看进度与结果的独立 subagent，并在 DP/ADP 中保存稳定身份。task/subagent 与 Git worktree 相互独立；host-local 操作不为可见性创建 repository record、branch、candidate 或 PR。
 
 ## 4. Design Workspace 与 Proposal
 
@@ -74,9 +74,9 @@ docs/plans/designs/<design-key>.md
 
 Workspace 由 DA 维护，只保存 objective、scope/protected scope、truth references、current proposed design、open questions、intended canonical changes 和 next discussion point；每轮原位覆盖，不追加时间线。
 
-Human 确认 exact Proposal preview 后，DA 才形成 immutable Proposal 并提交 exact UD。UD 接受后更新 canonical truth；Design PR merge 与后续 delivery activation 分别确认。全部结论进入 canonical truth 后，Workspace 在独立 cleanup 边界删除。
+Human 确认 exact Proposal preview 后，DA 才形成 immutable Proposal 并提交 bound unique UD。UD 未作实质修订地接受后，Proposal 的确认持续覆盖 canonical write、Design PR、Merge Queue、merge verification 与 exact Proposal cleanup。后续实现由一次 Delivery card 激活。全部结论进入 canonical truth 后，Workspace 在独立 cleanup 执行边界删除，不新增确认节点。
 
-## 5. V2 Delivery Package
+## 5. V3 Delivery Package
 
 一个 repository DO 对应一个 stable artifact root 中的 DP：
 
@@ -84,11 +84,11 @@ Human 确认 exact Proposal preview 后，DA 才形成 immutable Proposal 并提
 <owner-task-stable-artifact-root>/delivery-package.json
 ```
 
-DP 只保存 activation-fixed objective、scope/protected scope、dependencies、acceptance、risk、rollback，以及 execution slices、candidate/self-test/RV/CI/PR、remaining risk 和 cleanup state。每个 design/DA/UD reference 在 DP 接纳时必须从 exact physical path 重开并校验文件 bytes；ADP 接纳 child DP 时同样重开这些 design bytes。已完成的 evidence 必须通过 typed envelope 绑定 evidence type、verdict、owner/reviewer、evidence generation、当前 basis、exact candidate/operation 与 source artifact hashes；只匹配任意自指纹或重新贴状态不构成可复用证据。只有 exact DO 写自己的 DP；状态原位覆盖，不写执行流水、task 消息或重复日志。
+DP 只保存 activation-fixed objective、scope/protected scope、dependencies、acceptance、risk、rollback，以及 execution slices、candidate/self-test/RV/CI/PR、remaining risk 和 cleanup state。V3 明确绑定受信 Human confirmation receipt，并保存一个可查看 RV subagent 的 canonical session path、reviewer 与 append-only candidate history；PASSED/FAILED 都绑定同一 RV。每个 design/DA/UD reference 在 DP 接纳时必须从 exact physical path 重开并校验文件 bytes；ADP 接纳 child DP 时同样重开这些 design bytes。已完成的 evidence 必须绑定 evidence type、verdict、owner/reviewer、evidence generation、当前 basis、exact candidate/operation 与 source artifact hashes；只匹配任意自指纹或重新贴状态不构成可复用证据。V3 是正式 wire-version 升级，旧 V2 artifact 不会被误当成 V3；续作时由 controller 用当前确认 receipt 重新签发 V3 package。只有 exact DO 写自己的 DP；状态原位覆盖。证据、patch、verification 与 rollback 引用由薄验证入口生成，不由 Agent 手工拼装。
 
 CO 的 decomposition、dependency order、integration contract、aggregate acceptance、scoped RV references 与 aggregate candidate 保存在 CO stable artifact root 的 ADP。ADP 重开 Human-confirmed complete child roster，精确覆盖每个内部 DO DP，并把外部 dependency 作为独立 accepted identity 显式声明；缺失内部 child/dependency 时不得生成 Aggregate RV input。ADP 另绑定 accepted candidate SHA、aggregate RV/CI、merge、post-check 与 cleanup。CO 默认生成一个 aggregate branch/PR；若 Human 明确确认 independently releasable 的 independent-PR exception，各 DO DP 仍分别绑定各自 candidate/PR。
 
-Repository merge 和 main verification完成后，DP/ADP 进入 terminal lifecycle disposal；repository-mode package cleanup 必须重开 exact owner binding，确认 package 的 physical path 位于 bound repository 之外，并以 explicit worktree/Git-directory 参数和受控环境（排除继承的 Git repository/index/discovery/config overrides）对该 bound repository 执行 Git status 观察，不能接受调用方声明的空 diff。Host-local package cleanup 必须用同一受控环境观察 stable artifact root 不属于任何 Git repository。Package 与所有 ancestor 组件都使用 no-follow entry 检查；dangling link 仍是存在的 alias/unknown resource，不得当作 absent。删除 package 属于零新增内容的 cleanup 边界，不得借 cleanup 产生产品修改或其他 repository diff。
+Repository merge 和 main verification 完成后，DP/ADP 自动进入 terminal lifecycle disposal；先终止 RV subagent，再处理 owner。repository-mode package cleanup 必须重开 exact owner binding，确认 package 的 physical path 位于 bound repository 之外，并以 explicit worktree/Git-directory 参数和受控环境（排除继承的 Git repository/index/discovery/config overrides）对该 bound repository 执行 Git status 观察，不能接受调用方声明的空 diff。Host-local package cleanup 必须用同一受控环境观察 stable artifact root 不属于任何 Git repository。Package 与所有 ancestor 组件都使用 no-follow entry 检查；dangling link 仍是存在的 alias/unknown resource，不得当作 absent。删除 package 属于零新增内容的 cleanup 执行边界，不新增确认，也不得借 cleanup 产生产品修改或其他 repository diff。未知、共享、歧义或不匹配资源保留并交 Human 决定。
 
 ## 6. Host-local work
 
