@@ -264,5 +264,5 @@ phase 1 统一冻结以下活动类型：
 - [party-service.md](../services/party-service.md)
 - [item-master-service.md](../services/item-master-service.md)
 - [sales-service.md](../services/sales-service.md)
-- [sales-quote-order-core.md](../../plans/features/sales-quote-order-core.md)
+- [sales-service contracts](../../contracts/sales-service/README.md)
 - [document-governance.md](../../governance/document-governance.md)

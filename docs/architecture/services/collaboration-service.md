@@ -10,7 +10,6 @@ Last Updated: 2026-08-05
 
 - `docs/contracts/collaboration-service/**`：描述黑盒接口契约，不重新定义服务职责、核心对象或长期命名。
 - `docs/architecture/collaborations/**`：描述跨服务协同，不重新定义 `collaboration-service` 自身职责。
-- `docs/plans/features/**`：描述阶段执行状态、实现路径与验收，不重新定义服务边界。
 - 后续 Task 高级能力从 [backlog](../../plans/backlog.md) 分别进入独立 Design Task，不在服务真相源中保存过程记录。
 
 若其他文档与本文冲突，以本文为准。若 `collaboration-service` 服务职责、模块边界或核心对象需要变更，必须先更新本文；涉及跨服务协同或关键架构取舍时，再同步更新 collaboration、contract 或 ADR。

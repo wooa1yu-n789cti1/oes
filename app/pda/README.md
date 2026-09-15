@@ -6,11 +6,9 @@ PDA is an independent Android device product, not a `tenant-web` variant. The An
 
 ## Architecture References
 
-- PDA terminal truth source: [docs/architecture/terminals/pda.md](/Users/acehood/Documents/GitHub/oes/docs/architecture/terminals/pda.md)
-- PDA Phase 1 feature packet: [docs/plans/features/pda-phase-1-foundation.md](/Users/acehood/Documents/GitHub/oes/docs/plans/features/pda-phase-1-foundation.md)
-- PDA device BFF contract: [docs/contracts/api-gateway/pda-device-bff.md](/Users/acehood/Documents/GitHub/oes/docs/contracts/api-gateway/pda-device-bff.md)
-- PDA JS Bridge contract: [docs/contracts/pda/js-bridge.md](/Users/acehood/Documents/GitHub/oes/docs/contracts/pda/js-bridge.md)
-- PDA implementation plan: [docs/plans/pda-phase-1-foundation-implementation-plan.md](/Users/acehood/Documents/GitHub/oes/docs/plans/pda-phase-1-foundation-implementation-plan.md)
+- PDA terminal truth source: [docs/architecture/terminals/pda.md](../../docs/architecture/terminals/pda.md)
+- PDA device BFF contract: [docs/contracts/api-gateway/pda-device-bff.md](../../docs/contracts/api-gateway/pda-device-bff.md)
+- PDA JS Bridge contract: [docs/contracts/pda/js-bridge.md](../../docs/contracts/pda/js-bridge.md)
 
 ## Directory Layout
 

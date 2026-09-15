@@ -174,9 +174,9 @@ designStatus: ACTIVE_DESIGN_WORKSPACE
   - future `docs/architecture/collaborations/erp-mes-wms-finance.md`
 - contracts：
   - future `docs/contracts/erp-service/**`
-- feature packet：
-  - future `docs/plans/features/quote-and-order-core.md`
-  - future `docs/plans/features/customer-trading-profile.md`
+- 后续交付：
+  - Quote / Order Core cohesive Delivery
+  - Customer Trading Profile cohesive Delivery
 - architecture / ADR：
   - 如 `erp-service` 与 `finance-service` 的正式拆分方式出现分歧，再升级到 architecture / ADR
 

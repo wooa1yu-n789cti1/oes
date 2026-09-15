@@ -12,7 +12,6 @@ CRM v2 原地替代此前 customer master phase 1 设计。旧实现中的 `Cust
 
 - `docs/contracts/crm-service/**`：描述黑盒接口契约，不重新定义 CRM 核心对象、owner 边界或长期命名。
 - `docs/architecture/collaborations/**`：描述跨服务协同，不重新定义 `crm-service` 自身职责。
-- `docs/plans/features/**`：描述阶段执行状态、实现路径、tenant-web 页面入口与验收，不重新定义服务边界。
 - `docs/plans/designs/**`：只作为未冻结讨论、开放问题与回写目标，不承载稳定设计结论。
 
 若其他文档与本文冲突，以本文为准。若 CRM 业务设计需要变更，必须先更新本文；涉及跨服务协同或关键取舍时，再同步更新 collaboration、contract 或 ADR。
@@ -846,9 +845,7 @@ Phase 1 不做一级入口：
 
 ## 16. Current Implementation Note
 
-当前实现状态与执行差异以 [crm-v2-p1-full-stack-implementation.md](../../plans/features/crm-v2-p1-full-stack-implementation.md) 为准。
-
-实现线程必须以本文和 [crm-v2-core-object-model.md](../../plans/features/crm-v2-core-object-model.md) 为设计真相源。若现有 runtime 暴露 Archive / Unarchive 或仍停留在旧 `CustomerAccount / CustomerPartyBinding` 主路径，应按当前 CRM v2 P1 设计校准。
+实现线程必须以本文及当前 contracts 为设计真相源。若 runtime 暴露 Archive / Unarchive 或仍停留在旧 `CustomerAccount / CustomerPartyBinding` 主路径，应报告 design/runtime drift；该核验由 [backlog](../../plans/backlog.md) 的 CRM v2 reconciliation item 跟踪。
 
 ## 17. Related Documents
 
@@ -856,7 +853,6 @@ Phase 1 不做一级入口：
 - [party-service.md](./party-service.md)
 - [sales-service.md](./sales-service.md)
 - [permission-service.md](./permission-service.md)
-- [crm-v2-core-object-model.md](../../plans/features/crm-v2-core-object-model.md)
 
 ## 18. Trusted gRPC Inbound Boundary
 

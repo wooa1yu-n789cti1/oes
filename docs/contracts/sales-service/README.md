@@ -233,4 +233,3 @@ phase 1 只允许把下列事件列为候选，不得视为已冻结 event catal
 - [sales-service.md](../../architecture/services/sales-service.md)
 - [sales-crm-party-item-master.md](../../architecture/collaborations/sales-crm-party-item-master.md)
 - [sales-fulfillment-mes-wms-finance.md](../../architecture/collaborations/sales-fulfillment-mes-wms-finance.md)
-- [sales-quote-order-core.md](../../plans/features/sales-quote-order-core.md)

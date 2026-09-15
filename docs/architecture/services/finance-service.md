@@ -67,7 +67,7 @@ Last Updated: 2026-08-11
   - future collection import / finance operations tools through BFF only
 - 当前设计输入：
   - [erp-service-design.md](../../plans/designs/erp-service-design.md)
-  - [finance-ar-credit-core.md](../../plans/features/finance-ar-credit-core.md)
+  - [finance-service contracts](../../contracts/finance-service/README.md)
 
 ## 6. Upstream Dependencies
 

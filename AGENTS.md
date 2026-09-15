@@ -4,7 +4,7 @@
 
 This file is the repository entry point. Product truth remains in `docs/architecture/`, `docs/adr/`, and `docs/contracts/`. The complete collaboration contract is `docs/governance/codex-execution-model.md`; document placement and AI context loading are governed by `docs/governance/document-governance.md`.
 
-Reason from current canonical files at the checked-out commit. Load an active design workspace only when the task explicitly binds that topic. Historical plans, Git history, old tasks, execution artifacts, and search excerpts are discovery evidence only and never override current canonical truth. During the historical-doc migration, when a current canonical file links one historical plan, read only that exact link as the canonical owner's scoped transitional dependency; the linked file gains no independent authority and is not otherwise enumerated or searched.
+Reason from current canonical files at the checked-out commit. Load an active design workspace only when the task explicitly binds that topic. Historical plans, Git history, old tasks, execution artifacts, and search excerpts are discovery evidence only and never override current canonical truth. The sole current-tree historical exception is `docs/plans/features/delegated-task-action-grant.md`, retained only because immutable ToolContract v1 binds that exact risk-source path; read it only through that exact v1 dependency and do not treat it as general design authority.
 
 ## 2. Architecture constraints
 

@@ -102,7 +102,7 @@ conflictResolution: 本文只记录当前 Collection 页面治理讨论；稳定
 - Runtime 协同：`docs/architecture/platforms/site-runtime-architecture.md`
 - Runtime SDK：`docs/architecture/platforms/site-runtime-kit.md`
 - 黑盒契约：`docs/contracts/site-service/**`
-- 执行计划：`docs/plans/features/**`
+- 延期事项：`docs/plans/backlog.md`
 
 ## 7. 恢复入口
 

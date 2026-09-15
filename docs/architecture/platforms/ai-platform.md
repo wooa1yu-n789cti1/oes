@@ -219,4 +219,3 @@ ToolContract registration phase 必须满足：
 - [delegated-execution-and-action-grant.md](../collaborations/delegated-execution-and-action-grant.md)
 - [task-assistant.md](../collaborations/task-assistant.md)
 - [task-assistant-tool-contract.md](../../contracts/ai-platform/task-assistant-tool-contract.md)
-- [ai-platform-foundation.md](../../plans/features/ai-platform-foundation.md)

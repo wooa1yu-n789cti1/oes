@@ -8,7 +8,7 @@ Last Updated: 2026-06-10
 
 CRM v2 已原地替代旧 customer master phase 1 设计。CRM v2 Phase 1 只冻结核心对象模型，不冻结报价、订单、发票或 Sales selector 边界。
 
-因此，本文中围绕旧 `CustomerAccount / CustomerAddressUsage / CustomerContactUsage / CustomerTaxProfile / Customer Selector` 的销售协同规则只作为旧实现和后续重写参考；新的 Sales / CRM 协同必须在独立 feature 中基于 [crm-service.md](../services/crm-service.md) 与 [crm-v2-core-object-model.md](../../plans/features/crm-v2-core-object-model.md) 重新冻结。
+因此，本文中围绕旧 `CustomerAccount / CustomerAddressUsage / CustomerContactUsage / CustomerTaxProfile / Customer Selector` 的销售协同规则只作为旧实现和后续重写参考；新的 Sales / CRM 协同必须在独立设计中基于 [crm-service.md](../services/crm-service.md) 重新冻结。
 
 ## 1. 目标
 
@@ -148,5 +148,5 @@ Item Master 概念以以下文件为唯一真相源：
 - [party-service.md](../services/party-service.md)
 - [item-master-service.md](../services/item-master-service.md)
 - [item-master-sales-mes-wms-srm.md](./item-master-sales-mes-wms-srm.md)
-- [sales-quote-order-core.md](../../plans/features/sales-quote-order-core.md)
+- [sales-service contracts](../../contracts/sales-service/README.md)
 - [crm-service.md](../services/crm-service.md)

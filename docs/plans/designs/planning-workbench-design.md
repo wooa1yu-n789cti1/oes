@@ -6,7 +6,7 @@ designStatus: ACTIVE_DESIGN_WORKSPACE
 writeBackTargets:
   - docs/architecture/services/planning-service.md
   - docs/architecture/collaborations/planning-and-mes.md
-  - docs/plans/features/planning-workbench-p1.md
+  - docs/contracts/planning-service/
 ```
 
 > 本文记录尚未冻结的计划工作台讨论，不是稳定真相源或实现授权。

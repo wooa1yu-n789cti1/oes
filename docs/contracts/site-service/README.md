@@ -2,10 +2,6 @@
 
 ```text
 contractStatus: FROZEN_FOR_P1_IMPLEMENTATION
-featurePacket: docs/plans/features/external-site-integration-p1.md
-blogNewsFeaturePacket: docs/plans/features/blog-news-closed-loop-p1.md
-sitePageLocaleFeaturePacket: docs/plans/features/site-page-locale-governance-p1.md
-inspirationFeaturePacket: docs/plans/features/site-inspiration-management-p1.md
 serviceTruthSource: docs/architecture/services/site-service.md
 runtimeKitTruthSource: docs/architecture/platforms/site-runtime-kit.md
 lastUpdatedAt: 2026-07-25
@@ -105,8 +101,8 @@ Article taxonomy 已演进为 `articleType + category + tags`；它的稳定字�
 
 - 与 `site-runtime-kit.md` 对齐
 - 与 `site-service.md` 对齐
-- 与 `external-site-integration-p1.md` 对齐
-- Blog / News + Content Category SEO Archive P1 已按 [blog-news-closed-loop-p1.md](../../plans/features/blog-news-closed-loop-p1.md) 回写到本目录。
+- 与 `site-runtime-architecture.md` 和 `site-runtime-kit.md` 对齐
+- Blog / News + Content Category SEO Archive P1 的稳定语义以本目录及 ADR 0009/0011 为准。
 
 实现前仍需要在 implementation plan 中决定：
 

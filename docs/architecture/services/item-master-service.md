@@ -498,5 +498,4 @@ Item Master server 只验证最终目标 ET、HUMAN subject、exact actor worklo
 ## 19. Contract And Migration Notes
 
 - `docs/contracts/item-master-service/**` 已回写 Contract V2，后续 proto 与 runtime migration 必须以本文和 Contract V2 为准。
-- 旧 feature packet `docs/plans/features/item-master-service-foundation.md` 已不再作为设计或实现输入。
 - 其他服务文档应引用本文定义的概念，不得重新定义 item-master 主数据语义。

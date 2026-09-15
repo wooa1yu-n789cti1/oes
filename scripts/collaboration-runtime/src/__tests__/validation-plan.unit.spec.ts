@@ -142,11 +142,11 @@ test('intersecting paths run only matching commands and refresh unrelated comman
       sha('b')
     ),
     command(
-      'packet-lint',
+      'docs-lint',
       '9',
       'FOCUSED_DEVELOPMENT',
-      'packet',
-      'docs/plans/deliveries/**',
+      'governance',
+      'docs/governance/**',
       sha('a'),
       sha('b')
     )
@@ -159,7 +159,7 @@ test('intersecting paths run only matching commands and refresh unrelated comman
   )
   assert.deepEqual(
     plan.reuseActions.map((action) => action.commandId),
-    ['packet-lint']
+    ['docs-lint']
   )
   assert.equal(plan.runActions[0].driftDecision, 'FOCUSED')
   assert.equal(plan.reuseActions[0].driftDecision, 'REFRESH_BASELINE')

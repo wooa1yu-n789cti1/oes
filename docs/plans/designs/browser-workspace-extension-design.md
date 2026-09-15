@@ -9,7 +9,6 @@ lastUpdatedAt: 2026-06-23 00:00:00 Asia/Shanghai
 lastUpdatedBy: Codex
 supersedes:
   - docs/plans/designs/browser-prospecting-workspace.md (removed 2026-06-17)
-  - docs/plans/features/browser-prospecting-workspace.md (deleted 2026-06-22)
 conflictResolution: 当本文与更早浏览器插件讨论、旧 browser prospecting workspace 或旧 browser-prospecting feature packet 冲突时，以本文 lastUpdatedAt 之后的冻结结论为准；稳定 architecture / ADR / contracts 明确覆盖本文时，以稳定真相源为准。
 ```
 

@@ -727,7 +727,7 @@ P1 does not define:
 ## 18. Related Documents
 
 - [browser-workspace-extension-design.md](../../plans/designs/browser-workspace-extension-design.md)
-- [browser-extension-crm-workspace-p1.md](../../plans/features/browser-extension-crm-workspace-p1.md)
+- [crm-service.md](../../architecture/services/crm-service.md)
 - [extension-auth-bff-login.md](./extension-auth-bff-login.md)
 - [navigation-summary.md](./navigation-summary.md)
 - [access-summary.md](./access-summary.md)

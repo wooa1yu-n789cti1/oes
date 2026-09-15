@@ -49,7 +49,7 @@ const base = (): CompleteDriftAssessmentInput => ({
       pathPatterns: ['scripts/collaboration-runtime/src/**'],
       contractSensitive: true
     },
-    { id: 'cleanup', pathPatterns: ['docs/plans/deliveries/**'], contractSensitive: false }
+    { id: 'cleanup', pathPatterns: ['docs/runbooks/**'], contractSensitive: false }
   ],
   dependencyChanged: false,
   profileChanged: false,

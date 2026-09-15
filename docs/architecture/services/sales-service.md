@@ -53,7 +53,7 @@ phase 1 只冻结报价与订单核心交易边界，不展开 proto、运行时
   - CRM-assisted sales flows through BFF only
 - 当前设计输入：
   - [erp-service-design.md](../../plans/designs/erp-service-design.md)
-  - [sales-quote-order-core.md](../../plans/features/sales-quote-order-core.md)
+  - [sales-service contracts](../../contracts/sales-service/README.md)
 
 ## 6. Upstream Dependencies
 

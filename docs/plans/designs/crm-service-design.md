@@ -9,7 +9,7 @@ writeBackTargets:
   - docs/architecture/services/crm-service.md
   - docs/architecture/collaborations/sales-crm-party-item-master.md
   - docs/contracts/crm-service/
-  - docs/plans/features/
+  - docs/plans/backlog.md
 ```
 
 ## Current Goal

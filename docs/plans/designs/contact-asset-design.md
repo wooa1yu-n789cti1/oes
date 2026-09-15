@@ -50,7 +50,7 @@ conflictResolution: 当本文与更早联系方式、员工名片或账号登录
   - `tenant-org-service`
   - BusinessCard module / future `public-entry-service`
 - related designs:
-  - [employee-digital-business-card-design.md](./employee-digital-business-card-design.md)
+  - [public-entry-service.md](../../architecture/services/public-entry-service.md)
   - [identity-service.md](../../architecture/services/identity-service.md)
   - [auth-service.md](../../architecture/services/auth-service.md)
   - [hr-service.md](../../architecture/services/hr-service.md)
@@ -347,7 +347,7 @@ publicValueSummary {
 下次继续前先读：
 
 - [contact-asset-design.md](./contact-asset-design.md)
-- [employee-digital-business-card-design.md](./employee-digital-business-card-design.md)
+- [public-entry-service.md](../../architecture/services/public-entry-service.md)
 - [identity-service.md](../../architecture/services/identity-service.md)
 - [auth-service.md](../../architecture/services/auth-service.md)
 - [hr-service.md](../../architecture/services/hr-service.md)

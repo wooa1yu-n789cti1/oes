@@ -1,6 +1,6 @@
 # public-entry-service 职责卡
 
-> ShortLink / Public Entry Phase 1 的设计过程以 [shortlink-public-entry-design.md](../../plans/designs/shortlink-public-entry-design.md) 为准；Phase 1 feature 范围以 [shortlink-public-entry-phase-1.md](../../plans/features/shortlink-public-entry-phase-1.md) 为准。本文冻结 `public-entry-service` 的长期职责边界，不替代后续 contracts 或实现计划。
+> 本文是 ShortLink / Public Entry 与 BusinessCard 的稳定服务设计真相源；黑盒行为以 [public-entry-service contracts](../../contracts/public-entry-service/README.md) 为准。
 
 ## 1. Purpose
 
@@ -213,8 +213,8 @@ Phase 1 rules:
 
 Its detailed fields and Phase 1 constraints are governed by:
 
-- [employee-digital-business-card-design.md](../../plans/designs/employee-digital-business-card-design.md)
-- [employee-digital-business-card.md](../../plans/features/employee-digital-business-card.md)
+- [Public Business Card owner-fact resolution](../collaborations/public-business-card-owner-facts.md)
+- [public-entry-service contracts](../../contracts/public-entry-service/README.md)
 
 This service card only freezes that BusinessCard and ShortLink are same-service modules with separated owner boundaries.
 
@@ -377,10 +377,8 @@ Phase 1 does not do:
 
 ## 12. Related Documents
 
-- [shortlink-public-entry-design.md](../../plans/designs/shortlink-public-entry-design.md)
-- [shortlink-public-entry-phase-1.md](../../plans/features/shortlink-public-entry-phase-1.md)
-- [employee-digital-business-card-design.md](../../plans/designs/employee-digital-business-card-design.md)
-- [employee-digital-business-card.md](../../plans/features/employee-digital-business-card.md)
+- [public-entry-service contracts](../../contracts/public-entry-service/README.md)
+- [Public Business Card owner-fact resolution](../collaborations/public-business-card-owner-facts.md)
 - [scan-identity-design.md](../../plans/designs/scan-identity-design.md)
 - [permission-service.md](./permission-service.md)
 - [Public Business Card owner-fact resolution](../collaborations/public-business-card-owner-facts.md)

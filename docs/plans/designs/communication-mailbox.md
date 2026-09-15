@@ -8,7 +8,7 @@ writeBackTargets:
   - docs/architecture/services/communication-service.md
   - docs/architecture/collaborations/communication-notification.md
   - docs/contracts/communication-service/
-  - docs/plans/features/communication-mailbox-p1.md
+  - docs/plans/backlog.md
 ```
 
 ## Goal

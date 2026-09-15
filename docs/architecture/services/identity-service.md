@@ -222,7 +222,7 @@ Admin-management 默认语义：
 - 管理员查看或治理目标账号、目标用户、工作联系方式资产或机器主体。
 - 必须经过 `RBAC + scope / resource` 授权判定，并记录审计。
 
-历史混合接口只作为迁移债，不得继续扩展。该迁移由 [self-service-admin-boundary-migration.md](../../plans/features/self-service-admin-boundary-migration.md) 持续跟踪，而不是在各服务中分别维护孤立清单。
+历史混合接口只作为迁移债，不得继续扩展；剩余迁移由 [backlog](../../plans/backlog.md) 的单一 closure item 跟踪，而不是在各服务中分别维护孤立清单。
 
 ## 11. External Interfaces
 
@@ -293,7 +293,7 @@ Contract 文档只描述黑盒调用语义、字段、错误与当前接口形�
 - `docs/architecture/collaborations/**` 继续作为跨服务协同蓝图，但不得重新定义 `identity-service` owner 语义。
 - 服务内旧 design、task、history、overview、roadmap 只作为本次提炼来源与历史记录，不再作为稳定设计入口。
 - 服务内旧 docs 在提炼完成后应删除；服务根目录可保留一个极短 README 指向本文与 contract 入口。
-- self-service / admin-management 拆分由 [self-service-admin-boundary-migration.md](../../plans/features/self-service-admin-boundary-migration.md) 持续推进。
+- self-service / admin-management 拆分的剩余工作由 [backlog](../../plans/backlog.md) 的单一 closure item 跟踪。
 
 ## 16. Trusted gRPC 45-RPC contract（FROZEN）
 
