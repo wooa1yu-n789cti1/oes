@@ -2,7 +2,9 @@
 
 ## 1. Authority
 
-This file is the repository entry point. Product truth remains in `docs/architecture/`, `docs/adr/`, and `docs/contracts/`. The complete collaboration contract is `docs/governance/codex-execution-model.md`; document placement is governed by `docs/governance/document-governance.md`.
+This file is the repository entry point. Product truth remains in `docs/architecture/`, `docs/adr/`, and `docs/contracts/`. The complete collaboration contract is `docs/governance/codex-execution-model.md`; document placement and AI context loading are governed by `docs/governance/document-governance.md`.
+
+Reason from current canonical files at the checked-out commit. Load an active design workspace only when the task explicitly binds that topic. Historical plans, Git history, old tasks, execution artifacts, and search excerpts are discovery evidence only and never override current canonical truth.
 
 ## 2. Architecture constraints
 
@@ -24,6 +26,8 @@ The complete active role set is **DA / UD / DO / CO / RV**. Human is the decisio
 - **RV — Review & Verification:** independently reviews an exact DO/CO candidate as one Human-viewable subagent retained across candidate generations; RV remains a role but is not a separate sidebar task.
 
 Helpers are bounded execution mechanisms, not task roles or owners.
+
+Debugger and Fixer are Human-assistance mechanisms outside this role topology. A Debugger is a Human-visible assistance task that may run the project, observe terminals, reproduce behavior, and isolate a cause in the Human's existing environment. It may use one visible, bounded Fixer subagent for an already-designed small local repair and verify that repair in the same environment. The Fixer is not a second task, and neither mechanism becomes a role or delivery owner; the assistance task does not create a branch, worktree, DP, candidate, PR, RV, or cleanup lifecycle. Design, contract, permission/tenant/security, migration, cross-module, or independently deliverable scope routes to DA or DO instead.
 
 ## 4. Routing and lifecycle
 
