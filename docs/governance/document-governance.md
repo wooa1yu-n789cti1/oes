@@ -70,6 +70,8 @@ DA、UD、DO、CO 是 Human-visible task；RV 是可查看进度与结果的独�
 
 `plans/designs/`、intake 与 backlog 仅在任务明确绑定对应 active topic 时装载。`plans/features/`、`plans/deliveries/`、Git 历史、旧 task/聊天、Proposal、DP/ADP 与其他执行 evidence 仅在明确的历史调查、迁移或证据核验中按需读取，不能补写、覆盖或反向定义当前 canonical truth。
 
+迁移完成前，若一个 current canonical 文件明确链接某份 historical file，AI 可沿该 exact link 读取它，作为引用它的 canonical owner 的 scoped transitional dependency。不得默认枚举或搜索同目录，不得把该文件提升为独立真相源，也不得用其内容覆盖引用它的 canonical；冲突时仍以 canonical 为准并报告迁移缺口。逐份迁移完成后，同一次变更删除 canonical link 与 historical file。
+
 不同 canonical owner 发生冲突，或 canonical truth 与当前实现不一致时，必须报告 exact 冲突或 design/runtime drift；不得把多个版本静默拼成第三种规则。历史调查得出的仍有效事实，必须经过正常 DA/UD 设计流程写回其唯一 canonical owner 后，才能成为默认上下文。
 
 ## 4. Design Workspace 与 Proposal
@@ -121,7 +123,7 @@ Active Workspace 由目录中的当前文件表示；DP/ADP 由 owner task stabl
 
 ## 9. 历史文件
 
-`docs/plans/features/` 与 `docs/plans/deliveries/` 下的既有文件是 pre-V2 historical migration inputs，不是 active route、template、owner authority 或默认 AI 上下文。它们只在逐文件迁移或明确历史调查时读取；任何新交付都使用 stable artifact root 中的 DP/ADP。后续 Delivery 逐文件清理时：
+`docs/plans/features/` 与 `docs/plans/deliveries/` 下的既有文件是 pre-V2 historical migration inputs，不是 active route、template、owner authority 或默认 AI 上下文。除 canonical 文件的 exact scoped transitional link 外，它们只在逐文件迁移或明确历史调查时读取；任何新交付都使用 stable artifact root 中的 DP/ADP。后续 Delivery 逐文件清理时：
 
 - 已存在于 canonical truth、active Workspace 或 DP/ADP：删除重复文件；
 - 仅包含完成 checklist、命令或流水：删除；
