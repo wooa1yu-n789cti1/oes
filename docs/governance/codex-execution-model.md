@@ -28,15 +28,23 @@ RV is independent of the candidate owner and reviews an exact SHA or host-local 
 
 Human chooses direction and confirms material decisions but is not a task role. Adding a role requires proof that the responsibility cannot be held by one of these roles and removal of equivalent complexity.
 
+### 2.6 Human-assistance mechanisms
+
+Debugger and Fixer are not framework roles and do not participate in DA/UD/DO/CO/RV ownership or dispatch. A Human-directed Debugger is a Human-visible assistance task that runs the project in the Human's existing environment, reads terminal output, reproduces behavior, and identifies symptom, trigger, and cause. For one bounded, already-designed local correction, it may use one Human-viewable Fixer subagent; the Fixer changes only the exact diagnosed slice and returns the edit and verification to the Debugger. The Fixer is not a second task. Any local edit remains Human-owned and uncommitted: Debugger/Fixer must not commit, push, create a branch/worktree, or create a DP, candidate, PR, RV, or cleanup lifecycle.
+
+The assistance path ends with diagnosis or a locally verified bounded edit in the Human's existing checkout. If the work changes canonical design, contracts, permission/tenant/security boundaries, migrations, multiple modules, or has an independently deliverable boundary, preserve the diagnosis and local evidence and route design through DA/UD or delivery through DO. A later request to publish an accumulated local edit is a separate Human intent classified from its actual scope. A DO must re-accept the Human-selected exact diff in its owner-exclusive worktree and run normal Delivery verification; the Human checkout is never used directly as a candidate, and the assistance path never acquires remote publication or merge ownership.
+
 ## 3. Routing
 
-Read-only discussion creates no delivery resources. Before stateful work, classify stable-design impact, cohesive acceptance, write-set coupling, dependencies, risk, and genuine parallelism, then show one exact recommendation:
+Classify Debugger/Fixer assistance before this routing. Pure diagnosis and one already-designed bounded local correction are Human assistance rather than Proposal/Delivery work. If the work is not assistance or crosses that boundary, preserve the diagnosis and Human-owned local diff, then classify stable-design impact, cohesive acceptance, write-set coupling, dependencies, risk, and genuine parallelism and show one exact recommendation:
 
 - Design-changing: DA → confirmed Proposal → UD → confirmed delivery activation.
 - One cohesive/atomic/already-designed change: one DO, regardless of size or helper count.
 - Several independently ownable deliveries needing coordination: one CO plus two or more DOs.
 
 Human confirmation is required for a real decision, not a process checklist. A card is a preview, not proof of confirmation: the native controller records one exact `HumanConfirmationReceipt` beneath the profile-derived read-only authorization root. The card carries a material-decision fingerprint over project, objective, scope, protected scope, acceptance, integration contract, risk, design impact, independent-PR exception, CI ceiling, and stop point. Routing, continued execution, DP/ADP activation, FULL planning, and every remote action reopen that receipt plus its exact card; a caller-computed card hash or Boolean is never confirmation. One generated Proposal card covers UD audit, canonical write, Design PR publication, RV/CI of the exact design candidate, Merge Queue admission, merge verification, and exact task-owned cleanup. One generated Delivery card covers only actions applicable to its execution mode and PR topology: repository delivery includes implementation, in-scope repair, RV, selected CI, PR publication, Merge Queue, merge verification, post-check, and cleanup, while host-local delivery excludes PR, CI, and merge actions. Candidate repair, rerun, task creation required by an already confirmed topology, merge, and cleanup do not create new gates. Reconfirm only for a material fingerprint change, increased CI level, or destructive action against an unowned or ambiguous resource.
+
+Crossing an assistance boundary routes once from the preserved diagnosis and selected local diff; it does not recursively dispatch another Debugger or Fixer.
 
 ## 4. Identity, visibility, and ownership
 

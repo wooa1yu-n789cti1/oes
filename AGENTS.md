@@ -2,7 +2,9 @@
 
 ## 1. Authority
 
-This file is the repository entry point. Product truth remains in `docs/architecture/`, `docs/adr/`, and `docs/contracts/`. The complete collaboration contract is `docs/governance/codex-execution-model.md`; document placement is governed by `docs/governance/document-governance.md`.
+This file is the repository entry point. Product truth remains in `docs/architecture/`, `docs/adr/`, and `docs/contracts/`. The complete collaboration contract is `docs/governance/codex-execution-model.md`; document placement and AI context loading are governed by `docs/governance/document-governance.md`.
+
+Reason from current canonical files at the checked-out commit. Load an active design workspace only when the task explicitly binds that topic. Historical plans, Git history, old tasks, execution artifacts, and search excerpts are discovery evidence only and never override current canonical truth. During the historical-doc migration, when a current canonical file links one historical plan, read only that exact link as the canonical owner's scoped transitional dependency; the linked file gains no independent authority and is not otherwise enumerated or searched.
 
 ## 2. Architecture constraints
 
@@ -25,10 +27,14 @@ The complete active role set is **DA / UD / DO / CO / RV**. Human is the decisio
 
 Helpers are bounded execution mechanisms, not task roles or owners.
 
+Debugger and Fixer are Human-assistance mechanisms outside this role topology. A Debugger is a Human-visible assistance task that may run the project, observe terminals, reproduce behavior, and isolate a cause in the Human's existing environment. It may use one visible, bounded Fixer subagent for an already-designed small local repair and verify that repair in the same environment. The Fixer is not a second task, and neither mechanism becomes a role or delivery owner. Any local edit remains Human-owned and uncommitted: Debugger/Fixer must not commit, push, create a branch/worktree, or create a DP, candidate, PR, RV, or cleanup lifecycle. Design, contract, permission/tenant/security, migration, cross-module, or independently deliverable scope routes to DA or DO instead. Publication requires a DO to re-accept the Human-selected exact diff in its owner-exclusive worktree and run normal Delivery verification; the Human checkout is never used directly as a candidate.
+
 ## 4. Routing and lifecycle
 
+Classify Debugger/Fixer assistance before applying this section. Pure diagnosis and one already-designed bounded local correction are Human assistance, not Proposal/Delivery routing. When work is not assistance or crosses the boundary defined above, preserve its diagnosis and local diff and then apply the following stateful routing rules.
+
 1. Read-only discussion creates no task, branch, worktree, Delivery Package (DP), candidate, or PR.
-2. Before stateful work, classify scope, risk, design impact, and coupling; generate and validate one Proposal or Delivery decision card. One confirmation remains valid for the card's bounded scope and CI level.
+2. Before stateful Proposal/Delivery work, classify scope, risk, design impact, and coupling; generate and validate one Proposal or Delivery decision card. One confirmation remains valid for the card's bounded scope and CI level.
 3. Stable-design change follows DA → Human-confirmed Proposal → the unique UD audit/canonical write. Delivery begins from its own one-time confirmed card; mechanical Proposal and Delivery steps do not create additional confirmation gates.
 4. Small, already-designed, or atomically coupled work uses one DO. Size alone never justifies CO.
 5. Independent DO uses one candidate and one PR. CO integrates RV-approved DO candidates in dependency order and defaults to one aggregate candidate/PR. Independent DO PRs require an explicit Human-confirmed exception and independently releasable workstreams.

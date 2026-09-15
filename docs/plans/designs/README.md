@@ -1,6 +1,6 @@
 # DA Design Workspace
 
-本目录只保存尚未冻结且需要跨多轮讨论的 active design topic。一个 topic 最多一个 Workspace；DA 维护讨论面，UD 是唯一 canonical design writer。
+本目录只保存尚未冻结且需要跨多轮讨论的 active design topic。一个 topic 最多一个 Workspace；DA 维护讨论面，UD 是唯一 canonical design writer。AI 仅在当前任务明确绑定该 topic 时装载对应 Workspace，不把本目录当作默认 stable truth。
 
 ## Minimal template
 
