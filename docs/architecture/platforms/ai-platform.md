@@ -199,7 +199,7 @@ core business and platform security
 ToolContract registration phase 必须满足：
 
 1. 本架构、[task-assistant.md](../collaborations/task-assistant.md) 与 [task-assistant-tool-contract.md](../../contracts/ai-platform/task-assistant-tool-contract.md) 已进入 `main`。
-2. Collaboration owner 已在既有 Task contracts 冻结 eligible operation subset、risk class 与 assigned-task descriptor。
+2. [Task Assistant ToolContract v1](../../contracts/ai-platform/task-assistant-tool-contract.md) 已通过其 immutable owner risk source 声明 eligible operation subset、risk class 与 assigned-task descriptor；AI Platform 只消费该声明，不把这些 owner facts 重新归属给 Task contracts 或 AI owner。
 3. 实现只写 AI-owned registration manifest 与 contract test；不创建 service、runtime adapter、proto、schema、Gateway route 或 execution path。
 
 该 registration phase 不等待 ActionGrant runtime。任何 Task Assistant runtime 或 mutation opening 仍必须等待：
