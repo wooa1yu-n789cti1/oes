@@ -10,7 +10,6 @@ lastUpdatedAt: 2026-07-19 10:58:28 Asia/Shanghai
 lastUpdatedBy: Codex
 supersedes: none
 truthSource: pending write-back after collection governance closure
-doNotUseAsStableSource: false
 conflictResolution: 本文只记录当前 Collection 页面治理讨论；稳定 architecture / ADR / contracts 明确覆盖本文时，以稳定真相源为准。
 ```
 
@@ -102,7 +101,7 @@ conflictResolution: 本文只记录当前 Collection 页面治理讨论；稳定
 - Runtime 协同：`docs/architecture/platforms/site-runtime-architecture.md`
 - Runtime SDK：`docs/architecture/platforms/site-runtime-kit.md`
 - 黑盒契约：`docs/contracts/site-service/**`
-- 执行计划：`docs/plans/features/**`
+- 延期事项：`docs/plans/backlog.md`
 
 ## 7. 恢复入口
 

@@ -10,7 +10,6 @@ lastUpdatedAt: 2026-07-06 18:00:06 CST
 lastUpdatedBy: Codex storefront PDP thread
 supersedes: 当前 PDP 讨论中关于 Product Highlights / rich text / drag editor 的口头结论
 truthSource:
-doNotUseAsStableSource: false
 conflictResolution: 当本文与更早讨论冲突时，以本文 lastUpdatedAt 之后的冻结结论为准；稳定 architecture / ADR / contracts 明确覆盖本文时，以稳定真相源为准。
 ```
 
@@ -158,7 +157,7 @@ type IncludedItemsHighlightBlock = {
 
 ## 8. 后续新线程入口
 
-后续新线程推进 OES 配置端时，建议先冻结 feature packet：
+后续推进 OES 配置端时，应先确认 Delivery 决策卡：
 
 - 配置端 schema 与 validation。
 - 媒体选择能力。

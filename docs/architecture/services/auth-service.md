@@ -4,7 +4,7 @@
 
 `auth-service` 是 OES 的认证、认证凭据、认证挑战、会话、token、MFA 与认证域审计真相服务，负责回答“操作者如何被认证、当前 session 是否有效、认证流程如何续流、当前 session context 如何建立或切换”。
 
-本文是 `auth-service` 的唯一稳定设计真相源。其他 architecture、collaboration、contract、plan、feature packet 或服务内实现文档只能引用本文，不得重新定义 `auth-service` 的长期职责、核心对象、边界或 owner 语义。
+本文是 `auth-service` 的唯一稳定设计真相源。其他 architecture、collaboration、contract、active design、Delivery artifact 或服务内实现文档只能引用本文，不得重新定义 `auth-service` 的长期职责、核心对象、边界或 owner 语义。
 
 ## 2. Owns
 
@@ -537,7 +537,7 @@ Phase 2 管理员 session 写操作不提供按筛选结果、terminal、termina
 
 application / domain 层可以复用底层业务逻辑，但 BFF / gRPC / interface 层不得长期复用同一个权限门承载 self-service 与 admin-management。
 
-历史混合接口只作为迁移债，不得继续扩展。该迁移由 [self-service-admin-boundary-migration.md](../../plans/features/self-service-admin-boundary-migration.md) 持续跟踪，而不是在各服务中分别维护孤立清单。
+历史混合接口只作为迁移债，不得继续扩展；剩余迁移由 [backlog](../../plans/backlog.md) 的单一 closure item 跟踪，而不是在各服务中分别维护孤立清单。
 
 ## 13. Audit Facts
 
@@ -643,7 +643,7 @@ Contract 文档只描述黑盒调用语义、字段、错误与当前接口形�
 - 不把基础 self-service 能力建模为普通 RBAC 岗位权限。
 - 不让租户配置 primary login method。
 - 不把 PDA / KIOSK 受管设备作为 personal trusted login device。
-- 不通过 service-local docs、feature packet 或 contract 文档长期承载第二份 auth-service 服务设计。
+- 不通过 service-local docs、Delivery artifact 或 contract 文档长期承载第二份 auth-service 服务设计。
 
 ## 18. Current Stage And Cleanup Rules
 
@@ -654,7 +654,7 @@ Contract 文档只描述黑盒调用语义、字段、错误与当前接口形�
 - `docs/architecture/collaborations/**` 继续作为跨服务协同蓝图，但不得重新定义 `auth-service` owner 语义。
 - `src/services/system/auth-service/doc/**` 中的旧 design、task、history、overview、roadmap 只作为本次提炼来源与历史记录，不再作为稳定设计入口。
 - 服务内旧 docs 在提炼完成后应删除，或最多保留一个极短 README 指向本文与 contract 入口。
-- self-service / admin-management 拆分由 [self-service-admin-boundary-migration.md](../../plans/features/self-service-admin-boundary-migration.md) 持续推进，避免在各服务中分别维护孤立迁移清单。
+- self-service / admin-management 拆分的剩余工作由 [backlog](../../plans/backlog.md) 的单一 closure item 跟踪。
 
 ## 19. Trusted gRPC foundation-group admission（FROZEN）
 

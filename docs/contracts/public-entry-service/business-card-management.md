@@ -1,6 +1,6 @@
 # BusinessCard Management Contract
 
-> 服务设计唯一真相源：[public-entry-service.md](../../architecture/services/public-entry-service.md)。BusinessCard 设计入口：[employee-digital-business-card-design.md](../../plans/designs/employee-digital-business-card-design.md)。本文只描述 Phase 1 BusinessCard 管理端黑盒契约，不重新定义 HR、Identity Contact Asset、ShortLink、Tenant Org、Permission 或 CRM owner 边界。
+> 服务设计唯一真相源：[public-entry-service.md](../../architecture/services/public-entry-service.md)。本文只描述 Phase 1 BusinessCard 管理端黑盒契约，不重新定义 HR、Identity Contact Asset、ShortLink、Tenant Org、Permission 或 CRM owner 边界。
 
 ## 1. Purpose
 

@@ -10,8 +10,7 @@ lastUpdatedAt: 2026-07-08 21:45:00 Asia/Shanghai
 lastUpdatedBy: Codex PDP frontend thread
 supersedes: PDP review/Q&A inline discussion in storefront implementation thread
 truthSource:
-doNotUseAsStableSource: false
-conflictResolution: 当本文与更早口头讨论冲突时，以本文 lastUpdatedAt 之后的冻结结论为准；若后续 architecture / ADR / contracts / feature packet 明确覆盖本文，以稳定真相源为准。
+conflictResolution: 当本文与更早口头讨论冲突时，以本文 lastUpdatedAt 之后的冻结结论为准；若后续 architecture / ADR / contracts 明确覆盖本文，以稳定真相源为准。
 ```
 
 ## 1. 目标
@@ -72,4 +71,4 @@ conflictResolution: 当本文与更早口头讨论冲突时，以本文 lastUpda
   - 后台审核工作台需求
   - PDP runtime API 边界
   - 媒体上传与审核链路
-- 再创建 feature packet 进入实现。
+- 冻结必要设计与 contracts 后，通过一次 Delivery 决策卡进入实现，并由 task-owned DP 承载执行状态。

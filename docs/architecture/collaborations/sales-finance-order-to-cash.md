@@ -116,5 +116,5 @@
 - [sales-service.md](../services/sales-service.md)
 - [finance-service.md](../services/finance-service.md)
 - [sales-fulfillment-mes-wms-finance.md](./sales-fulfillment-mes-wms-finance.md)
-- [sales-quote-order-core.md](../../plans/features/sales-quote-order-core.md)
-- [finance-ar-credit-core.md](../../plans/features/finance-ar-credit-core.md)
+- [sales-service contracts](../../contracts/sales-service/README.md)
+- [finance-service contracts](../../contracts/finance-service/README.md)

@@ -9,8 +9,7 @@ lastUpdatedAt: 2026-06-23 00:00:00 Asia/Shanghai
 lastUpdatedBy: Codex
 supersedes:
   - docs/plans/designs/browser-prospecting-workspace.md (removed 2026-06-17)
-  - docs/plans/features/browser-prospecting-workspace.md (deleted 2026-06-22)
-conflictResolution: 当本文与更早浏览器插件讨论、旧 browser prospecting workspace 或旧 browser-prospecting feature packet 冲突时，以本文 lastUpdatedAt 之后的冻结结论为准；稳定 architecture / ADR / contracts 明确覆盖本文时，以稳定真相源为准。
+conflictResolution: 当本文与更早浏览器插件讨论、旧 browser prospecting workspace 或旧 browser-prospecting pre-V2 delivery plan 冲突时，以本文 lastUpdatedAt 之后的冻结结论为准；稳定 architecture / ADR / contracts 明确覆盖本文时，以稳定真相源为准。
 ```
 
 ## 1. 目标
@@ -56,9 +55,9 @@ conflictResolution: 当本文与更早浏览器插件讨论、旧 browser prospe
 
 | 日期 | 决定 | 影响范围 | 回写目标 |
 | --- | --- | --- | --- |
-| 2026-06-04 | 新插件主轴采用“统一浏览器工作台插件”，不是只面向销售 prospecting 的单一业务插件。 | product boundary / plugin positioning | 当前 workspace；后续 feature packet / contracts |
-| 2026-06-04 | 插件首屏采用 launcher 首页，先展示当前 operator 可用的 workspace / capability 入口，而不是默认直接进入销售或其他单一 workspace。 | plugin shell / navigation / role-aware UX | 当前 workspace；后续 feature packet / contracts |
-| 2026-06-04 | 插件 launcher 的一级入口单位采用 workspace，而不是直接暴露零散 capability 列表。 | launcher IA / terminal UX | 当前 workspace；后续 feature packet |
+| 2026-06-04 | 新插件主轴采用“统一浏览器工作台插件”，不是只面向销售 prospecting 的单一业务插件。 | product boundary / plugin positioning | 当前 workspace；后续 Delivery / contracts |
+| 2026-06-04 | 插件首屏采用 launcher 首页，先展示当前 operator 可用的 workspace / capability 入口，而不是默认直接进入销售或其他单一 workspace。 | plugin shell / navigation / role-aware UX | 当前 workspace；后续 Delivery / contracts |
+| 2026-06-04 | 插件 launcher 的一级入口单位采用 workspace，而不是直接暴露零散 capability 列表。 | launcher IA / terminal UX | 当前 workspace；后续 Delivery |
 | 2026-06-04 | `browser-extension` 作为独立 terminal 参与入口可见性治理，而不是只作为 tenant-web 附属页面或前端本地插件能力。 | terminal boundary / permission integration | 当前 workspace；后续 permission / navigation write-back if needed |
 | 2026-06-04 | 插件中“能不能看到某个 workspace”由后端 entry visibility 控制；“进入 workspace 后能做什么”由 actionCodes 控制。 | entry / action authorization split | 当前 workspace；后续 contracts |
 | 2026-06-04 | extension terminal 下的 workspace entries 默认只服务 `browser-extension`，不默认给其他 terminal 复用。 | terminal-scoped entry governance | 当前 workspace；后续 navigation governance write-back if needed |
@@ -69,11 +68,11 @@ conflictResolution: 当本文与更早浏览器插件讨论、旧 browser prospe
 | 2026-06-04 | extension demo 第一版登录方式先默认使用 `EMAIL_PASSWORD`，OTP / MFA 只按现有 auth flow 兼容，不作为首版重点扩展。 | login method / demo scope | 当前 workspace；后续 extension auth-bff contract |
 | 2026-06-04 | 插件登录成功后的 shell 初始化复用现有 session context 与 access summary 语义：`navigation.visibleEntries` 驱动 launcher，`actionCodes` 驱动 workspace 内动作。 | session bootstrap / launcher / authorization | 当前 workspace；后续 extension auth-bff contract |
 | 2026-06-17 | 插件定位收敛为浏览器中的效率入口、采集入口、轻量动作入口和 OES 双向数据交换入口，不替代 OES Web 的完整操作台。 | product boundary | 当前 workspace；后续 CRM / PLM capability design |
-| 2026-06-17 | 第一批业务场景仍可面向 CRM 与 PLM，但当前线程先选择 CRM 作为第一个详细设计场景；PLM 暂不展开。 | capability sequencing | 当前 workspace；后续 CRM capability workspace / feature packet |
+| 2026-06-17 | 第一批业务场景仍可面向 CRM 与 PLM，但当前线程先选择 CRM 作为第一个详细设计场景；PLM 暂不展开。 | capability sequencing | 当前 workspace；后续 CRM capability workspace / Delivery |
 | 2026-06-17 | CRM 首个样板场景定义为销售目标研究与沉淀，重点支持销售在浏览器中研究潜在客户、避免重复开发、沉淀有效上下文。 | CRM workspace / sales workflow | 当前 workspace；后续 CRM capability design |
 | 2026-06-17 | 插件显示的页面业务判断应来自 OES 回传结论，不由插件或 AI 自行判定目标有效性、客户归属或业务状态。 | OES truth boundary | 当前 workspace；后续 BFF / CRM contract |
 | 2026-06-17 | 旧 `browser-prospecting-workspace` 已删除，后续浏览器插件设计统一从本文恢复上下文。 | docs governance / workspace cleanup | 当前 workspace |
-| 2026-06-22 | 旧 `browser-prospecting-workspace` feature packet 已删除；后续不得继续以 `/browser-prospecting/*`、`Target Workspace`、`Research Timeline`、`Research Event` 或旧 `Lead Draft` 防腐层作为插件主模型恢复实现。 | docs governance / workspace cleanup | 当前 workspace；后续新 feature packet / contracts |
+| 2026-06-22 | 旧 `browser-prospecting-workspace` delivery plan 已删除；后续不得继续以 `/browser-prospecting/*`、`Target Workspace`、`Research Timeline`、`Research Event` 或旧 `Lead Draft` 防腐层作为插件主模型恢复实现。 | docs governance / workspace cleanup | 当前 workspace；后续新 Delivery / contracts |
 | 2026-06-22 | 旧 `/browser-prospecting/*` endpoint prefix 废弃；后续浏览器插件能力应采用 extension terminal 下的 capability-specific BFF 入口，例如 CRM 场景候选 `/extension/crm/*`。 | BFF contract naming / terminal boundary | 后续 extension CRM contract |
 | 2026-06-22 | 插件 P1 不消费 `ReleaseCrmAccount`，因为当前 CRM 服务真相源仍明确 P1 不支持 release 回公海；如后续需要，必须先回写 CRM 真相源并单独冻结。 | CRM alignment / action boundary | `docs/architecture/services/crm-service.md` / future feature |
 | 2026-06-22 | 插件采集来源倾向采用 `BROWSER_EXTENSION` 作为入口来源类型，`WEB_RESEARCH` 仅作为来源语义或历史兼容项另行说明。 | CRM source semantics | future extension CRM contract / CRM source note |
@@ -86,7 +85,7 @@ conflictResolution: 当本文与更早浏览器插件讨论、旧 browser prospe
 
 ## 5. 旧 Browser Prospecting 方向处置
 
-旧 `browser-prospecting-workspace` feature packet 已于 2026-06-22 删除。后续线程不得把旧 feature packet、旧 `/browser-prospecting/*` contract 草案或旧 implementation plan 作为当前设计入口。
+旧 `browser-prospecting-workspace` pre-V2 delivery plan 已于 2026-06-22 删除。后续线程不得把旧 delivery plan、旧 `/browser-prospecting/*` contract 草案或旧 implementation plan 作为当前设计入口。
 
 旧方向的核心问题不是“CRM 销售研究场景无效”，而是它把一个具体销售场景误塑造成插件主模型，容易污染统一浏览器插件壳层、权限治理和 CRM P1 事实归属。
 
@@ -107,7 +106,7 @@ conflictResolution: 当本文与更早浏览器插件讨论、旧 browser prospe
 - 旧 `Target Workspace` 应改写为更通用的 `Browser Workspace` / capability-specific workspace 容器语义，避免把所有角色都绑到 sales target 模型。
 - 旧“页面信息卡 + timeline + research event”模式可以保留为某类 capability 的候选交互模式，但不应成为所有 role 的统一数据模型。
 - 旧 prospecting / lead draft / contact clue 只应降级为“销售 workspace 示例能力”，不再代表插件主模型。
-- 旧 `browser-prospecting` 命名、endpoint prefix、feature packet 命名不再默认延续。
+- 旧 `browser-prospecting` 命名、endpoint prefix、delivery plan 命名不再默认延续。
 
 ### 5.3 已丢弃
 
@@ -419,8 +418,8 @@ CRM workspace P1 适用规则：
 - contracts：
   - 待冻结统一浏览器工作台插件首批 BFF contract 后新增。
   - 待 CRM 官网页、搜索结果页和 contact 候选能力进一步冻结后，再建立 CRM workspace / BFF 黑盒契约。
-- feature packet：
-  - 待新方案范围足够清晰后建立新的 feature packet。
+- Delivery：
+  - 待新方案范围与设计边界足够清晰后，通过一次 Delivery 决策卡确认并由 task-owned DP 承载执行状态。
 - architecture / ADR：
   - 若需要反转现有 access-summary / navigation / terminal 接入边界，再升级到 architecture / ADR。
 

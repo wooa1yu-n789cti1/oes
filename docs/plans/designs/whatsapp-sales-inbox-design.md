@@ -1,6 +1,6 @@
 # WhatsApp Sales Inbox Design Workspace
 
-> 本文记录 WhatsApp 销售协作收件箱的设计想法冻结稿。它不定义 Phase 1 实施范围，不替代 `crm-service`、`sales-service`、`identity-service`、`public-entry-service` 或未来外部通信集成服务的稳定真相源；后续若进入实现，必须再拆成 architecture / collaboration / contract / feature packet。
+> 本文记录 WhatsApp 销售协作收件箱的设计想法冻结稿。它不定义 Phase 1 实施范围，不替代 `crm-service`、`sales-service`、`identity-service`、`public-entry-service` 或未来外部通信集成服务的稳定真相源；后续若进入实现，必须先回写 architecture / collaboration / contract，再通过一次 Delivery 决策卡确认。
 
 ## 0. 文档控制
 
@@ -14,7 +14,6 @@ scopeStatus: idea-frozen-not-phase-1-plan
 relatedTopic: WhatsApp Business Platform / Sales Inbox / CRM collaboration / Quote sending
 excludes: WeChat / WeCom design, WhatsApp Web linked-device automation, implementation plan
 truthSource: 
-doNotUseAsStableSource: false
 ```
 
 ## 1. 当前冻结想法

@@ -13,6 +13,8 @@
 | CRM v2 truth and execution-document reconciliation | 由 CRM DO 与 RV 对齐 `crm-service` 稳定真相、当前 runtime 和 pre-V2 historical delivery records，消除 Release、Archive 与 Pool 范围冲突。 |
 | Remove legacy CheckPermissionWithContext           | 完成真实调用面审查与调用方契约迁移。                                                                                                      |
 | Cross-session permission refresh                   | 产品确认软刷新或强制失效语义，并冻结受影响账号解析和通知通道。                                                                            |
+| Self-service/admin boundary migration closure      | 恢复 Auth/Identity 接口治理时，审计仍混合 self-service 与 admin-management 的入口，并按 ADR 0004 迁移剩余调用方。                          |
+| Public Entry VisitEvent privacy and retention      | 对外提供访问分析或审计查询前，冻结 IP 展示/脱敏、retention、查询权限与删除边界。                                                          |
 
 ## Product
 
@@ -41,6 +43,11 @@
 | Notification rule/template administration         | 冻结预定义 notification type、tenant override、模板版本/变量和管理员 BFF surface。                                                                              |
 | Notification realtime and external channels       | 产品确认 polling、SSE、WebSocket、mobile push、Email/SMS 中哪些进入当前通知主线。                                                                               |
 | Collaboration Task advanced capabilities          | 分别冻结业务对象绑定、source auto-completion、team queue、recurrence、SLA、workflow 与 annotation-on-task。                                                     |
+| Browser-extension CRM official-site panel E2E      | 恢复插件 CRM 开发时，在真实浏览器逐段定位 signal collection、page-context resolution 与 panel rendering，避免跨边界猜测修复。             |
+| InternetDomain and CRM lead normalization          | CRM/Gateway 再次扩展外部域名线索入口时，冻结公共值对象、规范化失败语义与跨层映射。                                                        |
+| BusinessCard CRM return                            | 产品确认名片访问如何生成或关联 CRM lead、如何匹配既有客户以及 owner 分配后，单独冻结协同设计。                                           |
+| Site Content Category migration closure            | 继续站点内容迁移时，按 ADR 0009 核验 Topic 命名、存储、API、Runtime reader 与 Storefront route 已完整收口。                               |
+| Site Inspiration Management P1 delivery            | 该能力重新排期且现有 Site/Asset/public-view contracts 经核验仍适用时，启动一个 cohesive Delivery。                                       |
 
 ## Operations
 
@@ -49,6 +56,7 @@
 | Audit search replica                               | Central audit query 立项并确认索引、同步和数据生命周期。 |
 | Metrics, logging retention, dashboards and alerts  | 平台进入稳定运营并确认 SLO 与指标集。                    |
 | Permission/navigation baseline environment runbook | shared environment 需要固定 seed/sync 顺序与回归检查。   |
+| External-site pilot production-readiness follow-up | 开始真实 OES live sync 或生产准备时，补做 true-device E2E，并用受控本地资产替换仍存在的外部 fallback image。 |
 
 ## Extraction
 

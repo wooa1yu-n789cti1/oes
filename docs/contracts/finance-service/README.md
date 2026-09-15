@@ -304,7 +304,6 @@ phase 1 对象必须被视为 future accounting core 的 posting source candidat
 
 - [finance-service.md](../../architecture/services/finance-service.md)
 - [sales-finance-order-to-cash.md](../../architecture/collaborations/sales-finance-order-to-cash.md)
-- [finance-ar-credit-core.md](../../plans/features/finance-ar-credit-core.md)
 - [sales-service.md](../../architecture/services/sales-service.md)
 - [procurement-service.md](../../architecture/services/procurement-service.md)
 - [service-collaboration-rules.md](../../architecture/system/service-collaboration-rules.md)

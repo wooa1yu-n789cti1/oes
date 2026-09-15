@@ -181,7 +181,7 @@ When this design becomes stable, likely writeback targets are:
 
 - `docs/architecture/services/after-sales-service.md`
 - `docs/architecture/collaborations/sales-after-sales-wms-finance-quality.md`
-- `docs/plans/features/after-sales-foundation.md`
+- `docs/plans/backlog.md`
 - `docs/contracts/after-sales-service/README.md`
 - `docs/contracts/after-sales-service/*.md`
 

@@ -32,7 +32,7 @@ docs/
     └── designs/
 ```
 
-不建立 archive、history、migration ledger 或 task ledger。V2 的 active delivery control surface 是 owner task stable artifact root 中的 Delivery Package (DP)；CO 另有 Aggregate Delivery Package (ADP)。当前仍存在的 `docs/plans/features/` 与 `docs/plans/deliveries/` 是待逐份清理的 pre-V2 输入，不属于目标结构、active index 或默认 AI 上下文。
+不建立 archive、history、migration ledger 或 task ledger。V2 的 active delivery control surface 是 owner task stable artifact root 中的 Delivery Package (DP)；CO 另有 Aggregate Delivery Package (ADP)。当前树只保留一个历史兼容文件：`docs/plans/features/delegated-task-action-grant.md`；它仅服务不可原地改写的 immutable ToolContract v1 risk-source binding，不属于 active index 或默认 AI 上下文。
 
 ## 3. 稳定真相源
 
@@ -68,9 +68,9 @@ DA、UD、DO、CO 是 Human-visible task；RV 是可查看进度与结果的独�
 
 默认上下文只包括当前 commit 中与任务相关的 `AGENTS.md`、governance、architecture、contracts、ADR 与 runbooks，以及验证实际行为所需的相邻代码、migration 和测试。先从对应 index 定位，再打开完整文件；搜索结果和截断片段只用于定位。
 
-`plans/designs/`、intake 与 backlog 仅在任务明确绑定对应 active topic 时装载。`plans/features/`、`plans/deliveries/`、Git 历史、旧 task/聊天、Proposal、DP/ADP 与其他执行 evidence 仅在明确的历史调查、迁移或证据核验中按需读取，不能补写、覆盖或反向定义当前 canonical truth。
+`plans/designs/`、intake 与 backlog 仅在任务明确绑定对应 active topic 时装载。Git 历史、旧 task/聊天、Proposal、DP/ADP 与其他执行 evidence 仅在明确的历史调查或证据核验中按需读取，不能补写、覆盖或反向定义当前 canonical truth。
 
-迁移完成前，若一个 current canonical 文件明确链接某份 historical file，AI 可沿该 exact link 读取它，作为引用它的 canonical owner 的 scoped transitional dependency。不得默认枚举或搜索同目录，不得把该文件提升为独立真相源，也不得用其内容覆盖引用它的 canonical；冲突时仍以 canonical 为准并报告迁移缺口。逐份迁移完成后，同一次变更删除 canonical link 与 historical file。
+唯一例外是 immutable ToolContract v1 对 `docs/plans/features/delegated-task-action-grant.md` 的 exact risk-source binding。AI 只能沿该 exact v1 dependency 读取它；不得枚举同目录、提升其权威性或用于其他设计。迁移该路径需要先冻结新的 ToolContract version，不能原地改写 v1。
 
 不同 canonical owner 发生冲突，或 canonical truth 与当前实现不一致时，必须报告 exact 冲突或 design/runtime drift；不得把多个版本静默拼成第三种规则。历史调查得出的仍有效事实，必须经过正常 DA/UD 设计流程写回其唯一 canonical owner 后，才能成为默认上下文。
 
@@ -123,14 +123,9 @@ Active Workspace 由目录中的当前文件表示；DP/ADP 由 owner task stabl
 
 ## 9. 历史文件
 
-`docs/plans/features/` 与 `docs/plans/deliveries/` 下的既有文件是 pre-V2 historical migration inputs，不是 active route、template、owner authority 或默认 AI 上下文。除 canonical 文件的 exact scoped transitional link 外，它们只在逐文件迁移或明确历史调查时读取；任何新交付都使用 stable artifact root 中的 DP/ADP。后续 Delivery 逐文件清理时：
+完成或失效的 design、feature 与 delivery 文件从当前树删除，历史由 Git commit 和 merged PR 保留。不得为历史建立 archive、ledger 或新的默认检索面。
 
-- 已存在于 canonical truth、active Workspace 或 DP/ADP：删除重复文件；
-- 仅包含完成 checklist、命令或流水：删除；
-- 包含唯一稳定事实：提取最小事实到 architecture/contract/ADR/runbook 后删除；
-- 包含仍有效的未冻结设计：提取当前草稿到 active Workspace 后删除。
-
-每份文件完成分类和有效事实落点核验后都从当前文档树删除，历史由 Git commit 和 merged PR 保留。不得未经核验批量删除或整批搬运历史文本，也不得为清理建立 archive 或 ledger。
+删除前必须逐文件确认：稳定事实已在 architecture、contract、ADR 或 runbook；未冻结事项已进入一个 active Workspace 或 backlog；其余内容只属于执行证据。当前树唯一保留的 historical file 是 immutable ToolContract v1 精确绑定的 `docs/plans/features/delegated-task-action-grant.md`，其迁移是独立设计缺口。
 
 ## 10. 轻量验证
 
@@ -145,6 +140,6 @@ Active Workspace 由目录中的当前文件表示；DP/ADP 由 owner task stabl
 - cleanup 变更没有新增/修改 repository 内容；
 - `git diff --check` 通过。
 
-后续独立 Delivery 增加一个薄文档检查入口，只实现确定性规则：Markdown 相对链接有效、canonical/index 不依赖历史目录、`plans/index.md` 不暴露历史目录、active design 不包含已冻结且已回写的 Workspace、repository 文档不含本机 home 路径，以及 `git diff --check`。迁移完成前，既有 historical/design 违规只作为待清理清单报告，不能因此把历史提升为 current truth。该检查不引入 frontmatter/status 枚举、语义扫描、RAG、知识图谱或新的知识服务。
+`pnpm docs:check` 只实现确定性规则：Markdown 相对链接有效、canonical/index 不依赖历史目录、`plans/index.md` 不暴露历史目录、active design 不包含已冻结且已回写的 Workspace、repository 文档不含本机 home 路径，以及 `git diff --check`。检查只允许 immutable ToolContract v1 已声明的 exact historical dependency；不引入 frontmatter/status 枚举、语义扫描、RAG、知识图谱或新的知识服务。
 
 规范语义变化继续经过 DA/UD；纯 editorial 变更只运行与 changed paths 和风险匹配的 focused checks。

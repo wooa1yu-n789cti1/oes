@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { assertDockerIdentity, canRecoverMissingSharedTestContainer, isMissingDockerObject, runtimeLabels, sharedResourceName, validateSharedContainerAuthority } from '../docker-driver.mjs'
+import { assertDockerIdentity, canRecoverMissingSharedTestContainer, isMissingDockerObject, RUNTIME_DOCKER_IMAGES, runtimeLabels, sharedResourceName, validateSharedContainerAuthority } from '../docker-driver.mjs'
+
+test('MinIO Server and Client keep their fixed tags and digests while using reachable registry sources', () => {
+  assert.equal(RUNTIME_DOCKER_IMAGES.minio, 'quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e')
+  assert.equal(RUNTIME_DOCKER_IMAGES.minioClient, 'quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3')
+})
 
 /** Builds canonical shared TEST identity plus its sealed Stack authority for focused drift tests. */
 function sharedTestFixture(provider = 'postgres') {

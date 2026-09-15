@@ -50,7 +50,7 @@ conflictResolution: 当本文与更早联系方式、员工名片或账号登录
   - `tenant-org-service`
   - BusinessCard module / future `public-entry-service`
 - related designs:
-  - [employee-digital-business-card-design.md](./employee-digital-business-card-design.md)
+  - [public-entry-service.md](../../architecture/services/public-entry-service.md)
   - [identity-service.md](../../architecture/services/identity-service.md)
   - [auth-service.md](../../architecture/services/auth-service.md)
   - [hr-service.md](../../architecture/services/hr-service.md)
@@ -303,27 +303,27 @@ publicValueSummary {
 | 日期 | 决定 | 影响范围 | 回写目标 |
 | --- | --- | --- | --- |
 | 2026-06-08 | Contact Asset 第一阶段归 `identity-service`，不归 HR、BusinessCard 或 Auth。 | 服务 owner | `identity-service.md` |
-| 2026-06-08 | 第一阶段只 focus 员工资料与员工电子名片展示联系方式，不涉及登录绑定、OAuth token、消息读写或 webhook。 | 范围 | 本 workspace / future feature packet |
+| 2026-06-08 | 第一阶段只 focus 员工资料与员工电子名片展示联系方式，不涉及登录绑定、OAuth token、消息读写或 webhook。 | 范围 | 本 workspace / future Delivery |
 | 2026-06-08 | Contact Asset primary 关联为 `tenantId + accountId`；`userId` 是身份引用，`employeeId` 是当前分配对象或 HR lifecycle 协同引用。 | 数据边界 | `identity-service.md` |
 | 2026-06-08 | 登录默认使用个人 primary login method；公司 Contact Asset 不作为默认登录方式。 | Auth / Identity 边界 | `auth-service.md` / `identity-service.md` |
 | 2026-06-08 | Contact Asset 与 Login Identifier 分离；登录可用性、凭据、OTP、MFA 均归 `auth-service`。 | Auth / Identity 边界 | `auth-service.md` / `identity-service.md` |
 | 2026-06-08 | BusinessCard 只引用 Contact Asset，决定展示配置、排序、公开范围与 vCard，不拥有联系方式真相。 | BusinessCard / Identity 边界 | BusinessCard design / `identity-service.md` |
-| 2026-06-08 | 同一类社交联系入口默认只展示一个；公司受控账号优先，没有公司受控账号时才展示员工个人账号。 | 名片展示 | BusinessCard design / feature packet |
-| 2026-06-08 | 员工个人微信 / WhatsApp 可作为兜底展示，但第一阶段不建立单独 consent 模型；配置动作保留审计。 | 隐私 / 审计 | feature packet |
+| 2026-06-08 | 同一类社交联系入口默认只展示一个；公司受控账号优先，没有公司受控账号时才展示员工个人账号。 | 名片展示 | BusinessCard design / Delivery |
+| 2026-06-08 | 员工个人微信 / WhatsApp 可作为兜底展示，但第一阶段不建立单独 consent 模型；配置动作保留审计。 | 隐私 / 审计 | Delivery |
 | 2026-06-08 | 公司名下手机号注册的微信 / WhatsApp / 其他社交账号在 OES 内视为公司受控 Contact Asset。 | 资产分类 | `identity-service.md` |
 | 2026-06-08 | 公司受控社交账号在员工离职、调岗失去使用权或 account disabled 时，默认立即从原员工名片隐藏，并进入交接或停用状态。 | 生命周期 | `identity-service.md` / BusinessCard design |
 | 2026-06-08 | 企业微信、飞书、钉钉等第一阶段建模为 `EXTERNAL_COMMUNICATION_ACCOUNT`，只保存名片展示摘要或引用，不承接外部平台生命周期。 | 外部账号展示 | `identity-service.md` |
 | 2026-06-08 | 第一阶段不做 org / team / role 级公共联系资产，只做 `UserAccount` 级员工联系资产。 | 范围控制 | future design candidate |
 | 2026-06-08 | 未来通过 OES 绑定外部通信账号并读取 / 发送消息，不属于 Contact Asset 本体能力，应另行设计 External Communication Integration / Channel Binding。 | 后置能力 | `docs/plans/intake.md` 或独立 Design Workspace |
 | 2026-06-08 | 已将 Contact Asset 稳定 owner、类型、登录分离、BusinessCard 引用与公司受控社交账号边界回写到 `identity-service.md`，并将登录分离边界轻量回写到 `auth-service.md`。 | 真相源回写 | completed |
-| 2026-06-08 | 冻结 BusinessCard Phase 1 可消费最小边界：ContactAction 只保存 targetRef 与展示配置，public render 通过 `ResolveContactActionTargets` 获取 public-safe value summary；`SAVE_VCARD` 与 `OPEN_COMPANY_WEBSITE` 不属于个人 Contact Asset。 | BusinessCard contract handoff | BusinessCard contracts / feature packet |
+| 2026-06-08 | 冻结 BusinessCard Phase 1 可消费最小边界：ContactAction 只保存 targetRef 与展示配置，public render 通过 `ResolveContactActionTargets` 获取 public-safe value summary；`SAVE_VCARD` 与 `OPEN_COMPANY_WEBSITE` 不属于个人 Contact Asset。 | BusinessCard contract handoff | BusinessCard contracts / Delivery |
 
 ## 13. 开放问题
 
 | 日期 | 问题 | 为什么未冻结 | 下一步 |
 | --- | --- | --- | --- |
 | 2026-06-08 | Contact Asset 是否需要 `isPrimary`，还是由 BusinessCard action config 决定展示优先级？ | `identity-service` 已有主工作联系方式语义，但 BusinessCard 也有展示排序；需要避免双 owner。 | 回写 identity-service 前确认字段职责。 |
-| 2026-06-08 | `employeeId` 是否必填？ | 非员工账号、外部顾问账号或未来非 HR 工作主体可能也需要联系方式资产。 | 第一阶段倾向可选；实现前通过 feature packet 冻结。 |
+| 2026-06-08 | `employeeId` 是否必填？ | 非员工账号、外部顾问账号或未来非 HR 工作主体可能也需要联系方式资产。 | 第一阶段倾向可选；实现前先在本 active design 冻结，再进入 Delivery。 |
 | 2026-06-08 | Contact Asset 是否需要验证状态？ | 工作邮箱 / 手机可能需要验证，但验证容易与 Auth OTP / login method 混淆。 | 第一阶段暂不冻结；如要验证，应另行定义 verification owner。 |
 | 2026-06-08 | 外部通信账号消息读写能力是否进入候选池？ | 用户已明确当前 Contact Asset 不涉及该能力，但长期可能需要通过 OES 读发消息。 | 若近期推进，新增 candidates 或独立 workspace。 |
 
@@ -336,9 +336,9 @@ publicValueSummary {
 - 协同蓝图：
   - 若后续设计离职 / 调岗触发 Contact Asset 回收与 BusinessCard 隐藏，可新增或更新 collaboration 文档。
 - contracts：
-  - 本文只冻结 `ResolveContactActionTargets` 的最小语义；进入 feature packet / contract 阶段前再补 `identity-service` Contact Asset management / query contract 正文。
-- feature packet：
-  - Employee Digital Business Card feature packet 应引用本文，不重新定义 Contact Asset。
+  - 本文只冻结 `ResolveContactActionTargets` 的最小语义；进入 Delivery / contract 阶段前再补 `identity-service` Contact Asset management / query contract 正文。
+- Delivery：
+  - Employee Digital Business Card Delivery 应引用本文，不重新定义 Contact Asset；执行状态由 task-owned DP 承载。
 - architecture / ADR：
   - 当前不需要 ADR；若未来拆出独立 communication integration / channel service，再评估 ADR。
 
@@ -347,7 +347,7 @@ publicValueSummary {
 下次继续前先读：
 
 - [contact-asset-design.md](./contact-asset-design.md)
-- [employee-digital-business-card-design.md](./employee-digital-business-card-design.md)
+- [public-entry-service.md](../../architecture/services/public-entry-service.md)
 - [identity-service.md](../../architecture/services/identity-service.md)
 - [auth-service.md](../../architecture/services/auth-service.md)
 - [hr-service.md](../../architecture/services/hr-service.md)

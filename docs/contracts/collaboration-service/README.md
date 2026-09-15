@@ -6,8 +6,6 @@
 
 `collaboration-service` 的唯一稳定服务设计真相源是 [collaboration-service.md](../../architecture/services/collaboration-service.md)。本目录只描述黑盒接口、字段、错误与调用语义，不重新定义服务职责、核心对象或长期边界。
 
-Task P1 的 feature packet 是 [collaboration-task-p1.md](../../plans/features/collaboration-task-p1.md)。Annotation P1 的 feature packet 是 [collaboration-annotation-p1.md](../../plans/features/collaboration-annotation-p1.md)。本目录消费这些 packet 中已冻结的 P1 范围。
-
 这些文档面向：
 
 - `api-gateway`

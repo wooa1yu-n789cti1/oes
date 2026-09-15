@@ -68,7 +68,7 @@ conflictResolution: 当本文与更早的 quality、inspection、defect、grade�
 | 2026-04-19 | 客户/第三方验货的主锚点应是订单、出货批次、柜次等 shipment scope，而不是成品库中的普通 inventory batch。 | 外部验货模型 | 本 workspace；未来 quality-service 协同文档 |
 | 2026-04-19 | 若在外部验货或内部质检中发现严重问题，后续排查范围应表达为更泛化的 `ContainmentScope`，`inventory batch` 只是其中一种常见范围。 | 围堵与复检设计 | 本 workspace；未来 contracts / architecture |
 | 2026-04-19 | 内部质检应采用强流程模式，流程由产品、制造规格、工序与检验重点驱动；外部验货应采用灵活流程模式，允许按客户/第三方要求动态调整检查项与测量项。 | 检验流程模型 | 本 workspace；未来 `contracts/quality-service/**` |
-| 2026-04-19 | 第一阶段优先落地基础能力，不追求一次性覆盖完整质量平台；`CAPA`、`8D`、客户偏好沉淀、风险驱动检验、跨域追溯总览等作为后续增强能力。 | 范围管理 | `docs/plans/features/quality-service-foundation.md`（未来） |
+| 2026-04-19 | 第一阶段优先落地基础能力，不追求一次性覆盖完整质量平台；`CAPA`、`8D`、客户偏好沉淀、风险驱动检验、跨域追溯总览等作为后续增强能力。 | 范围管理 | future Quality foundation Delivery |
 | 2026-05-09 | 客观瑕疵事实、内部质量等级、客户接受性必须分开；内部等级不是 Item Attribute。 | 质量规则、MES/WMS/Sales 协同 | 本 workspace；未来 quality contracts |
 | 2026-05-09 | `QualityGradeDefinition / QualityGradeRule` 归 `quality-service / rule`；MES 记录检查执行结果和等级判定事实。 | 质量规则边界 | 本 workspace；未来 quality contracts |
 | 2026-05-09 | 内部质量等级与返修状态拆开：等级表达质量档位，返修状态表达是否需要/适合修补。 | 质量判定、WMS 库存分区 | 本 workspace；MES/WMS 设计 |
@@ -84,7 +84,7 @@ conflictResolution: 当本文与更早的 quality、inspection、defect、grade�
 | 2026-04-19 | 外部验货报告、内部质检报告、客户/第三方报告附件是否共用统一报告模型 | 已明确类型不同，但模型细节未冻结 | 下一轮补齐报告模型 |
 | 2026-04-19 | 责任归因是否仅保留“线索归因”，还是第一阶段即形成可供奖罚/绩效直接消费的稳定输入 | 涉及 ERP / 绩效协同深度，尚未冻结 | 后续与 ERP 协同设计一起收敛 |
 | 2026-04-19 | `ContainmentScope` 的默认维度有哪些 | 当前只明确库存批次不是唯一范围，仍需冻结最小范围集合 | 下一轮补齐围堵模型 |
-| 2026-04-19 | 客户质量偏好与外部验货流程的配置，第一阶段做到多灵活 | 已明确重要但可后置，需要避免第一阶段过重 | 在 feature packet 阶段再压 scope |
+| 2026-04-19 | 客户质量偏好与外部验货流程的配置，第一阶段做到多灵活 | 已明确重要但可后置，需要避免第一阶段过重 | 在进入 Delivery 前再压 scope |
 
 ## 6. 真相源回写计划
 
@@ -95,8 +95,8 @@ conflictResolution: 当本文与更早的 quality、inspection、defect、grade�
   - `docs/architecture/collaborations/quality-mes-crm-erp.md`（未来）
 - contracts：
   - `docs/contracts/quality-service/**`（未来）
-- feature packet：
-  - `docs/plans/features/quality-service-foundation.md`（未来）
+- 后续交付：
+  - Quality Service Foundation cohesive Delivery
 - architecture / ADR：
   - 如 `quality-service` 的服务化时机或上下文边界出现明显分歧，再升级到 architecture / ADR
 
@@ -107,7 +107,7 @@ conflictResolution: 当本文与更早的 quality、inspection、defect、grade�
 - 当前推荐下一步：
   - 收敛 `quality-service` 核心对象与聚合草图
   - 收敛 `WMS / MES / CRM` 到 `quality-service` 的最小协作契约
-  - 冻结第一阶段 feature scope，再决定是否进入 feature packet
+  - 冻结第一阶段 scope，再决定是否进入 Delivery
 
 ## 8. 当前设计摘要
 

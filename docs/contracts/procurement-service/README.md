@@ -246,7 +246,6 @@ phase 1 只冻结以下事实 owner 归 Procurement：
 
 - [procurement-service.md](../../architecture/services/procurement-service.md)
 - [procurement-srm-item-wms-finance.md](../../architecture/collaborations/procurement-srm-item-wms-finance.md)
-- [procurement-pr-po-foundation.md](../../plans/features/procurement-pr-po-foundation.md)
 - [srm-service.md](../../architecture/services/srm-service.md)
 - [item-master-service.md](../../architecture/services/item-master-service.md)
 - [wms-service.md](../../architecture/services/wms-service.md)

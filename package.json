@@ -43,6 +43,7 @@
     "src/common"
   ],
   "scripts": {
+    "docs:check": "node --test checks/document-governance-whitespace.static.check.mjs && node checks/document-governance.static.check.mjs",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "lint": "pnpm -r run lint",
     "prisma:generate:all": "node scripts/local/generate-prisma-clients.mjs",

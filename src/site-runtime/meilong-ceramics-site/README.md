@@ -264,7 +264,7 @@ Database safety rules:
 - The database or schema name must contain an explicit `acceptance`, `disposable`, or `test` marker recognized by the harness. Hostnames matching the implemented `prod`, `production`, or `prd` label pattern, including its supported numeric suffixes, are rejected; this is a targeted guard and not a claim that every possible production hostname can be recognized.
 - Use a migrated, disposable PostgreSQL database or isolated schema. The runner namespaces its rows, closes resources in reverse order, removes its owned rows and temporary Runtime SQLite directory, and does not print credential bundles, bearer values, passwords, or other secrets.
 
-On success, the runner emits machine-readable coverage together with `unifiedAcceptanceClosed`. Consumers must inspect those fields rather than treating process success alone as proof that the complete Unified acceptance gate is closed. Current execution status and evidence are tracked only in the [Site Page Locale Governance P1 feature packet](../../../docs/plans/features/site-page-locale-governance-p1.md).
+On success, the runner emits machine-readable coverage together with `unifiedAcceptanceClosed`. Consumers must inspect those fields rather than treating process success alone as proof that the complete Unified acceptance gate is closed. Current behavior is defined by the checked-out code and its tests; task-specific execution evidence remains outside the repository.
 
 ## Generated Files And Local Data
 
@@ -290,7 +290,7 @@ The root `clean` scripts are intentionally non-destructive. If cleanup is needed
 - External Site Template P1 is available as the reusable engineering skeleton.
 - Meilong Ceramics local Site Runtime + Nuxt Storefront exists as the first concrete site instance.
 - Seed Preview Mode can render Product detail, Blog / News lists and details, and Blog / News Content Category archives from local published data.
-- The acceptance command provides strict build, typecheck, harness, database-safety, cleanup, and machine-readable output gates; execution status is tracked in the feature packet.
+- The acceptance command provides strict build, typecheck, harness, database-safety, cleanup, and machine-readable output gates.
 - This runbook preserves the distinction between seed preview, the gated acceptance harness, and deployed OES live sync with a real credential.
 
 ## Deferred

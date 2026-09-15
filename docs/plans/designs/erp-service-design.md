@@ -62,14 +62,14 @@ designStatus: ACTIVE_DESIGN_WORKSPACE
 | 2026-04-18 | `erp-service` 不拥有中性主体真相；交易与法律主体主数据归 `party-service`，ERP 单据优先引用 `tenantPartyId` 并保存交易快照。 | ERP 与主数据边界 | `erp-service` 职责卡 + contracts |
 | 2026-04-18 | 客户角色语义归 `crm-service`；供应商角色语义归 future `srm-service`；ERP 只拥有正式交易关系中的引用、条件快照与单据真相。 | ERP / CRM / SRM 边界 | `erp-service` / `srm-service` 职责卡 |
 | 2026-04-18 | `erp-service` 不拥有完整总账、会计科目、凭证、结账与法定财务核算；这些应归 future `finance-service` 或外部财务系统。 | ERP / Finance 边界 | future `finance-service` design / service card |
-| 2026-04-21 | `sales` 中 `Quote` 应为独立业务对象，不与 `SalesOrder` 合并。 | sales 模块主模型 | future contracts / feature packet |
-| 2026-04-21 | 用户操作心智上始终像是在处理“同一份报价”；销售不应被迫手工维护多份平行报价。 | 产品体验 | feature packet / UI design |
-| 2026-04-21 | 报价必须支持历史版本；历史版本用于对外正式报价留痕、客户确认依据、转订单依据与旧版本找回。 | Quote 产品能力 | contracts / feature packet |
-| 2026-04-21 | 下载本身不应等同于新报价版本；下载/导出记录与报价版本是两类不同事实。 | Quote 行为语义 | contracts / feature packet |
-| 2026-04-21 | `Contract` 为可选对象，不是报价到订单的固定必经步骤；工程单通常需要，电商通常不需要，出口可按 `PO + PI` 或合同模式处理。 | sales 模块边界 | contracts / feature packet |
-| 2026-04-22 | 订单成立、允许生产/备货、允许发货是三个不同节点，不应混成单一“确认后自动一路推进”的流程。 | order progression 模型 | future contracts / feature packet |
-| 2026-04-22 | 不同客户存在不同交易条件，例如定金比例、尾款时点、账期、预存款/押金抵扣；这些条件应成为 ERP 核心需求对象。 | customer trading profile | future feature packet |
-| 2026-04-22 | 第一版中，只要报价或订单推进不符合相关配置条件，就进入审批；是否放行交给有权限的上级判断。 | approval policy v1 | contracts / feature packet |
+| 2026-04-21 | `sales` 中 `Quote` 应为独立业务对象，不与 `SalesOrder` 合并。 | sales 模块主模型 | future contracts / Delivery |
+| 2026-04-21 | 用户操作心智上始终像是在处理“同一份报价”；销售不应被迫手工维护多份平行报价。 | 产品体验 | Delivery / UI design |
+| 2026-04-21 | 报价必须支持历史版本；历史版本用于对外正式报价留痕、客户确认依据、转订单依据与旧版本找回。 | Quote 产品能力 | contracts / Delivery |
+| 2026-04-21 | 下载本身不应等同于新报价版本；下载/导出记录与报价版本是两类不同事实。 | Quote 行为语义 | contracts / Delivery |
+| 2026-04-21 | `Contract` 为可选对象，不是报价到订单的固定必经步骤；工程单通常需要，电商通常不需要，出口可按 `PO + PI` 或合同模式处理。 | sales 模块边界 | contracts / Delivery |
+| 2026-04-22 | 订单成立、允许生产/备货、允许发货是三个不同节点，不应混成单一“确认后自动一路推进”的流程。 | order progression 模型 | future contracts / Delivery |
+| 2026-04-22 | 不同客户存在不同交易条件，例如定金比例、尾款时点、账期、预存款/押金抵扣；这些条件应成为 ERP 核心需求对象。 | customer trading profile | future Delivery |
+| 2026-04-22 | 第一版中，只要报价或订单推进不符合相关配置条件，就进入审批；是否放行交给有权限的上级判断。 | approval policy v1 | contracts / Delivery |
 | 2026-04-22 | 第一版先收需求，不展开技术框架、实现方式或通用 policy engine 设计；先完整收齐产品需求再统一进入设计与落地。 | 当前线程协作方式 | 本 workspace |
 
 ## 5. 当前已收敛的需求要点
@@ -174,9 +174,9 @@ designStatus: ACTIVE_DESIGN_WORKSPACE
   - future `docs/architecture/collaborations/erp-mes-wms-finance.md`
 - contracts：
   - future `docs/contracts/erp-service/**`
-- feature packet：
-  - future `docs/plans/features/quote-and-order-core.md`
-  - future `docs/plans/features/customer-trading-profile.md`
+- 后续交付：
+  - Quote / Order Core cohesive Delivery
+  - Customer Trading Profile cohesive Delivery
 - architecture / ADR：
   - 如 `erp-service` 与 `finance-service` 的正式拆分方式出现分歧，再升级到 architecture / ADR
 

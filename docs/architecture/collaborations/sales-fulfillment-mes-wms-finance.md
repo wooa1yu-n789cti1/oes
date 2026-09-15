@@ -126,5 +126,5 @@
 - [sales-service.md](../services/sales-service.md)
 - [mes-service.md](../services/mes-service.md)
 - [wms-service.md](../services/wms-service.md)
-- [sales-quote-order-core.md](../../plans/features/sales-quote-order-core.md)
+- [sales-service contracts](../../contracts/sales-service/README.md)
 - [sales-finance-order-to-cash.md](./sales-finance-order-to-cash.md)

@@ -4,7 +4,7 @@
 
 `hr-service` 是 OES 的员工与任职关系真相服务，负责回答“这个自然人在当前租户内是否构成员工或工作人员、处于什么任职状态、被分配到哪些岗位或组织”。
 
-本文是 `hr-service` 的唯一稳定设计真相源。其他 architecture、collaboration、contract、feature packet、design workspace 或实现计划只能引用本文，不得重新定义 `Employee`、`Employment`、员工生命周期、正式 `人 -> org` 归属或 HR onboarding owner 边界。
+本文是 `hr-service` 的唯一稳定设计真相源。其他 architecture、collaboration、contract、active design、Delivery artifact 或实现计划只能引用本文，不得重新定义 `Employee`、`Employment`、员工生命周期、正式 `人 -> org` 归属或 HR onboarding owner 边界。
 
 ## 2. Owns
 

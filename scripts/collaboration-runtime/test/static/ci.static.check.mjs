@@ -223,7 +223,6 @@ const activeFramework = [
   readRepo('docs/runbooks/collaboration-runtime-validation.md'),
   readRepo('docs/plans/index.md'),
   readRepo('docs/plans/designs/README.md'),
-  readRepo('docs/plans/deliveries/README.md'),
   readBase('README.md'),
   readBase('profile/README.md'),
   ...readdirSync(new URL('src', base), { withFileTypes: true })
@@ -331,7 +330,7 @@ assert.match(packages, /CANDIDATE_CHANGED/)
 assert.match(packages, /schemaVersion: 3/)
 assert.match(packages, /loadTrustedDecisionConfirmation/)
 assert.match(packages, /reviewHistory/)
-assert.match(readRepo('docs/plans/deliveries/README.md'), /not an active V2 state source/)
+assert.equal(existsSync(new URL('docs/plans/deliveries', repo)), false)
 
 // Assignment and lifecycle distinguish task roles from the bounded-helper mechanism.
 const assignmentTypes = readBase('src/assignment-runtime.types.ts')
