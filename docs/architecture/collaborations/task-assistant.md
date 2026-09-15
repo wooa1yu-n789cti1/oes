@@ -117,7 +117,7 @@ version: 1.0.0
 | `collaboration.task.create-self.v1` | Task Command `CreateTask` self todo variant | `DELEGATION_ALLOWED` | registered, mutation disabled |
 | `collaboration.task.create-assigned.v1` | Task Command `CreateTask` assigned variant | `ACTION_GRANT_REQUIRED` | registered, mutation disabled |
 
-Risk class remains owned by Collaboration and is referenced from the Task contracts plus [delegated-task-action-grant.md](../../plans/features/delegated-task-action-grant.md); the AI registration cannot modify it. `UpdateTask`、`StartTask`、`CompleteTask`、`CancelTask`、`ReopenTask`、`ArchiveTask` 与 `UnarchiveTask` are absent and therefore unregistered; their Task Assistant P1 risk remains `AI_FORBIDDEN` in the owner contract.
+Risk class remains owned by Collaboration and is referenced from the Task contracts; the AI registration cannot modify it. `UpdateTask`、`StartTask`、`CompleteTask`、`CancelTask`、`ReopenTask`、`ArchiveTask` 与 `UnarchiveTask` are absent and therefore unregistered; their Task Assistant P1 risk remains `AI_FORBIDDEN` in the owner contract.
 
 The repository registration manifest is not runtime authorization truth. Before runtime opening, AI Platform must expose an owner runtime resolution contract for the active ToolContract identity/version and operation upper bound; Auth consumes that contract together with Identity-owned AgentPrincipal facts. Auth and Permission never authorize by reading the disabled registration JSON.
 

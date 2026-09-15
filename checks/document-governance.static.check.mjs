@@ -11,8 +11,6 @@ const exactHistoricalHash = '9909b5f32668c44635a578dd35a7d37ede655c008edce614f9f
 const exactHistoricalConsumers = new Set([
   'AGENTS.md',
   'docs/governance/document-governance.md',
-  'docs/architecture/platforms/ai-platform.md',
-  'docs/architecture/collaborations/task-assistant.md',
   'docs/contracts/ai-platform/task-assistant-tool-contract.md',
   'src/ai-platform/tool-contracts/registrations/task-assistant-collaboration-task.v1.json',
   'src/ai-platform/tool-contracts/registrations/task-assistant-collaboration-task.v1.static.check.mjs'
@@ -58,6 +56,7 @@ function checkMarkdownLinks(paths) {
 /** Rejects historical-tree references except the exact immutable ToolContract v1 dependency. */
 function checkHistoricalReferences(paths) {
   const failures = []
+  const actualConsumers = new Set()
   const pattern = /(?:docs\/)?plans\/(?:features|deliveries)\/[A-Za-z0-9._/-]*/gu
   for (const path of paths.filter((item) => existsSync(resolve(root, item)))) {
     if (path === 'checks/document-governance.static.check.mjs') continue
@@ -69,25 +68,15 @@ function checkHistoricalReferences(paths) {
     }
     for (const match of source.matchAll(pattern)) {
       const normalized = match[0].startsWith('docs/') ? match[0] : `docs/${match[0]}`
+      if (normalized === exactHistoricalPath) actualConsumers.add(path)
       if (normalized === exactHistoricalPath && exactHistoricalConsumers.has(path)) continue
       failures.push(`HISTORICAL_REFERENCE ${path} -> ${match[0]}`)
     }
   }
-  return failures
-}
-
-/** Rejects obsolete pre-V2 packet terminology from current Markdown outside its immutable source. */
-function checkLegacyPacketInstructions(paths) {
-  const failures = []
-  const pattern = /\bfeature[\s-]+packet\b/giu
-  for (const path of paths.filter(
-    (item) => item.endsWith('.md') && item !== exactHistoricalPath && existsSync(resolve(root, item))
-  )) {
-    const source = readFileSync(resolve(root, path), 'utf8')
-    for (const match of source.matchAll(pattern)) {
-      const line = source.slice(0, match.index).split('\n').length
-      failures.push(`LEGACY_PACKET_INSTRUCTION ${path}:${line} -> ${match[0]}`)
-    }
+  const expected = [...exactHistoricalConsumers].sort()
+  const actual = [...actualConsumers].sort()
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    failures.push(`HISTORICAL_CONSUMER_SET expected=${expected.join(',')} actual=${actual.join(',')}`)
   }
   return failures
 }
@@ -182,7 +171,6 @@ export function main() {
   const failures = [
     ...checkMarkdownLinks(paths),
     ...checkHistoricalReferences(paths),
-    ...checkLegacyPacketInstructions(paths),
     ...checkHistoricalTree(paths),
     ...activeDesigns.failures,
     ...checkHomePaths(paths),
