@@ -80,5 +80,5 @@
 
 - 本目录保留“调用方可依赖的 HTTP 契约”。
 - 稳定设计原则与跨域边界，应回到 `docs/architecture/`。
-- 阶段实施路径、执行步骤、线程分工，应回到 `docs/plans/`。
-- 尚未冻结的认证后续项，应记录到 `docs/plans/intake.md` 或对应 Feature Packet，而不是保留在 `contracts/`。
+- 未冻结事项应进入 `docs/plans/intake.md`、对应 active design 或 backlog；执行状态由 task-owned DP 承载。
+- 尚未冻结的认证后续项，应记录到 `docs/plans/intake.md`、对应 active design 或 backlog，而不是保留在 `contracts/`。

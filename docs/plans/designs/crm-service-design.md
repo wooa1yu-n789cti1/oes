@@ -41,4 +41,4 @@ writeBackTargets:
 
 ## Exit Condition
 
-每项决定冻结后先回写 [crm-service.md](../../architecture/services/crm-service.md)，再创建或更新对应 collaboration、contract 与 Feature Packet；本 Workspace 不保存实现状态或完成历史。
+每项决定冻结后先回写 [crm-service.md](../../architecture/services/crm-service.md)，再创建或更新对应 collaboration 与 contract，并通过一次 Delivery 决策卡进入实现；执行状态由 task-owned DP 承载，本 Workspace 不保存实现状态或完成历史。

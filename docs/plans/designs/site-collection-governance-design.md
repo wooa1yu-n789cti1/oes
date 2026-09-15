@@ -10,7 +10,6 @@ lastUpdatedAt: 2026-07-19 10:58:28 Asia/Shanghai
 lastUpdatedBy: Codex
 supersedes: none
 truthSource: pending write-back after collection governance closure
-doNotUseAsStableSource: false
 conflictResolution: 本文只记录当前 Collection 页面治理讨论；稳定 architecture / ADR / contracts 明确覆盖本文时，以稳定真相源为准。
 ```
 

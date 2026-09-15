@@ -105,7 +105,7 @@ OES 采用以下长期规则：
 
 - 会把 self-service 与 admin-management 的契约语义继续混在一起
 - 容易在别的调用链复用时再次误伤普通用户
-- 不利于审计、测试和 feature packet 对齐
+- 不利于审计、测试和 Delivery acceptance 对齐
 
 ## 影响
 

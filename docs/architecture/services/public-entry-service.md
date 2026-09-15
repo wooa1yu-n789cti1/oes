@@ -13,7 +13,7 @@ Phase 1 正式承载两个模块：
 
 两个模块同属 `public-entry-service`，但模型与 owner 边界必须分离。
 
-本文是 `public-entry-service` 的唯一稳定设计真相源。其他 architecture、collaboration、contract、feature packet、design workspace 或实现计划只能引用本文，不得重新定义本服务的长期职责、核心对象、模块边界或 owner 语义。
+本文是 `public-entry-service` 的唯一稳定设计真相源。其他 architecture、collaboration、contract、active design、Delivery artifact 或实现计划只能引用本文，不得重新定义本服务的长期职责、核心对象、模块边界或 owner 语义。
 
 ## 2. Owns
 

@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const exactHistoricalPath = 'docs/plans/features/delegated-task-action-grant.md'
@@ -76,6 +76,22 @@ function checkHistoricalReferences(paths) {
   return failures
 }
 
+/** Rejects obsolete pre-V2 packet terminology from current Markdown outside its immutable source. */
+function checkLegacyPacketInstructions(paths) {
+  const failures = []
+  const pattern = /\bfeature[\s-]+packet\b/giu
+  for (const path of paths.filter(
+    (item) => item.endsWith('.md') && item !== exactHistoricalPath && existsSync(resolve(root, item))
+  )) {
+    const source = readFileSync(resolve(root, path), 'utf8')
+    for (const match of source.matchAll(pattern)) {
+      const line = source.slice(0, match.index).split('\n').length
+      failures.push(`LEGACY_PACKET_INSTRUCTION ${path}:${line} -> ${match[0]}`)
+    }
+  }
+  return failures
+}
+
 /** Ensures the only current-tree historical file is the byte-exact immutable v1 dependency. */
 function checkHistoricalTree(paths) {
   const failures = []
@@ -105,6 +121,9 @@ function checkActiveDesignStates(paths) {
   )
   for (const path of designs) {
     const source = readFileSync(resolve(root, path), 'utf8')
+    if (/^\s*doNotUseAsStableSource\s*:/imu.test(source)) {
+      failures.push(`CONFLICTING_DESIGN_AUTHORITY_FIELD ${path} -> doNotUseAsStableSource`)
+    }
     for (const match of source.matchAll(/^\s*(?:status|designStatus)\s*:\s*(.+)$/gimu)) {
       const value = match[1].trim().toUpperCase()
       if (/^(?:ACTIVE_DESIGN_WORKSPACE|ACTIVE_LONG_TERM_DESIGN)$/u.test(value)) continue
@@ -126,30 +145,60 @@ function checkHomePaths(paths) {
   return failures
 }
 
-/** Runs Git's whitespace/error check against the current index and worktree. */
-function checkGitDiff() {
-  const result = spawnSync('git', ['diff', '--check'], { cwd: root, encoding: 'utf8' })
-  return result.status === 0 ? [] : [`GIT_DIFF_CHECK ${result.stdout}${result.stderr}`.trim()]
+/** Runs one Git whitespace/error check and preserves the failing surface in its diagnostic. */
+function runGitDiffCheck(repositoryRoot, code, args) {
+  const result = spawnSync('git', args, { cwd: repositoryRoot, encoding: 'utf8' })
+  return result.status === 0 ? [] : [`${code} ${result.stdout}${result.stderr}`.trim()]
 }
 
-const paths = trackedPaths()
-const activeDesigns = checkActiveDesignStates(paths)
-const failures = [
-  ...checkMarkdownLinks(paths),
-  ...checkHistoricalReferences(paths),
-  ...checkHistoricalTree(paths),
-  ...activeDesigns.failures,
-  ...checkHomePaths(paths),
-  ...checkGitDiff()
-]
-
-if (failures.length) {
-  for (const failure of failures) console.error(failure)
-  console.error(`DOCS_CHECK=FAIL failures=${failures.length}`)
-  process.exitCode = 1
-} else {
-  const markdown = paths.filter((path) => path.endsWith('.md') && existsSync(resolve(root, path))).length
-  console.log(
-    `DOCS_CHECK=PASS markdown=${markdown} activeDesigns=${activeDesigns.count} historicalExceptions=1`
+/** Checks the committed candidate, staged index, and unstaged worktree without assuming a parent commit. */
+export function checkGitDiff(repositoryRoot = root) {
+  const failures = []
+  const head = spawnSync('git', ['rev-parse', '--verify', 'HEAD'], {
+    cwd: repositoryRoot,
+    encoding: 'utf8'
+  })
+  if (head.status === 0) {
+    const parent = spawnSync('git', ['rev-parse', '--verify', 'HEAD^'], {
+      cwd: repositoryRoot,
+      encoding: 'utf8'
+    })
+    const committedArgs = parent.status === 0
+      ? ['diff', '--check', parent.stdout.trim(), 'HEAD']
+      : ['diff-tree', '--root', '--check', '--no-commit-id', '-r', 'HEAD']
+    failures.push(...runGitDiffCheck(repositoryRoot, 'GIT_COMMITTED_DIFF_CHECK', committedArgs))
+  }
+  failures.push(
+    ...runGitDiffCheck(repositoryRoot, 'GIT_CACHED_DIFF_CHECK', ['diff', '--cached', '--check']),
+    ...runGitDiffCheck(repositoryRoot, 'GIT_WORKTREE_DIFF_CHECK', ['diff', '--check'])
   )
+  return failures
+}
+
+/** Executes the repository document-governance checks. */
+export function main() {
+  const paths = trackedPaths()
+  const activeDesigns = checkActiveDesignStates(paths)
+  const failures = [
+    ...checkMarkdownLinks(paths),
+    ...checkHistoricalReferences(paths),
+    ...checkLegacyPacketInstructions(paths),
+    ...checkHistoricalTree(paths),
+    ...activeDesigns.failures,
+    ...checkHomePaths(paths),
+    ...checkGitDiff()
+  ]
+
+  if (failures.length) {
+    for (const failure of failures) console.error(failure)
+    console.error(`DOCS_CHECK=FAIL failures=${failures.length}`)
+    return 1
+  }
+  const markdown = paths.filter((path) => path.endsWith('.md') && existsSync(resolve(root, path))).length
+  console.log(`DOCS_CHECK=PASS markdown=${markdown} activeDesigns=${activeDesigns.count} historicalExceptions=1`)
+  return 0
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
+  process.exitCode = main()
 }

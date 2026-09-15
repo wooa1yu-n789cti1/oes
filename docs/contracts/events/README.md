@@ -45,7 +45,7 @@ Event Catalog 不用于：
 - [platform-transport.md](./platform-transport.md)：公共事件的 outbox / broker / inbox 黑盒传输契约，不定义业务 payload。
 - `<service-name>.md`：默认承载单个 owner service 的事件契约，例如 [collaboration-service.md](./collaboration-service.md)。
 
-每个 owner service 只能维护自己拥有的事件契约。其他服务、feature packet、design workspace 或 collaboration 文档可以引用这些契约，但不得重新定义同一事件的语义、payload 或版本规则。
+每个 owner service 只能维护自己拥有的事件契约。其他服务、Delivery artifact、active design 或 collaboration 文档可以引用这些契约，但不得重新定义同一事件的语义、payload 或版本规则。
 
 当 owner 已在自己的唯一服务 contract 中冻结事件语义，且跨 capability path ownership 不允许 Event Catalog 复制 payload 时，本目录可以建立只含 catalog identity、transport mapping 与 owner truth link 的 registration 文档。例如 [auth-service.md](./auth-service.md) 只登记安全事件接入，并直接引用 Auth-owned ExecutionToken contract；该 registration 不是第二份业务语义真相。
 

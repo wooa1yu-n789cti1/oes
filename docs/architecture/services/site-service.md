@@ -997,4 +997,4 @@ P1 预览规则：
 
 ## 12. Truth Source Rule
 
-本文是 `site-service` 的唯一稳定服务职责真相源。其他 architecture、collaboration、contract、feature packet 或 design workspace 只能引用本文，不得重新定义 `site-service` 的服务职责、核心对象或 owner 边界。
+本文是 `site-service` 的唯一稳定服务职责真相源。其他 architecture、collaboration、contract、active design 或 Delivery artifact 只能引用本文，不得重新定义 `site-service` 的服务职责、核心对象或 owner 边界。

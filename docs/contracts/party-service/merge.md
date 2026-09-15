@@ -87,6 +87,6 @@ merge 是高风险管理动作；完整审计链路、审批链与治理链当�
 - 第一阶段只冻结 `MergeParties` 的黑盒语义，不冻结完整 merge 审批流或 unmerge 流程。
 - 普通业务服务不得把 merge 当作日常写接口调用。
 - merge 结果会影响后续主体解析和绑定，但不能替代业务单据自己的历史快照。
-- 若未来需要 `UnmergeParties`、merge preview、merge approval 或批量治理，应单独新增 contract / feature packet。
+- 若未来需要 `UnmergeParties`、merge preview、merge approval 或批量治理，应先进入 active design 并新增 contract，再由独立 Delivery 实现。
 - redirect、history traceability、downstream effects 与引用修复链统一 deferred。
 - HR minimum 第一阶段不得消费 `party.merged` 或 `tenant_party.deactivated` 事件来修复 `Employee` / binding；HR 对象语义以 [hr-service.md](../../architecture/services/hr-service.md) 为准，相关修复链应在独立 party-HR governance feature 中冻结后再实现。

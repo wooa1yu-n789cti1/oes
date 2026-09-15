@@ -10,7 +10,6 @@ lastUpdatedAt: 2026-06-18 15:04:19 CST
 lastUpdatedBy: Codex warehouse/site work-context thread
 supersedes: 本线程中关于 OES 仓库、车间、工厂、作业上下文与权限隔离管理的讨论记录
 truthSource: 等待 permission policy / resource authorization 专题线程冻结后回写
-doNotUseAsStableSource: false
 conflictResolution: 本文只记录讨论态进度与恢复入口；若稳定 architecture / ADR / contracts 或 policy 专题线程冻结结论覆盖本文，以稳定真相源为准。
 ```
 
@@ -109,9 +108,9 @@ conflictResolution: 本文只记录讨论态进度与恢复入口；若稳定 ar
 - contracts：
   - WMS/MES 资源查询与作业接口需要在 resource facts / query scope 明确后再冻结。
   - `permission-service` 是否开放 resource authorization gRPC / HTTP，等待 policy 专题线程。
-- feature packet：
-  - policy 专题线程应先收口 policy template instance / resource authorization 迁移清理。
-  - 本线程后续可拆出 `mes-wms-site-scope-rollout` 或 PDA work-context feature packet。
+- Delivery：
+  - policy 专题应先在 active design 收口 policy template instance / resource authorization 迁移边界。
+  - 本 workspace 后续可按已冻结边界进入 `mes-wms-site-scope-rollout` 或 PDA work-context Delivery；执行状态由 task-owned DP 承载。
 - architecture / ADR：
   - 如果改变旧 `Policy` 或 `CheckPermissionWithContext` 的长期定位，需由 policy 专题线程判断是否新增 ADR。
 
@@ -139,4 +138,4 @@ conflictResolution: 本文只记录讨论态进度与恢复入口；若稳定 ar
    - MES Site / Area / WorkCenter / WorkUnit 权限范围。
    - PDA / Web / BFF 作业上下文消费方式。
    - 普通工人、主管、质检、巡检、跨仓跨车间角色差异。
-3. 决定是否进入稳定 collaboration 文档或 feature packet。
+3. 决定是否回写稳定 collaboration 文档并进入一次确认的 Delivery。

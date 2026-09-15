@@ -84,7 +84,7 @@ conflictResolution: 当本文与更早的 quality、inspection、defect、grade�
 | 2026-04-19 | 外部验货报告、内部质检报告、客户/第三方报告附件是否共用统一报告模型 | 已明确类型不同，但模型细节未冻结 | 下一轮补齐报告模型 |
 | 2026-04-19 | 责任归因是否仅保留“线索归因”，还是第一阶段即形成可供奖罚/绩效直接消费的稳定输入 | 涉及 ERP / 绩效协同深度，尚未冻结 | 后续与 ERP 协同设计一起收敛 |
 | 2026-04-19 | `ContainmentScope` 的默认维度有哪些 | 当前只明确库存批次不是唯一范围，仍需冻结最小范围集合 | 下一轮补齐围堵模型 |
-| 2026-04-19 | 客户质量偏好与外部验货流程的配置，第一阶段做到多灵活 | 已明确重要但可后置，需要避免第一阶段过重 | 在 feature packet 阶段再压 scope |
+| 2026-04-19 | 客户质量偏好与外部验货流程的配置，第一阶段做到多灵活 | 已明确重要但可后置，需要避免第一阶段过重 | 在进入 Delivery 前再压 scope |
 
 ## 6. 真相源回写计划
 
@@ -107,7 +107,7 @@ conflictResolution: 当本文与更早的 quality、inspection、defect、grade�
 - 当前推荐下一步：
   - 收敛 `quality-service` 核心对象与聚合草图
   - 收敛 `WMS / MES / CRM` 到 `quality-service` 的最小协作契约
-  - 冻结第一阶段 feature scope，再决定是否进入 feature packet
+  - 冻结第一阶段 scope，再决定是否进入 Delivery
 
 ## 8. 当前设计摘要
 

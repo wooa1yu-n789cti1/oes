@@ -4,7 +4,7 @@
 
 `browser-activity-service` 是 OES 的浏览器访问审计事实服务，负责回答“在租户内哪些已被管理员授权的账号，通过已登录 browser-extension terminal 访问了哪些 URL、持续多久、前台可见多久、活跃浏览多久、空闲多久”。
 
-本文是 `browser-activity-service` 的唯一稳定设计真相源。其他 architecture、contract、feature packet、plan 或实现文档只能引用本文，不得重新定义本服务的核心对象、边界、命名或长期职责。
+本文是 `browser-activity-service` 的唯一稳定设计真相源。其他 architecture、contract、active design、Delivery artifact 或实现文档只能引用本文，不得重新定义本服务的核心对象、边界、命名或长期职责。
 
 ## 2. Owns
 

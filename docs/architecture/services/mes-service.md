@@ -8,7 +8,7 @@ designStatus: STABLE_ARCHITECTURE_BASELINE
 lastUpdatedAt: 2026-05-16 00:00:00 CST
 lastUpdatedBy: Codex MES mold minimum-loop design thread
 truthSource: 本文是 MES 当前已确认新设计的唯一架构化入口。
-conflictResolution: 当本文与旧 MES design workspace、旧 feature packet、旧 contract 或旧 runtime 命名冲突时，以本文为准；后续 ADR 或更新后的 contract 可在明确标注后覆盖对应章节。
+conflictResolution: 当本文与旧 MES design workspace、旧 delivery plan、旧 contract 或旧 runtime 命名冲突时，以本文为准；后续 ADR 或更新后的 contract 可在明确标注后覆盖对应章节。
 ```
 
 本文合并 MES 服务职责、资源模型、模具管理第一阶段基线、追溯边界、协同边界、旧设计替换表与未冻结 backlog。
@@ -311,7 +311,7 @@ barcode
 ## 10. 后续执行顺序
 
 1. 以本文作为唯一 MES 新设计基线。
-2. 删除或归档旧 MES design workspace、旧资源模型文档、旧清理控制台和历史 feature packet。
+2. 删除或归档旧 MES design workspace、旧资源模型文档、旧清理控制台和历史 delivery plan。
 3. 基于本文重写 `docs/contracts/mes-service/**` 与 `src/common/src/contracts/mes_service/**`。
 4. 基于新 contract 重构 `mes-service` runtime、API Gateway BFF 和 tenant-web MES 页面。
 5. 每次新增或扩展 MES 设计，优先更新本文；如果主题尚未冻结，只登记到本文 backlog，不新建长期并列设计入口。

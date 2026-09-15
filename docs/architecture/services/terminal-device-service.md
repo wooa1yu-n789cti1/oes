@@ -6,7 +6,7 @@
 
 `terminal-device-service` 是 OES 的企业受管现场交互终端设备治理服务，负责回答“某台受管终端设备属于哪个租户、是否已入网、当前是否允许用于 PDA / KIOSK 等现场终端场景、最近运行状态如何、适用什么版本策略”。
 
-本文是 `terminal-device-service` 的唯一稳定设计真相源。其他 architecture、collaboration、contract、plan、feature packet 或实现文档只能引用本文，不得重新定义本服务的长期职责、核心对象、边界或 owner 语义。
+本文是 `terminal-device-service` 的唯一稳定设计真相源。其他 architecture、collaboration、contract、active design、Delivery artifact 或实现文档只能引用本文，不得重新定义本服务的长期职责、核心对象、边界或 owner 语义。
 
 Phase 2 只正式支持 `PDA`，但服务命名和领域模型预留未来 `KIOSK`、`INDUSTRIAL_TABLET` 与共享移动终端。
 

@@ -64,15 +64,15 @@ designStatus: ACTIVE_DESIGN_WORKSPACE
 
 | 日期 | 决定 | 影响范围 | 回写目标 |
 | --- | --- | --- | --- |
-| 2026-04-23 | 当前设计主题不是“建站器”，而是 OES 的对外客户触点与平台接入框架。 | 产品定位 | future architecture / feature packet |
+| 2026-04-23 | 当前设计主题不是“建站器”，而是 OES 的对外客户触点与平台接入框架。 | 产品定位 | future architecture / Delivery |
 | 2026-04-23 | 需要区分“品牌 / 公司档案”和“客户触点”；前者表达谁在对外经营，后者表达客户从哪里接触。 | 核心对象边界 | future architecture |
 | 2026-04-23 | 需要区分“自有客户触点”和“第三方平台账号”；二者的底层集成方式不同。 | 集成边界 | future architecture / integration design |
 | 2026-04-23 | 自有客户触点的默认主路是 `API first`，第三方平台账号的默认主路是 `connector first`。 | 接入模式 | future contracts / connector design |
 | 2026-04-23 | 自有客户触点可采用混合模式：实时能力走 API，异步同步可走 webhook / push / callback。 | 自有触点集成方式 | future contracts |
 | 2026-04-23 | 第三方平台账号通常需要专用 connector；webhook / polling / platform API 由 connector 统一适配，再映射成 OES 内部对象。 | 平台接入模式 | future integration design |
 | 2026-04-23 | OES 应作为产品唯一真相源，但外部触点消费的应是“发布目录 / 对外版本”，不是内部产品主数据原样暴露。 | 产品与发布边界 | future product / content / channel contracts |
-| 2026-04-23 | 触点与 OES 的协同程度应分级，而不是所有触点都一口气支持全功能。 | 功能规划方式 | future feature packet |
-| 2026-04-23 | 在线客服、表单询盘、报价请求、售后申请等“互动入口”具有高价值，应作为第一阶段重点能力。 | 第一阶段价值判断 | future feature packet |
+| 2026-04-23 | 触点与 OES 的协同程度应分级，而不是所有触点都一口气支持全功能。 | 功能规划方式 | future Delivery |
+| 2026-04-23 | 在线客服、表单询盘、报价请求、售后申请等“互动入口”具有高价值，应作为第一阶段重点能力。 | 第一阶段价值判断 | future Delivery |
 
 ## 5. 当前对象草稿
 
@@ -340,7 +340,7 @@ designStatus: ACTIVE_DESIGN_WORKSPACE
 
 | 日期 | 问题 | 为什么未冻结 | 下一步 |
 | --- | --- | --- | --- |
-| 2026-04-23 | 这套能力最终是否沉淀为独立服务，还是先以 feature / module 方式落在现有边界中？ | 服务归属还不清晰，直接定服务容易过早。 | 先继续设计工作台，再决定是否形成 feature packet 或 service proposal。 |
+| 2026-04-23 | 这套能力最终是否沉淀为独立服务，还是先以 feature / module 方式落在现有边界中？ | 服务归属还不清晰，直接定服务容易过早。 | 先继续 active design，再决定是否形成 canonical service proposal 或 Delivery。 |
 | 2026-04-23 | “品牌 / 公司档案”是否需要上升为正式 brand/company domain object？ | 品牌未来可能很复杂，目前不宜仓促冻结完整 Brand Service。 | 先保持轻量对象草稿。 |
 | 2026-04-23 | 互动入口应先落到 CRM、通知、还是 future conversation / service hub？ | 涉及多个 future domain，当前不宜仓促定 owner。 | 后续按 inquiry / chat / after-sales 分开讨论。 |
 | 2026-04-23 | 发布目录是否由产品域 owner 直接承接，还是需要单独的 channel / catalog publishing capability？ | 涉及内容、价格、库存摘要与多触点发布协同。 | 后续讨论发布层设计。 |
@@ -648,8 +648,8 @@ Connector 只发布业务 owner 已计算的渠道结果，不拥有库存余额
 - contracts:
   - future self-owned touchpoint capability APIs
   - future platform connector contracts
-- feature packet:
-  - future first-phase customer touchpoint foundation packet
+- Delivery:
+  - future first-phase customer touchpoint Delivery
 - architecture / ADR:
   - only after naming, owner, and minimum phase are frozen
 
@@ -663,4 +663,4 @@ Connector 只发布业务 owner 已计算的渠道结果，不拥有库存余额
   - 先冻结 Marketplace callback 的 installation、tenant machine authority、durable receipt 与业务 owner handoff。
   - 继续压实“自有触点 vs 第三方平台账号”的第一阶段对象和字段。
   - 讨论互动入口（询盘 / 在线客服 / 报价 / 售后）如何映射到 future CRM / service / notification。
-  - 判断该主题是先形成 feature packet，还是继续作为长周期 design workspace 保留。
+  - 判断该主题是进入一次确认的 Delivery，还是继续作为长周期 active design 保留。

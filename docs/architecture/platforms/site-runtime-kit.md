@@ -717,4 +717,4 @@ P1 明确拒绝：
 + webhook + pull fallback 同步基线
 ```
 
-后续若要进入实现，应先创建 feature packet，并在 OES 侧高层架构冻结后再拆分具体任务。
+后续若要进入实现，应先确认现行 Delivery 决策卡；若涉及 OES 侧高层架构变更则先冻结设计，再由 DO 在 task-owned DP 中维护交付状态。

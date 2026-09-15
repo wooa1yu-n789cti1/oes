@@ -6,7 +6,7 @@
 
 涉及 HR `Employee / Employment`、员工生命周期或正式 `人 -> org` 归属时，以 [hr-service.md](./hr-service.md) 为准；本文只定义 identity 自身的账号、身份与 binding 边界。
 
-本文是 `identity-service` 的唯一稳定设计真相源。其他 architecture、collaboration、contract、plan、feature packet 或服务内实现文档只能引用本文，不得重新定义 `identity-service` 的长期职责、核心对象、边界或 owner 语义。
+本文是 `identity-service` 的唯一稳定设计真相源。其他 architecture、collaboration、contract、active design、Delivery artifact 或服务内实现文档只能引用本文，不得重新定义 `identity-service` 的长期职责、核心对象、边界或 owner 语义。
 
 ## 2. Owns
 
@@ -282,7 +282,7 @@ Contract 文档只描述黑盒调用语义、字段、错误与当前接口形�
 - 不拥有 `Employee / Employment -> OrgUnit` 的正式归属真相。
 - 不承载业务域客户、供应商、员工等最终业务角色语义。
 - 不提供真实姓名模糊搜索；如后续需要按姓名发现自然人，应先设计 `party-service` 协同能力。
-- 不通过 service-local docs、feature packet 或 contract 文档长期承载第二份 identity-service 服务设计。
+- 不通过 service-local docs、Delivery artifact 或 contract 文档长期承载第二份 identity-service 服务设计。
 
 ## 15. Current Stage And Cleanup Rules
 

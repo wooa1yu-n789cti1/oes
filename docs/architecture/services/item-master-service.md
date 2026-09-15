@@ -493,7 +493,7 @@ Item Master server 只验证最终目标 ET、HUMAN subject、exact actor worklo
 - 可选 BOM 行。
 - `Item` 级 category override / secondary category。
 - `PIM / PLM`、营销展示、图纸工程与完整产品生命周期管理。
-- trusted gRPC runtime 实现与部署联调；其契约已由本文、Contract V2 与统一 trusted-gRPC feature packet 冻结。
+- trusted gRPC runtime 实现与部署联调；其契约已由本文、Contract V2 与统一 trusted-gRPC 冻结设计共同确定。
 
 ## 19. Contract And Migration Notes
 
