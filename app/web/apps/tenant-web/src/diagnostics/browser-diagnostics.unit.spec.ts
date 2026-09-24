@@ -123,6 +123,29 @@ describe('tenant-web browser diagnostics', () => {
     expect(warn).toHaveBeenCalledOnce();
   });
 
+  it('redacts structured and free-form credential values before posting diagnostics', () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    cleanup = installBrowserDiagnostics();
+
+    console.error(
+      'login failed {"password":"hunter2"} secret: hunter3 token: abc.def.ghi apiKey=private client_secret="private-client" postgres://user:db-pass@localhost/db',
+    );
+
+    const serialized = JSON.stringify(postedEvents(fetchMock));
+    expect(serialized).toContain('[REDACTED]');
+    for (const secret of [
+      'hunter2',
+      'hunter3',
+      'abc.def.ghi',
+      'private-client',
+      'db-pass',
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
+  });
+
   it('captures Vue failures and suppresses short-window duplicates', () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', fetchMock);

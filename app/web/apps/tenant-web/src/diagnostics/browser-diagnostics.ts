@@ -39,15 +39,41 @@ const MAX_MESSAGE_LENGTH = 1000;
 const MAX_STACK_LENGTH = 4000;
 const MAX_PATH_LENGTH = 1000;
 const DEDUPE_WINDOW_MS = 1500;
+const SENSITIVE_KEY =
+  String.raw`(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token|password|passwd|secret|client[_-]?secret|api[_-]?key)`;
 const SENSITIVE_VALUE_PATTERNS: Array<[RegExp, string]> = [
-  [/(authorization|cookie|set-cookie)\s*[:=]\s*[^,;\r\n]+/giu, '$1=[REDACTED]'],
-  [/bearer\s+[a-z0-9._~+/=-]+/giu, 'Bearer [REDACTED]'],
   [
-    /([?&](?:access_token|refresh_token|token|code|password|secret)=)[^&#\s]*/giu,
+    new RegExp(
+      String.raw`((?:authorization|cookie|set-cookie)\s*[:=]\s*)(["'])(?:\\.|(?!\2).)*\2`,
+      'giu',
+    ),
+    '$1$2[REDACTED]$2',
+  ],
+  [
+    /(authorization|cookie|set-cookie)\s*[:=]\s*[^,;\r\n}\]]+/giu,
+    '$1=[REDACTED]',
+  ],
+  [/\b(bearer|basic)\s+[a-z0-9._~+/=-]+/giu, '$1 [REDACTED]'],
+  [
+    new RegExp(
+      String.raw`(["']?${SENSITIVE_KEY}["']?\s*[:=]\s*)(["'])(?:\\.|(?!\2).)*\2`,
+      'giu',
+    ),
+    '$1$2[REDACTED]$2',
+  ],
+  [
+    new RegExp(
+      String.raw`(\b${SENSITIVE_KEY}\b\s*[:=]\s*)(?!["'])[^\s,;&#}\]\r\n]+`,
+      'giu',
+    ),
     '$1[REDACTED]',
   ],
+  [
+    new RegExp(String.raw`([?&](?:${SENSITIVE_KEY}|code)=)[^&#\s]*`, 'giu'),
+    '$1[REDACTED]',
+  ],
+  [/\b([a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:)[^\s@]+(@)/giu, '$1[REDACTED]$2'],
 ];
-
 type ActiveDiagnostics = {
   cleanup: () => void;
   config: BrowserDiagnosticsConfig;

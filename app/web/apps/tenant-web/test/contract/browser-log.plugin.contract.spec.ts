@@ -85,7 +85,8 @@ describe('tenant-web browser log Vite receiver', () => {
         cookie: 'must-not-be-written',
         headers: { authorization: 'must-not-be-written' },
         level: 'warn',
-        message: 'request failed; Authorization: Bearer private-value',
+        message:
+          'request failed; Authorization: Bearer private-value; {"password":"json-private"} secret: colon-private token: abc.def.ghi apiKey=key-private client_secret="client-private" postgres://user:db-private@localhost/db',
         pagePath: '/admin/devices?token=private#section',
         requestId: 'request-1',
         requestPath: '/api/v1/devices?password=private#fragment',
@@ -102,7 +103,8 @@ describe('tenant-web browser log Vite receiver', () => {
     const event = JSON.parse(line.trim());
     expect(event).toEqual({
       level: 'error',
-      message: 'request failed; Authorization=[REDACTED]',
+      message:
+        'request failed; Authorization=[REDACTED]; {"password":"[REDACTED]"} secret: [REDACTED] token: [REDACTED] apiKey=[REDACTED] client_secret="[REDACTED]" postgres://user:[REDACTED]@localhost/db',
       pagePath: '/admin/devices',
       receivedAt: '2026-09-13T09:00:00.000Z',
       requestId: 'request-1',
@@ -117,6 +119,16 @@ describe('tenant-web browser log Vite receiver', () => {
     expect(line).not.toContain('must-not-be-written');
     expect(line).not.toContain('private-value');
     expect(line).not.toContain('private#');
+    for (const secret of [
+      'json-private',
+      'colon-private',
+      'abc.def.ghi',
+      'key-private',
+      'client-private',
+      'db-private',
+    ]) {
+      expect(line).not.toContain(secret);
+    }
   });
 
   it('requires same-origin JSON with the per-start token and deduplicates identical events', async () => {
