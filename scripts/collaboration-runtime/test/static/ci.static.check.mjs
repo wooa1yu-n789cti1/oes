@@ -249,7 +249,10 @@ const legacyRolePattern = new RegExp(
 assert.doesNotMatch(activeFramework, legacyRolePattern)
 
 // Routing and verification expose the V2 topology explicitly.
-assert.match(routing, /route: 'DISCUSSION' \| 'DA_UD' \| 'DO' \| 'CO'/)
+assert.match(routing, /route: 'DISCUSSION' \| 'INTAKE_CAPTURE' \| 'DA_UD' \| 'DO' \| 'CO'/)
+assert.match(routing, /AUTOMATED_INTAKE_PR/)
+assert.match(routing, /scope\[0\] === INTAKE_PATH/)
+assert.match(routing, /INTAKE_CAPTURE_BOUNDARY_INVALID/)
 assert.match(routing, /ONE_AGGREGATE_CO_PR/)
 assert.match(routing, /INDEPENDENT_DO_PRS/)
 assert.match(routing, /confirmationMatches/)

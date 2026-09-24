@@ -4,14 +4,14 @@ The executable contract follows `docs/governance/codex-execution-model.md`. Acti
 
 ## 1. Route before mutation
 
-Read-only discussion creates no delivery resources. For stateful work, create a routing input that records design impact, cohesive workstreams, write sets, dependencies, real parallelism, cross-delivery integration, and any Human-confirmed independent-PR exception.
+Read-only discussion creates no delivery resources. An explicit Human request to record or update one current capability candidate uses `intakeCapture: true`, exact scope `docs/plans/intake.md`, `LOW` risk, `DOCS` level, and no workstreams or confirmation; the runtime returns `INTAKE_CAPTURE` with no owner or gate. All other stateful work creates a routing input that records design impact, cohesive workstreams, write sets, dependencies, real parallelism, cross-delivery integration, and any Human-confirmed independent-PR exception.
 
 ```bash
 node --experimental-strip-types scripts/collaboration-runtime/src/cli.ts \
   route --input ROUTING_INPUT.json
 ```
 
-Expected routes are `DISCUSSION`, `DA_UD`, `DO`, or `CO`. Size alone does not justify CO. The route emits at most one decision-confirmation gate and one of no PR, one DO PR, one aggregate CO PR, or an explicitly confirmed independently releasable DO-PR exception. Scope and acceptance are carried into the material-decision fingerprint; every workstream must be contained by those confirmed bounds. After the native controller writes the Human confirmation receipt, rerun with `--profile-report EFFECTIVE_PROFILE.json --confirmation CONFIRMATION_REFERENCE.json`; the runtime reopens the receipt instead of accepting a Boolean.
+Expected routes are `DISCUSSION`, `INTAKE_CAPTURE`, `DA_UD`, `DO`, or `CO`. `INTAKE_CAPTURE` permits one automated Intake PR when repository protection requires it but creates no delivery owner, card, DP, RV, or additional Human gate. Size alone does not justify CO. Proposal/Delivery routes emit at most one decision-confirmation gate and one of no PR, one DO PR, one aggregate CO PR, or an explicitly confirmed independently releasable DO-PR exception. Scope and acceptance are carried into the material-decision fingerprint; every workstream must be contained by those confirmed bounds. After the native controller writes the Human confirmation receipt, rerun with `--profile-report EFFECTIVE_PROFILE.json --confirmation CONFIRMATION_REFERENCE.json`; the runtime reopens the receipt instead of accepting a Boolean.
 
 ## 2. Owner profile and remote actions
 

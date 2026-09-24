@@ -43,6 +43,54 @@ test('read-only discussion creates no role or Git topology', () => {
   assert.deepEqual(result.activeRoles, [])
 })
 
+test('explicit intake capture uses the docs-only fast path without a DO or confirmation', () => {
+  const result = validateRoutingDecision(
+    decideRouting({
+      ...base,
+      objective: 'Record one current capability candidate',
+      scope: ['docs/plans/intake.md'],
+      acceptance: ['upsert one candidate without freezing design'],
+      risk: 'LOW',
+      approvedCiLevel: 'DOCS',
+      intakeCapture: true,
+      workstreams: []
+    })
+  )
+  assert.equal(result.route, 'INTAKE_CAPTURE')
+  assert.equal(result.nextGate, 'NONE')
+  assert.equal(result.prTopology, 'AUTOMATED_INTAKE_PR')
+  assert.deepEqual(result.activeRoles, [])
+  assert.equal(result.deliveryOwnerCount, 0)
+})
+
+test('intake capture fails closed outside its exact docs-only boundary', () => {
+  assert.throws(
+    () =>
+      decideRouting({
+        ...base,
+        scope: ['docs/plans/intake.md', 'docs/architecture/services/mes-service.md'],
+        risk: 'LOW',
+        approvedCiLevel: 'DOCS',
+        intakeCapture: true,
+        workstreams: []
+      }),
+    /INTAKE_CAPTURE_BOUNDARY_INVALID/
+  )
+  assert.throws(
+    () =>
+      decideRouting({
+        ...base,
+        scope: ['docs/plans/intake.md'],
+        risk: 'LOW',
+        approvedCiLevel: 'DOCS',
+        intakeCapture: true,
+        stableDesignChange: true,
+        workstreams: []
+      }),
+    /INTAKE_CAPTURE_BOUNDARY_INVALID/
+  )
+})
+
 test('one cohesive delivery routes to one DO regardless of size', () => {
   const result = decideRouting({
     ...base,
@@ -149,7 +197,8 @@ test('a trusted confirmation cannot cross owner or PR topology boundaries', () =
     })
   ).confirmation
   assert.throws(
-    () => decideRouting({ ...request, confirmation: independentPr, requestedPrTopology: 'DEFAULT' }),
+    () =>
+      decideRouting({ ...request, confirmation: independentPr, requestedPrTopology: 'DEFAULT' }),
     /ROUTING_CONFIRMATION_MISMATCH/
   )
 })
