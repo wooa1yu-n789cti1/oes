@@ -10,7 +10,7 @@ import {
   BROWSER_LOG_ENDPOINT,
   createBrowserLogPlugin,
   DEFAULT_BROWSER_LOG_PATH,
-} from './browser-log.plugin';
+} from '../../vite/browser-log.plugin';
 
 const temporaryDirectories: string[] = [];
 
