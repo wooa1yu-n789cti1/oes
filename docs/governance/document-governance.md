@@ -107,6 +107,7 @@ Host-local DO 在 stable artifact root 保存同一 DP schema 的 scope/protecte
 ## 7. Intake 与 Backlog
 
 - `plans/intake.md` 是当前能力候选入口；它只保存尚未进入设计或交付的需求。
+- Human 明确要求“记录/更新灵感或能力候选”时，当前 task 直接使用 Intake Capture：只对 `plans/intake.md` 做一次去重 upsert，不创建 DA/UD/DO/CO/RV、Proposal/Delivery card、DP/ADP 或 FULL。最小记录包括候选名称、潜在价值或待解决问题，以及值得继续讨论的触发条件；不得写入已冻结结论、实现承诺、优先级事实或 task 状态。focused docs check 与受保护发布可自动完成；第二个 changed path、canonical/design 内容或更高风险立即退出该路径。
 - `plans/backlog.md` 只保存仍有效且明确延期的事项。
 - 进入稳定设计时路由到 DA；已设计且 cohesive 的实现路由到一个 DO；只有多个 independently ownable workstreams 且存在真实并行或 cross-delivery integration 时才路由到 CO。
 - 完成、取消或失效的条目直接删除；不保存 promoted/cancelled/completed 历史。

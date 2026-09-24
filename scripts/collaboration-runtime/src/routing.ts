@@ -30,6 +30,7 @@ export interface RoutingDecisionInput {
   approvedCiLevel: 'DOCS' | 'SCOPED' | 'FULL'
   stopPoint: string
   stateful: boolean
+  intakeCapture?: boolean
   executionMode: 'REPOSITORY' | 'HOST_LOCAL'
   repositoryModification: boolean
   stableDesignChange: boolean
@@ -43,17 +44,23 @@ export interface RoutingDecisionInput {
 export interface RoutingDecision {
   schemaVersion: 3
   kind: 'OES_V3_ROUTING_DECISION'
-  route: 'DISCUSSION' | 'DA_UD' | 'DO' | 'CO'
+  route: 'DISCUSSION' | 'INTAKE_CAPTURE' | 'DA_UD' | 'DO' | 'CO'
   executionMode: 'NONE' | 'REPOSITORY' | 'HOST_LOCAL'
   activeRoles: ActiveTaskRole[]
   deliveryOwnerCount: number
-  prTopology: 'NONE' | 'ONE_DO_PR' | 'ONE_AGGREGATE_CO_PR' | 'INDEPENDENT_DO_PRS'
+  prTopology:
+    | 'NONE'
+    | 'AUTOMATED_INTAKE_PR'
+    | 'ONE_DO_PR'
+    | 'ONE_AGGREGATE_CO_PR'
+    | 'INDEPENDENT_DO_PRS'
   nextGate: 'NONE' | 'DECISION_CONFIRMATION'
   reason: string
   decisionFingerprint: string
 }
 
 const KEY = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+const INTAKE_PATH = 'docs/plans/intake.md'
 
 /** Selects the smallest V2 owner topology from scope, design impact, coupling, and explicit PR choice. */
 export function decideRouting(input: RoutingDecisionInput): RoutingDecision {
@@ -76,6 +83,39 @@ export function decideRouting(input: RoutingDecisionInput): RoutingDecision {
   for (const stream of input.workstreams)
     for (const dependency of stream.dependencies)
       if (!keys.has(dependency)) fail('ROUTING_DEPENDENCY_UNKNOWN', `${stream.key}:${dependency}`)
+
+  if (input.intakeCapture) {
+    const exactIntakeScope = input.scope.length === 1 && input.scope[0] === INTAKE_PATH
+    if (
+      !input.stateful ||
+      input.executionMode !== 'REPOSITORY' ||
+      !input.repositoryModification ||
+      input.stableDesignChange ||
+      input.risk !== 'LOW' ||
+      input.approvedCiLevel !== 'DOCS' ||
+      !exactIntakeScope ||
+      input.workstreams.length !== 0 ||
+      input.integrationContract.length !== 0 ||
+      input.realParallelism ||
+      input.crossDeliveryIntegration ||
+      input.requestedPrTopology !== 'DEFAULT' ||
+      input.confirmation !== null
+    )
+      fail(
+        'INTAKE_CAPTURE_BOUNDARY_INVALID',
+        'requires one low-risk docs-only upsert to docs/plans/intake.md with no design change, owner topology, confirmation, or integration'
+      )
+    return seal({
+      route: 'INTAKE_CAPTURE',
+      executionMode: 'REPOSITORY',
+      activeRoles: [],
+      deliveryOwnerCount: 0,
+      prTopology: 'AUTOMATED_INTAKE_PR',
+      nextGate: 'NONE',
+      reason:
+        'an explicit Human request may upsert one current capability candidate without creating a DO, decision card, DP, RV, or separate task'
+    })
+  }
 
   if (input.stateful && !input.stableDesignChange) {
     for (const stream of input.workstreams) {
@@ -241,6 +281,15 @@ export function validateRoutingDecision(value: RoutingDecision): RoutingDecision
     fail('ROUTING_ROLE_SET_INVALID', value.activeRoles.join(','))
   if (value.activeRoles.some((role) => !ACTIVE_TASK_ROLES.includes(role)))
     fail('ROUTING_ROLE_INVALID', value.activeRoles.join(','))
+  if (
+    value.route === 'INTAKE_CAPTURE' &&
+    (value.executionMode !== 'REPOSITORY' ||
+      value.activeRoles.length !== 0 ||
+      value.deliveryOwnerCount !== 0 ||
+      value.prTopology !== 'AUTOMATED_INTAKE_PR' ||
+      value.nextGate !== 'NONE')
+  )
+    fail('INTAKE_CAPTURE_DECISION_INVALID', value.decisionFingerprint)
   const expected = objectFingerprint(
     value as unknown as Record<string, unknown>,
     'decisionFingerprint'

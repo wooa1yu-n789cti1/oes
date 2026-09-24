@@ -38,6 +38,8 @@ The assistance path ends with diagnosis or a locally verified bounded edit in th
 
 Classify Debugger/Fixer assistance before this routing. Pure diagnosis and one already-designed bounded local correction are Human assistance rather than Proposal/Delivery work. If the work is not assistance or crosses that boundary, preserve the diagnosis and Human-owned local diff, then classify stable-design impact, cohesive acceptance, write-set coupling, dependencies, risk, and genuine parallelism and show one exact recommendation:
 
+An explicit Human instruction to record or update one current capability candidate is a bounded **Intake Capture**, not a Proposal or Delivery. The current task upserts only `docs/plans/intake.md`; an existing matching candidate is updated instead of duplicated. The instruction itself authorizes that administrative write. Intake Capture creates no role, task, decision card, DP, RV, or FULL run. It runs focused document validation and may use one temporary branch/PR plus the repository's protected publication path internally, without another Human gate; those temporary resources are removed after readback. Any canonical conclusion, design content, implementation scope, additional changed path, non-low risk, ambiguous destructive action, or conflicting candidate meaning exits the fast path and is classified normally.
+
 - Design-changing: DA → confirmed Proposal → UD → confirmed delivery activation.
 - One cohesive/atomic/already-designed change: one DO, regardless of size or helper count.
 - Several independently ownable deliveries needing coordination: one CO plus two or more DOs.
@@ -104,7 +106,7 @@ Read-only examples:
 - “Show the current delivery/RV/CI status.”
 - “Pause this owner and preserve its resources.”
 
-Only a new Human decision produces one generated and schema-validated concise card:
+An explicit “record this capability idea in Intake” instruction uses the bounded Intake Capture path above and produces no card. Only a new Proposal or Delivery decision produces one generated and schema-validated concise card:
 
 ```text
 Decision: <proposal | delivery>

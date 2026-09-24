@@ -4,7 +4,7 @@ This directory implements the repository-owned DA/UD/DO/CO/RV routing, delivery,
 
 ## Core modules
 
-- `src/routing.ts` and `src/confirmation.ts`: choose the smallest owner topology and reopen one controller-owned Human confirmation receipt for a persistent Proposal or Delivery decision.
+- `src/routing.ts` and `src/confirmation.ts`: recognize exact docs-only Intake Capture without an owner/card, otherwise choose the smallest owner topology and reopen one controller-owned Human confirmation receipt for a persistent Proposal or Delivery decision.
 - `src/ud-binding.ts`: holds the single replaceable current-UD identity without a registry or history ledger.
 - `src/replan.ts` and `src/assignment-runtime.ts`: keep normal issues with DO, return only boundary changes to DA, and enforce direct assignments and WIP ceilings.
 - `src/review-session.ts`: binds one visible RV subagent across candidate generations.
