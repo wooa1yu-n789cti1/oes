@@ -1,8 +1,9 @@
-import { Controller, UseFilters, UseGuards } from '@nestjs/common'
+import { Controller, UseFilters, UseGuards, UseInterceptors } from '@nestjs/common'
 import {
   AuthorizeBusinessRpc,
   AuthorizeInternalCall,
-  getAuthenticatedGrpcRequestContext
+  getAuthenticatedGrpcRequestContext,
+  GrpcRequestContextInterceptor
 } from '@oes/common/authorization'
 import { HrFoundationTrustedExecutionGuard } from '../../modules/hr-trusted-execution.module'
 import { GrpcMethod } from '@nestjs/microservices'
@@ -48,6 +49,7 @@ interface ResolveActiveEmployeeByCodeResponse {
 /** HrQueryGrpcController exposes read-only HR Employee and Employment contracts over gRPC. */
 @UseFilters(GrpcExceptionFilter)
 @UseGuards(HrFoundationTrustedExecutionGuard)
+@UseInterceptors(GrpcRequestContextInterceptor)
 @Controller()
 @HrQueryServiceControllerMethods()
 export class HrQueryGrpcController implements HrQueryServiceController {

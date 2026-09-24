@@ -34,6 +34,22 @@
     },
     {
       "workload": "api-gateway",
+      "audience": "urn:oes:service:mes-service",
+      "code": "mes.production_spec.read",
+      "source": "docs/contracts/mes-service/README.md#exact-32-rpc-matrix",
+      "selectorEntry": "api-gateway",
+      "selectorVersion": "2"
+    },
+    {
+      "workload": "api-gateway",
+      "audience": "urn:oes:service:party-service",
+      "code": "party.internal.get_tenant_party_by_id",
+      "source": "docs/architecture/services/party-service.md#10-trusted-grpc-inbound-boundary",
+      "selectorEntry": "api-gateway",
+      "selectorVersion": "2"
+    },
+    {
+      "workload": "api-gateway",
       "audience": "urn:oes:service:site-service",
       "code": "site.management.read",
       "source": "docs/architecture/services/site-service.md#222-frozen-admin-rpc-authorization-map",
@@ -77,6 +93,14 @@
       "audience": "urn:oes:service:identity-service",
       "code": "identity.internal.public_business_card_identity.resolve",
       "source": "docs/architecture/collaborations/public-business-card-owner-facts.md#exact-owner-resolvers",
+      "selectorEntry": "public-entry-service",
+      "selectorVersion": "1"
+    },
+    {
+      "workload": "public-entry-service",
+      "audience": "urn:oes:service:permission-service",
+      "code": "permission.internal.permission.check",
+      "source": "docs/architecture/services/permission-service.md#16-trusted-grpc-66-rpc-contractfrozen",
       "selectorEntry": "public-entry-service",
       "selectorVersion": "1"
     },

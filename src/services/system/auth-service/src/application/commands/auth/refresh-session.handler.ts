@@ -4,10 +4,11 @@ import { ConfigService } from '@nestjs/config'
 import { CommonJwtService, ITokenConfig, TokenConfigName } from '@oes/common/auth'
 import { PERMISSION_SERVICE } from '@oes/common/constants'
 import { REPO } from '../../../common/constants'
-import { ExceptionFactory } from '@oes/common/exceptions'
+import { ExceptionFactory, OESExceptionBase } from '@oes/common/exceptions'
 import {
   AUTH_REFRESH_TOKEN_INVALID,
   AUTH_REFRESH_TOKEN_REPLAY_DETECTED,
+  AUTH_TENANT_NOT_ACTIVE,
   AUTH_TERMINAL_ACCESS_DENIED
 } from '../../../common/constants/exception-enums'
 import { IPermissionServicePort } from '../../ports'
@@ -212,7 +213,9 @@ export class RefreshSessionHandler
         scopeLevel: session.getScopeLevel()
       })
     } catch (error) {
-      await this.sessionRepository.delete(session.getId())
+      if (error instanceof OESExceptionBase && error.getCode() === AUTH_TENANT_NOT_ACTIVE.code) {
+        await this.sessionRepository.delete(session.getId())
+      }
       throw error
     }
   }

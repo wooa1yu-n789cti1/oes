@@ -2,6 +2,8 @@ import { ConfigService } from '@nestjs/config'
 import { EventEmitter2 } from '@nestjs/event-emitter'
 import { CommonJwtService } from '@oes/common/auth'
 import { LoginMethodEnum, SessionStatus } from '@oes/common/constants'
+import { ExceptionFactory, INTERNAL_SERVICE_UNAVAILABLE } from '@oes/common/exceptions'
+import { AUTH_TENANT_NOT_ACTIVE } from '../../../common/constants/exception-enums'
 import { Session } from '../../../domain/aggregates/usersession.aggregate'
 import { AuthAuditService } from '../../services/auth-audit.service'
 import { PasswordSetupRequirementService } from '../../services/password-setup-requirement.service'
@@ -141,7 +143,9 @@ describe('RefreshSessionHandler', () => {
       delete: jest.fn().mockResolvedValue(undefined)
     }
     const tenantSessionAccessService = {
-      assertSessionCanContinue: jest.fn().mockRejectedValue(new Error('tenant inactive'))
+      assertSessionCanContinue: jest
+        .fn()
+        .mockRejectedValue(ExceptionFactory.domain(AUTH_TENANT_NOT_ACTIVE))
     }
     const handler = new RefreshSessionHandler(
       jwtService,
@@ -162,7 +166,7 @@ describe('RefreshSessionHandler', () => {
     )
 
     await expect(handler.execute(new RefreshSessionCommand(existingRefreshToken))).rejects.toThrow(
-      'tenant inactive'
+      AUTH_TENANT_NOT_ACTIVE.message
     )
 
     expect(tenantSessionAccessService.assertSessionCanContinue).toHaveBeenCalledWith({
@@ -171,6 +175,57 @@ describe('RefreshSessionHandler', () => {
       scopeLevel: 'TENANT'
     })
     expect(sessionRepository.delete).toHaveBeenCalledWith('session-tenant')
+    expect(sessionRepository.save).not.toHaveBeenCalled()
+    expect((jwtService as any).signAccessToken).not.toHaveBeenCalled()
+  })
+
+  it('preserves the session when tenant lifecycle lookup fails unexpectedly', async () => {
+    const existingRefreshToken = 'refresh-token-tenant-unavailable'
+    const session = createSessionFixture({
+      id: 'session-tenant-unavailable',
+      userId: 'user-1',
+      accountId: 'account-1',
+      tenantId: 'tenant-1',
+      refreshToken: existingRefreshToken
+    })
+    const lifecycleError = ExceptionFactory.infrastructure(INTERNAL_SERVICE_UNAVAILABLE)
+    const jwtService = {
+      verifyAsync: jest.fn().mockResolvedValue({
+        sid: 'session-tenant-unavailable',
+        tokenType: 'refresh'
+      }),
+      signAccessToken: jest.fn(),
+      signRefreshToken: jest.fn()
+    } as unknown as CommonJwtService
+    const sessionRepository = {
+      findById: jest.fn().mockResolvedValue(session),
+      findByRefreshToken: jest.fn().mockResolvedValue(session),
+      save: jest.fn(),
+      delete: jest.fn()
+    }
+    const handler = new RefreshSessionHandler(
+      jwtService,
+      { get: jest.fn().mockReturnValue({}) } as unknown as ConfigService,
+      {
+        getAccountAuthorizationSummary: jest.fn(),
+        resolveAccountTerminalAccess: jest.fn()
+      } as any,
+      {
+        userRequiresPasswordSetup: jest.fn()
+      } as unknown as PasswordSetupRequirementService,
+      sessionRepository as any,
+      new AuthAuditService({ emit: jest.fn() } as unknown as EventEmitter2),
+      { markTrustedDeviceSeen: jest.fn() } as unknown as TrustedDeviceService,
+      {
+        assertSessionCanContinue: jest.fn().mockRejectedValue(lifecycleError)
+      } as any
+    )
+
+    await expect(handler.execute(new RefreshSessionCommand(existingRefreshToken))).rejects.toBe(
+      lifecycleError
+    )
+
+    expect(sessionRepository.delete).not.toHaveBeenCalled()
     expect(sessionRepository.save).not.toHaveBeenCalled()
     expect((jwtService as any).signAccessToken).not.toHaveBeenCalled()
   })

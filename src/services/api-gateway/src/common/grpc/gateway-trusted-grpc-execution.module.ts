@@ -39,6 +39,7 @@ const PUBLIC_ENTRY_AUDIENCE = 'urn:oes:service:public-entry-service'
 const MES_AUDIENCE = 'urn:oes:service:mes-service'
 const COLLABORATION_AUDIENCE = 'urn:oes:service:collaboration-service'
 const ITEM_MASTER_AUDIENCE = 'urn:oes:service:item-master-service'
+const PARTY_AUDIENCE = 'urn:oes:service:party-service'
 
 /** Composes the sole Gateway target-token producer with the same request-private source-credential accessor. */
 @Global()
@@ -93,6 +94,7 @@ const ITEM_MASTER_AUDIENCE = 'urn:oes:service:item-master-service'
             MES_AUDIENCE,
             COLLABORATION_AUDIENCE,
             ITEM_MASTER_AUDIENCE,
+            PARTY_AUDIENCE,
             SRM_TARGET_AUDIENCE,
             PROCUREMENT_TARGET_AUDIENCE,
             WMS_TARGET_AUDIENCE,

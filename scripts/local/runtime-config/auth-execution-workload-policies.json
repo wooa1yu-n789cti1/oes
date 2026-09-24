@@ -2,12 +2,15 @@
   {
     "spiffeId": "spiffe://local.oes.internal/ns/oes/sa/api-gateway",
     "audiences": [
+      "urn:oes:service:asset-service",
       "urn:oes:service:auth-service",
       "urn:oes:service:browser-activity-service",
       "urn:oes:service:crm-service",
       "urn:oes:service:hr-service",
       "urn:oes:service:identity-service",
       "urn:oes:service:item-master-service",
+      "urn:oes:service:mes-service",
+      "urn:oes:service:party-service",
       "urn:oes:service:permission-service",
       "urn:oes:service:public-entry-service",
       "urn:oes:service:site-service",

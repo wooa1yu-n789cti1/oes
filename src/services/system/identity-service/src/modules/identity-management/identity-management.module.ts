@@ -11,7 +11,6 @@ import {
   EmployeeBindingCommandHandlers,
   ServiceAccountCommandHandlers
 } from '../../application/commands'
-import { GetAccountDeletionImpactHandler } from '../../application/queries/account/get-account-deletion-impact.handler'
 import {
   ACCOUNT_DELETION_BLOCKER_CHECKERS,
   AccountDeletionBlockerService
@@ -88,7 +87,6 @@ import { IdentityAuditModule } from '../identity-audit/identity-audit.module'
       provide: ACCOUNT_DELETION_BLOCKER_CHECKERS,
       useValue: []
     },
-    GetAccountDeletionImpactHandler,
     ...AccountCommandHandlers,
     ...EmployeeBindingCommandHandlers,
     ...ContactCommandHandlers,

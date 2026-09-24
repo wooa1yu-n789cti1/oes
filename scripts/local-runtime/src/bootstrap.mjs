@@ -4,7 +4,7 @@ import path from 'node:path'
 import { canonicalJson, fingerprint, sha256 } from './canonical.mjs'
 import { resolveCredentialReference, resolveMigratorCredential } from './credentials.mjs'
 import { reopenManifest, resolveEndpoint, resolveResources } from './manifest.mjs'
-import { runChecked } from './process.mjs'
+import { runChecked, runCheckedVisible } from './process.mjs'
 import { finalizePostgresRuntimePrivileges, logicalResourceIdentity, queryPostgresDatabase } from './docker-driver.mjs'
 
 const SYSTEM_ADMIN_SEED_TARGETS = Object.freeze({
@@ -14,6 +14,11 @@ const SYSTEM_ADMIN_SEED_TARGETS = Object.freeze({
 })
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1'])
+
+/** Announces one safe startup stage before its child process begins streaming output. */
+function announceStage(stage, owner) {
+  process.stdout.write(`[local-runtime] stage=${stage}${owner ? ` owner=${owner}` : ''}\n`)
+}
 
 /** Returns a minimal inherited process environment with runtime bindings stripped. */
 export function cleanProcessEnvironment(source = process.env) {
@@ -219,15 +224,18 @@ function prepareBaselineResolution(service, allocation, environment, root) {
   if (action === 'PRESENT') return { owner: service.owner, stage: 'BASELINE_PRESENT', action, exitStatus: 0 }
   if (action === 'APPLY_EMPTY_BASELINE') {
     const baselineFile = path.join(service.migrations, plan.baselineMigration, 'migration.sql')
-    runChecked('pnpm', ['exec', 'prisma', 'db', 'execute', '--file', baselineFile, '--schema', service.schema], { cwd: root, env: environment, timeout: 300000 })
+    announceStage('BASELINE_APPLY', service.owner)
+    runCheckedVisible('pnpm', ['exec', 'prisma', 'db', 'execute', '--file', baselineFile, '--schema', service.schema], { cwd: root, env: environment, timeout: 300000 })
   } else {
-    runChecked('pnpm', ['exec', 'prisma', 'migrate', 'diff', '--exit-code', '--from-url', environment.DATABASE_URL, '--to-schema-datamodel', service.schema], { cwd: root, env: environment, timeout: 300000 })
+    announceStage('BASELINE_COMPARE', service.owner)
+    runCheckedVisible('pnpm', ['exec', 'prisma', 'migrate', 'diff', '--exit-code', '--from-url', environment.DATABASE_URL, '--to-schema-datamodel', service.schema], { cwd: root, env: environment, timeout: 300000 })
   }
   const applied = new Set(appliedMigrations)
   const targets = [...plan.supersededMigrations.map((entry) => entry.name), plan.baselineMigration]
   for (const migration of targets) {
     if (applied.has(migration)) continue
-    runChecked('pnpm', ['exec', 'prisma', 'migrate', 'resolve', '--applied', migration, '--schema', service.schema], { cwd: root, env: environment, timeout: 300000 })
+    announceStage('BASELINE_RESOLVE', service.owner)
+    runCheckedVisible('pnpm', ['exec', 'prisma', 'migrate', 'resolve', '--applied', migration, '--schema', service.schema], { cwd: root, env: environment, timeout: 300000 })
   }
   return { owner: service.owner, stage: 'BASELINE_RESOLVED', action, targets, exitStatus: 0 }
 }
@@ -237,14 +245,16 @@ export function prepareDevelopmentArtifacts(manifestPath, { root }) {
   const manifest = reopenManifest(manifestPath)
   const results = []
   for (const [command, args] of [['pnpm', ['proto:gen']], ['pnpm', ['common:build']]]) {
-    const result = runChecked(command, args, { cwd: root, env: cleanProcessEnvironment(), timeout: 600000 })
+    announceStage(args[0] === 'proto:gen' ? 'PROTO_GENERATE' : 'COMMON_BUILD')
+    const result = runCheckedVisible(command, args, { cwd: root, env: cleanProcessEnvironment(), timeout: 600000 })
     results.push({ stage: 'DEVELOPMENT_BUILD', command: [command, ...args], exitStatus: result.status, output: result.stdout })
   }
   for (const service of discoverMigrationOwners(root, manifest.owners)) {
     const packageJson = JSON.parse(fs.readFileSync(service.packageFile, 'utf8'))
     if (!packageJson.scripts?.['prisma:generate']) continue
     const command = ['pnpm', '--filter', service.owner, 'prisma:generate']
-    const result = runChecked(command[0], command.slice(1), { cwd: root, env: cleanProcessEnvironment(), timeout: 600000 })
+    announceStage('PRISMA_CLIENT_GENERATE', service.owner)
+    const result = runCheckedVisible(command[0], command.slice(1), { cwd: root, env: cleanProcessEnvironment(), timeout: 600000 })
     results.push({ owner: service.owner, stage: 'PRISMA_CLIENT_GENERATE', command, exitStatus: result.status, output: result.stdout })
   }
   return results
@@ -263,7 +273,8 @@ export function applyCommittedMigrations(manifestPath, { root }) {
     if (!allocation) throw new Error(`MIGRATION_DATABASE_ALLOCATION_MISSING owner=${service.owner}`)
     const baseline = prepareBaselineResolution(service, allocation, environment, root)
     if (baseline) results.push(baseline)
-    const result = runChecked('pnpm', ['exec', 'prisma', 'migrate', 'deploy', '--schema', service.schema], { cwd: root, env: environment, timeout: 300000 })
+    announceStage('MIGRATION_DEPLOY', service.owner)
+    const result = runCheckedVisible('pnpm', ['exec', 'prisma', 'migrate', 'deploy', '--schema', service.schema], { cwd: root, env: environment, timeout: 300000 })
     finalizePostgresRuntimePrivileges(allocation, manifest)
     results.push({ owner: service.owner, schema: path.relative(root, service.schema), command: ['pnpm', 'exec', 'prisma', 'migrate', 'deploy', '--schema', path.relative(root, service.schema)], exitStatus: result.status, output: result.stdout })
   }
@@ -284,7 +295,8 @@ export function applyFoundationSeeds(manifestPath, { root }) {
     const declared = declarations[owner]
     if (!declared) continue
     const credentials = resolveCredentialReference(postgres.credentialReference, owner)
-    const result = runChecked(declared[0], declared[1], { cwd: root, env: { ...cleanProcessEnvironment(), NODE_ENV: manifest.profile === 'DEV' ? 'development' : 'test', DATABASE_URL: credentials.DATABASE_URL, OES_TASK_KEY: manifest.taskKey, OES_RUN_ID: manifest.runId }, timeout: 300000 })
+    announceStage('FOUNDATION_SEED', owner)
+    const result = runCheckedVisible(declared[0], declared[1], { cwd: root, env: { ...cleanProcessEnvironment(), NODE_ENV: manifest.profile === 'DEV' ? 'development' : 'test', DATABASE_URL: credentials.DATABASE_URL, OES_TASK_KEY: manifest.taskKey, OES_RUN_ID: manifest.runId }, timeout: 300000 })
     results.push({ owner, stage: 'FOUNDATION_SEED', command: declared, exitStatus: result.status, output: result.stdout })
   }
   return results
@@ -307,7 +319,8 @@ export function reconcileMachineWorkloadSelectors(manifestPath, { root }) {
     '--output', output
   ]
   fs.mkdirSync(path.dirname(output), { recursive: true, mode: 0o700 })
-  const result = runChecked(command[0], command.slice(1), { cwd: root, env: { ...cleanProcessEnvironment(), NODE_ENV: 'development', DATABASE_URL: credentials.DATABASE_URL, OES_TASK_KEY: manifest.taskKey, OES_RUN_ID: manifest.runId }, timeout: 600000 })
+  announceStage('MACHINE_SELECTOR_RECONCILE', 'identity-service')
+  const result = runCheckedVisible(command[0], command.slice(1), { cwd: root, env: { ...cleanProcessEnvironment(), NODE_ENV: 'development', DATABASE_URL: credentials.DATABASE_URL, OES_TASK_KEY: manifest.taskKey, OES_RUN_ID: manifest.runId }, timeout: 600000 })
   const selector = JSON.parse(fs.readFileSync(output, 'utf8'))
   if (!Array.isArray(selector.selectors) || selector.selectors.length === 0) throw new Error('MACHINE_SELECTOR_PROFILE_EMPTY')
   return { path: output, command, exitStatus: result.status, output: result.stdout, selectorCount: selector.selectors.length }

@@ -118,13 +118,20 @@ export async function main(argv = process.argv.slice(2)) {
     const owners = explicitOwners.length ? explicitOwners : scopes[options.scope || 'full']
     if (!owners) throw new Error(`DEV_SCOPE_INVALID scope=${options.scope}`)
     const controller = new AbortController()
-    const interrupt = () => controller.abort(new Error('DEVELOPMENT_INTERRUPTED'))
-    process.once('SIGINT', interrupt)
-    process.once('SIGTERM', interrupt)
+    const interrupt = () => {
+      if (!controller.signal.aborted) controller.abort(new Error('DEVELOPMENT_INTERRUPTED'))
+    }
+    process.on('SIGINT', interrupt)
+    process.on('SIGTERM', interrupt)
     let started
     let processes
+    let interrupted = false
     try {
-      started = await startRuntime({ ...intentFrom({ ...options, profile: 'DEV', 'test-class': 'integration', owners: owners.join(','), 'task-key': options['task-key'] || 'developer_dev' }), owners })
+      process.stdout.write('[local-runtime] stage=RUNTIME_ALLOCATE\n')
+      started = await startRuntime(
+        { ...intentFrom({ ...options, profile: 'DEV', 'test-class': 'integration', owners: owners.join(','), 'task-key': options['task-key'] || 'developer_dev' }), owners },
+        { afterProgressPublished: ({ provider }) => process.stdout.write(`[local-runtime] stage=PROVIDER_READY provider=${provider}\n`) }
+      )
       if (controller.signal.aborted) throw controller.signal.reason
       backupDevelopmentState(started.file)
       if (controller.signal.aborted) throw controller.signal.reason
@@ -139,6 +146,9 @@ export async function main(argv = process.argv.slice(2)) {
       processes = await startDevelopmentProcesses(started.file, { root, selectorPath: selectors?.path, signal: controller.signal })
       emit({ status: 'DEV_READY', manifestPath: processes.manifestPath, manifestFingerprint: processes.manifest.manifestFingerprint, owners })
       await waitForDevelopmentTermination(controller.signal, processes.liveness)
+    } catch (error) {
+      if (!controller.signal.aborted && !['SIGINT', 'SIGTERM'].includes(error.signal)) throw error
+      interrupted = true
     } finally {
       process.removeListener('SIGINT', interrupt)
       process.removeListener('SIGTERM', interrupt)
@@ -146,6 +156,7 @@ export async function main(argv = process.argv.slice(2)) {
       if (processes) await stopDevelopmentProcesses(processes.children)
       if (started) reconcileRuntime({ manifestPath: started.file, cleanupResource: started.cleanup, releaseSlot: started.releaseSlot, releaseRunLock: started.releaseRunLock, releaseDevLock: started.releaseDevLock })
     }
+    if (interrupted) emit({ status: 'DEV_STOPPED', reason: 'operator-interrupt' })
     return
   }
   if (subcommand === 'plan') {

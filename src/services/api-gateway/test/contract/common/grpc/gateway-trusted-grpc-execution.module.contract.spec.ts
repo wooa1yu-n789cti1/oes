@@ -89,6 +89,7 @@ describe('GatewayTrustedGrpcExecutionModule wiring', () => {
       'urn:oes:service:mes-service',
       'urn:oes:service:collaboration-service',
       'urn:oes:service:item-master-service',
+      'urn:oes:service:party-service',
       'urn:oes:service:srm-service',
       'urn:oes:service:procurement-service',
       'urn:oes:service:wms-service',

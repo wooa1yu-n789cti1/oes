@@ -32,6 +32,33 @@ Unknown owner, undeclared Journey, ambiguous capability, or object-store access 
 
 ## 3. Development and focused execution
 
+The normal local startup is intentionally split into four operator commands. Run them in order from
+the repository root. Every command streams to its terminal while overwriting one fixed plain-text
+log file; terminal colors remain visible but ANSI control bytes are removed from the file:
+
+```bash
+pnpm infra           # ~/.local/state/oes/logs/infra.log
+pnpm backend:prepare # ~/.local/state/oes/logs/backend-prepare.log
+pnpm backend         # ~/.local/state/oes/logs/backend.log
+pnpm web             # ~/.local/state/oes/logs/web.log
+```
+
+`pnpm infra` registers and starts the complete DEV provider set independently. It returns after the
+providers are ready; the containers remain available while Backend or Web terminals are restarted.
+Running it again reuses the active complete registration and returns `INFRA_READY` without consuming
+another runtime slot. The persistent infrastructure registration releases its allocation slot after
+readiness, so Backend and focused test runs retain normal local concurrency.
+
+`pnpm backend:prepare` is also one-shot. It writes the pre-migration backup, generates Prisma clients
+and shared contracts, deploys committed migrations, applies Foundation Seed, reconciles machine
+selectors, seals the preparation record, and then returns. Run it after `pnpm infra`, and rerun it
+whenever schemas, migrations, seed inputs, generated-contract inputs, or dependency metadata change.
+
+`pnpm backend` now starts only the prepared host services and remains attached so all service stdout
+and stderr stay visible in that terminal. `pnpm web` also remains attached and discovers the gateway
+from the sealed live Backend session. If preparation or infrastructure is missing or stale, Backend
+stops immediately with the exact command to rerun instead of silently performing finite setup work.
+
 ```bash
 pnpm dev:system -- --task-key TASK_KEY
 pnpm dev:business -- --task-key TASK_KEY
@@ -49,9 +76,11 @@ selected owner's environment, executes the command, records literal status, and 
 owned resources. The Run manifest never duplicates shared resource or endpoint payload.
 `SIGINT`, command failure, startup failure, and explicit `runtime:reconcile` use the same authority.
 
-For `DEV`, the launcher first writes a verified pre-migration snapshot, generates the selected
-Prisma clients and shared contracts, applies migrations, reconciles Identity-owned machine
-selectors, and only then starts host processes. Auth uses the source-hashed, network-disabled,
+For normal full `DEV`, `backend:prepare` writes the verified pre-migration snapshot, generates the
+Prisma clients and shared contracts, applies migrations and Foundation Seed, and reconciles
+Identity-owned machine selectors. `backend` then starts only host processes. Scoped compatibility
+commands continue to perform their selected preparation inline. Auth uses the source-hashed,
+network-disabled,
 read-only SoftHSM2 signer container and a run-owned Unix socket. The HTTPS issuer exposes only OIDC
 metadata and JWKS. Service certificates carry the exact SPIFFE URI plus `<service>.localhost` DNS;
 Auth also carries `issuer.local.oes.internal`. DNS names provide TLS routing only and never replace

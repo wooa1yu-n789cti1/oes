@@ -25,6 +25,10 @@ export interface LoginMethodGroup {
   title: string;
 }
 
+export interface LoginHistoryTableRow extends SelfSecurityApi.LoginHistoryItem {
+  rowKey: string;
+}
+
 export type MfaEnableFlow =
   | 'ENABLE_DIRECT'
   | 'OPEN_RECOVERY_CODE_SETUP'
@@ -274,6 +278,33 @@ export function getSessionTerminalColor(terminal?: string) {
   }
 }
 
+// Merges login-history pages with deterministic record-derived keys and collision suffixes.
+export function mergeLoginHistoryTableRows(
+  currentRows: LoginHistoryTableRow[],
+  incomingItems: SelfSecurityApi.LoginHistoryItem[],
+  append: boolean,
+): LoginHistoryTableRow[] {
+  const rows = append ? [...currentRows] : [];
+  const occurrences = new Map<string, number>();
+
+  for (const row of rows) {
+    const fingerprint = loginHistoryFingerprint(row);
+    occurrences.set(fingerprint, (occurrences.get(fingerprint) ?? 0) + 1);
+  }
+
+  for (const item of incomingItems) {
+    const fingerprint = loginHistoryFingerprint(item);
+    const occurrence = occurrences.get(fingerprint) ?? 0;
+    occurrences.set(fingerprint, occurrence + 1);
+    rows.push({
+      ...item,
+      rowKey: `${fingerprint}:${occurrence}`,
+    });
+  }
+
+  return rows;
+}
+
 // Converts backend login-history failure codes into safe explanations for self-service display.
 export function getLoginHistoryFailureExplanation(reason?: string) {
   const normalizedReason = reason?.trim().toUpperCase();
@@ -307,6 +338,25 @@ export function getLoginHistoryFailureExplanation(reason?: string) {
       return '登录未完成';
     }
   }
+}
+
+// Serializes all available login-history identity facts without relying on a table row index.
+function loginHistoryFingerprint(item: SelfSecurityApi.LoginHistoryItem) {
+  return [
+    item.traceId,
+    item.occurredAt,
+    item.outcome,
+    item.loginMethod,
+    item.terminal,
+    item.loginFlow,
+    item.ipAddress,
+    item.deviceName,
+    item.platform,
+    item.browser,
+    item.failureReason,
+  ]
+    .map((value) => encodeURIComponent(value?.trim() ?? ''))
+    .join('|');
 }
 
 function buildLoginMethodGroup(

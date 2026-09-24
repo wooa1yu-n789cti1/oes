@@ -9,6 +9,7 @@ import {
   getSessionTerminalColor,
   getSessionTerminalLabel,
   isMfaEnableActionDisabled,
+  mergeLoginHistoryTableRows,
   resolveMfaEnableFlow,
   resolveBoundContact,
   resolveCurrentUserDisplayIdentifier,
@@ -456,5 +457,26 @@ describe('security center contact binding helpers', () => {
       '登录未完成',
     );
     expect(getLoginHistoryFailureExplanation()).toBe('-');
+  });
+
+  it('builds stable unique login-history row keys without Ant Design index arguments', () => {
+    const duplicate = {
+      occurredAt: '2026-09-15T08:00:00.000Z',
+      outcome: 'FAILED' as const,
+      loginMethod: 'PASSWORD',
+      terminal: 'WEB',
+    };
+    const firstPage = mergeLoginHistoryTableRows([], [duplicate, duplicate], false);
+    const repeatedFirstPage = mergeLoginHistoryTableRows([], [duplicate, duplicate], false);
+    const appended = mergeLoginHistoryTableRows(firstPage, [duplicate], true);
+
+    expect(firstPage.map(({ rowKey }) => rowKey)).toEqual(
+      repeatedFirstPage.map(({ rowKey }) => rowKey),
+    );
+    expect(new Set(firstPage.map(({ rowKey }) => rowKey)).size).toBe(2);
+    expect(appended.slice(0, 2).map(({ rowKey }) => rowKey)).toEqual(
+      firstPage.map(({ rowKey }) => rowKey),
+    );
+    expect(new Set(appended.map(({ rowKey }) => rowKey)).size).toBe(3);
   });
 });
