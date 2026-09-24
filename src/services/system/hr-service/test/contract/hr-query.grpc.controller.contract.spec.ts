@@ -1,6 +1,11 @@
 import { HrQueryService } from '../../src/application/services'
 import { HrQueryGrpcController } from '../../src/interfaces/grpc/hr-query.grpc.controller'
-import { attachOperatorContext, attachVerifiedExecution } from '@oes/common/authorization'
+import {
+  attachOperatorContext,
+  attachVerifiedExecution,
+  GrpcRequestContextInterceptor
+} from '@oes/common/authorization'
+import { INTERCEPTORS_METADATA } from '@nestjs/common/constants'
 
 /** Attaches the verified tenant scope normally installed by the trusted execution guard. */
 function withTenantContext<T extends object>(request: T): T {
@@ -52,6 +57,12 @@ function createHrQueryServiceMock() {
 }
 
 describe('HrQueryGrpcController Contract', () => {
+  it('installs the request-context interceptor for every HR query RPC', () => {
+    expect(Reflect.getMetadata(INTERCEPTORS_METADATA, HrQueryGrpcController)).toContain(
+      GrpcRequestContextInterceptor
+    )
+  })
+
   it('ResolveActiveEmployeeByCode / should map active employee and employment without account or PIN facts', async () => {
     const service = createHrQueryServiceMock()
     service.resolveActiveEmployeeByCode.mockResolvedValue({

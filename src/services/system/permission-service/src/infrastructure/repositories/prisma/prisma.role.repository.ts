@@ -507,10 +507,10 @@ export class PrismaRoleRepository implements RoleRepository {
       accountRoles.length
     }; roles=${roles.map((role) => `${role.code}[${role.permissions.length}]`).join(',')}`
 
-    if (roles.length === 0 || roles.some((role) => role.permissions.length === 0)) {
+    if (roles.some((role) => role.permissions.length === 0)) {
       this.logger.warn(repositoryMessage)
     } else {
-      this.logger.log(repositoryMessage)
+      this.logger.debug(repositoryMessage)
     }
 
     return roles

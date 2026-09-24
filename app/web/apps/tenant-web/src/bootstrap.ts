@@ -15,8 +15,10 @@ import { router } from '#/router';
 import { initComponentAdapter } from './adapter/component';
 import { initSetupVbenForm } from './adapter/form';
 import App from './app.vue';
-import './utils/antd-table-column-resize.css';
+import { installVueBrowserDiagnostics } from './diagnostics/browser-diagnostics';
 import { installAntdTableColumnResize } from './utils/antd-table-column-resize';
+
+import './utils/antd-table-column-resize.css';
 
 async function bootstrap(namespace: string) {
   // 初始化组件适配器
@@ -35,6 +37,7 @@ async function bootstrap(namespace: string) {
   // });
 
   const app = createApp(App);
+  installVueBrowserDiagnostics(app);
 
   // 注册v-loading指令
   registerLoadingDirective(app, {

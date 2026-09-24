@@ -1,6 +1,13 @@
 [
   {
     "originalWorkloadSpiffeId": "spiffe://local.oes.internal/ns/oes/sa/api-gateway",
+    "targetAudience": "urn:oes:service:party-service",
+    "permissionCodes": ["party.internal.get_tenant_party_by_id"],
+    "scopeLevel": "SYSTEM",
+    "policyVersion": "auth-login-owner-facts-v1"
+  },
+  {
+    "originalWorkloadSpiffeId": "spiffe://local.oes.internal/ns/oes/sa/api-gateway",
     "targetAudience": "urn:oes:service:permission-service",
     "permissionCodes": [
       "permission.internal.account_access_summary.resolve",
@@ -73,6 +80,13 @@
     "originalWorkloadSpiffeId": "spiffe://local.oes.internal/ns/oes/sa/public-entry-service",
     "targetAudience": "urn:oes:service:identity-service",
     "permissionCodes": ["identity.internal.public_business_card_identity.resolve"],
+    "scopeLevel": "SYSTEM",
+    "policyVersion": "auth-login-owner-facts-v1"
+  },
+  {
+    "originalWorkloadSpiffeId": "spiffe://local.oes.internal/ns/oes/sa/public-entry-service",
+    "targetAudience": "urn:oes:service:permission-service",
+    "permissionCodes": ["permission.internal.permission.check"],
     "scopeLevel": "SYSTEM",
     "policyVersion": "auth-login-owner-facts-v1"
   },

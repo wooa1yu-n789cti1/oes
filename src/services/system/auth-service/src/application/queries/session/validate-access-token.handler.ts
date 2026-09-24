@@ -2,9 +2,12 @@ import { Inject } from '@nestjs/common'
 import { IQueryHandler, QueryHandler } from '@nestjs/cqrs'
 import { CommonJwtService } from '@oes/common/auth'
 import { inboundExecutionTokenCredentialScope } from '@oes/common/authorization'
-import { ExceptionFactory } from '@oes/common/exceptions'
+import { ExceptionFactory, OESExceptionBase } from '@oes/common/exceptions'
 import { REPO } from '../../../common/constants'
-import { AUTH_ACCESS_TOKEN_INVALID } from '../../../common/constants/exception-enums'
+import {
+  AUTH_ACCESS_TOKEN_INVALID,
+  AUTH_TENANT_NOT_ACTIVE
+} from '../../../common/constants/exception-enums'
 import { IUserSessionRepository } from '../../../domain/repositories/user-session.repository'
 import { Session } from '../../../domain/aggregates/usersession.aggregate'
 import { TenantSessionAccessService } from '../../services/tenant-session-access.service'
@@ -169,7 +172,9 @@ export class ValidateAccessTokenHandler implements IQueryHandler<
         scopeLevel: session.getScopeLevel()
       })
     } catch (error) {
-      await this.sessionRepository.delete(session.getId())
+      if (error instanceof OESExceptionBase && error.getCode() === AUTH_TENANT_NOT_ACTIVE.code) {
+        await this.sessionRepository.delete(session.getId())
+      }
       throw error
     }
   }

@@ -14,7 +14,7 @@
     "dev:start": "wait-on dist/main.js ../../../common/dist/index.js && nodemon --watch dist --watch ../../../common/dist --ext js,json --signal SIGTERM dist/main.js",
     "dev": "concurrently -k -n build,run \"pnpm run dev:build\" \"pnpm run dev:start\"",
     "start": "node dist/main.js",
-    "prisma:generate": "npx prisma generate --schema=./prisma/schema.prisma",
+    "prisma:generate": "pnpm exec prisma generate --schema=./prisma/schema.prisma",
     "prisma:migrate:dev": "npx prisma migrate dev --schema=./prisma/schema.prisma",
     "prisma:migrate:deploy": "prisma migrate deploy --schema=./prisma/schema.prisma",
     "clear:build": "rimraf dist && rimraf tsconfig.tsbuildinfo",

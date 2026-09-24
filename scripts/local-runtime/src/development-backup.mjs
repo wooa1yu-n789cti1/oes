@@ -3,7 +3,7 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fingerprint, sha256, writeAtomic } from './canonical.mjs'
 import { reopenManifest, resolveResources } from './manifest.mjs'
-import { RUNTIME_DOCKER_IMAGES } from './docker-driver.mjs'
+import { isMissingDockerObject, RUNTIME_DOCKER_IMAGES } from './docker-driver.mjs'
 import { runChecked } from './process.mjs'
 
 /** Runs a binary-producing command without coercing its payload through UTF-8. */
@@ -19,11 +19,42 @@ function runBuffer(command, args, { input, timeout = 600000 } = {}) {
   return result.stdout
 }
 
+/** Reopens a container by sealed object ID so a reused name cannot hide identity drift. */
+function inspectAllocationContainer(objectId) {
+  return JSON.parse(
+    runChecked('docker', ['inspect', '--type', 'container', objectId], { timeout: 20000 }).stdout
+  )[0]
+}
+
 /** Verifies a shared DEV allocation still points at the exact live container. */
-function assertAllocationContainer(resource) {
+export function assertAllocationContainer(
+  resource,
+  { inspectContainer = inspectAllocationContainer } = {}
+) {
   if (resource.scope !== 'SHARED' || resource.containerScope !== 'SHARED') throw new Error(`DEV_BACKUP_ALLOCATION_SCOPE_INVALID kind=${resource.kind}`)
-  const observed = JSON.parse(runChecked('docker', ['inspect', '--type', 'container', resource.containerName], { timeout: 20000 }).stdout)[0]
-  if (observed.Id !== resource.containerObjectId || !observed.State.Running) throw new Error(`DEV_BACKUP_CONTAINER_IDENTITY_MISMATCH kind=${resource.kind}`)
+  let observed
+  try {
+    observed = inspectContainer(resource.containerObjectId)
+  } catch (cause) {
+    if (isMissingDockerObject(cause, 'container')) {
+      try {
+        const replacement = inspectContainer(resource.containerName)
+        throw new Error(
+          `DEV_BACKUP_CONTAINER_IDENTITY_MISMATCH kind=${resource.kind} expectedObjectId=${resource.containerObjectId} observedObjectId=${replacement.Id}`,
+          { cause }
+        )
+      } catch (nameCause) {
+        if (!isMissingDockerObject(nameCause, 'container')) throw nameCause
+        throw new Error(`DEV_BACKUP_CONTAINER_MISSING kind=${resource.kind}`, { cause })
+      }
+    }
+    throw cause
+  }
+  if (
+    observed.Id !== resource.containerObjectId ||
+    observed.Name !== `/${resource.containerName}`
+  ) throw new Error(`DEV_BACKUP_CONTAINER_IDENTITY_MISMATCH kind=${resource.kind}`)
+  if (observed.State?.Running !== true) throw new Error(`DEV_BACKUP_CONTAINER_NOT_RUNNING kind=${resource.kind}`)
   return observed
 }
 

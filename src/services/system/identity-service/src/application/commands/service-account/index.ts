@@ -1,4 +1,3 @@
-import { AuthenticateApiKeyHandler } from './authenticate-api-key.handler'
 import { CreateApiKeyHandler } from './create-api-key.handler'
 import { CreateServiceAccountHandler } from './create-service-account.handler'
 import { RevokeApiKeyHandler } from './revoke-api-key.handler'
@@ -21,7 +20,6 @@ export * from './enroll-machine-workload-binding.handler'
 export * from './disable-machine-workload-binding.handler'
 
 export const ServiceAccountCommandHandlers = [
-  AuthenticateApiKeyHandler,
   CreateApiKeyHandler,
   CreateServiceAccountHandler,
   RevokeApiKeyHandler,

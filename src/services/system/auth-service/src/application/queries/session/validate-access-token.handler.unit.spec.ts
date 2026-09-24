@@ -1,6 +1,8 @@
 import { CommonJwtService } from '@oes/common/auth'
 import { inboundExecutionTokenCredentialScope } from '@oes/common/authorization'
 import { SessionStatus } from '@oes/common/constants'
+import { ExceptionFactory, INTERNAL_SERVICE_UNAVAILABLE } from '@oes/common/exceptions'
+import { AUTH_TENANT_NOT_ACTIVE } from '../../../common/constants/exception-enums'
 import { Session } from '../../../domain/aggregates/usersession.aggregate'
 import { TrustedDeviceService } from '../../services/trusted-device.service'
 import { ValidateAccessTokenHandler } from './validate-access-token.handler'
@@ -122,7 +124,9 @@ describe('ValidateAccessTokenHandler', () => {
       delete: jest.fn().mockResolvedValue(undefined)
     } as any
     const tenantSessionAccessService = {
-      assertSessionCanContinue: jest.fn().mockRejectedValue(new Error('tenant inactive'))
+      assertSessionCanContinue: jest
+        .fn()
+        .mockRejectedValue(ExceptionFactory.domain(AUTH_TENANT_NOT_ACTIVE))
     }
     const handler = new ValidateAccessTokenHandler(
       jwtService,
@@ -135,7 +139,7 @@ describe('ValidateAccessTokenHandler', () => {
 
     await expect(
       runFromGateway(() => handler.execute(new ValidateAccessTokenQuery('token-1')))
-    ).rejects.toThrow('tenant inactive')
+    ).rejects.toThrow(AUTH_TENANT_NOT_ACTIVE.message)
 
     expect(tenantSessionAccessService.assertSessionCanContinue).toHaveBeenCalledWith({
       sessionId: 'session-1',
@@ -143,6 +147,46 @@ describe('ValidateAccessTokenHandler', () => {
       scopeLevel: 'TENANT'
     })
     expect(sessionRepository.delete).toHaveBeenCalledWith('session-1')
+    expect(sessionRepository.save).not.toHaveBeenCalled()
+  })
+
+  it('preserves the session when tenant lifecycle lookup fails unexpectedly', async () => {
+    const session = createSessionFixture({
+      id: 'session-1',
+      userId: 'user-1',
+      accountId: 'account-1',
+      tenantId: 'tenant-1'
+    })
+    const lifecycleError = ExceptionFactory.infrastructure(INTERNAL_SERVICE_UNAVAILABLE)
+    const jwtService = {
+      verifyAsync: jest.fn().mockResolvedValue({
+        sub: 'user-1',
+        aid: 'account-1',
+        tid: 'tenant-1',
+        sid: 'session-1',
+        scopeLevel: 'TENANT',
+        tokenType: 'access'
+      })
+    } as unknown as CommonJwtService
+    const sessionRepository = {
+      findById: jest.fn().mockResolvedValue(session),
+      save: jest.fn(),
+      delete: jest.fn()
+    } as any
+    const handler = new ValidateAccessTokenHandler(
+      jwtService,
+      sessionRepository,
+      { markTrustedDeviceSeen: jest.fn() } as unknown as TrustedDeviceService,
+      {
+        assertSessionCanContinue: jest.fn().mockRejectedValue(lifecycleError)
+      } as any
+    )
+
+    await expect(
+      runFromGateway(() => handler.execute(new ValidateAccessTokenQuery('token-1')))
+    ).rejects.toBe(lifecycleError)
+
+    expect(sessionRepository.delete).not.toHaveBeenCalled()
     expect(sessionRepository.save).not.toHaveBeenCalled()
   })
 

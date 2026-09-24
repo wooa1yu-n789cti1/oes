@@ -14,7 +14,7 @@
     "dev:start": "wait-on dist/main.js ../../../common/dist/index.js && nodemon --watch dist --watch ../../../common/dist --ext js,json --signal SIGTERM dist/main.js",
     "dev": "concurrently -k -n build,run \"pnpm run dev:build\" \"pnpm run dev:start\"",
     "start": "node dist/main.js",
-    "prisma:generate": "npx prisma generate --schema=./prisma/schema.prisma",
+    "prisma:generate": "pnpm exec prisma generate --schema=./prisma/schema.prisma",
     "seed:dry-run": "node -r ts-node/register ./src/scripts/permission-service-seed.ts",
     "seed:cleanup:dry-run": "node -r ts-node/register ./src/scripts/permission-service-seed-cleanup.ts",
     "seed:validate": "node -r ts-node/register ./src/scripts/permission-service-seed-validate.ts",

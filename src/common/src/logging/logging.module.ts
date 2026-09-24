@@ -33,12 +33,6 @@ export class LoggingModule {
         {
           provide: LOGGER_OPTIONS,
           useValue: options
-        },
-        AppLogger,
-        GrpcAccessLogInterceptor,
-        {
-          provide: APP_INTERCEPTOR,
-          useExisting: GrpcAccessLogInterceptor
         }
       ],
       exports: [AppLogger, GrpcAccessLogInterceptor]

@@ -1,4 +1,8 @@
+import process from 'node:process';
+
 import { defineConfig } from '@vben/vite-config';
+
+import { createBrowserLogPlugin } from './vite/browser-log.plugin';
 
 export default defineConfig(async () => {
   const gatewayBaseUrl =
@@ -8,6 +12,7 @@ export default defineConfig(async () => {
   return {
     application: {},
     vite: {
+      plugins: [createBrowserLogPlugin()],
       server: {
         proxy: {
           '/api': {

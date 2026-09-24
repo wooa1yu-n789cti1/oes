@@ -15,12 +15,13 @@ import { useAccessStore } from '@vben/stores';
 
 import { message } from 'ant-design-vue';
 
-import { useAuthStore } from '#/store';
-
 import {
   resolveLegacyUndefinedNamespace,
   resolveTenantWebNamespace,
 } from '#/app-namespace';
+import { useAuthStore } from '#/store';
+
+import { recordHttpRequestError } from '../diagnostics/browser-diagnostics';
 import { refreshTokenApi } from './core';
 
 const { apiURL } = useAppConfig(import.meta.env, import.meta.env.PROD);
@@ -105,6 +106,13 @@ function createRequestClient(baseURL: string, options?: RequestClientOptions) {
   const client = new RequestClient({
     ...options,
     baseURL,
+  });
+
+  client.addResponseInterceptor({
+    rejected: (error) => {
+      recordHttpRequestError(error);
+      return Promise.reject(error);
+    },
   });
 
   /**
@@ -310,3 +318,9 @@ export const requestClient = createRequestClient(apiURL, {
 });
 
 export const baseRequestClient = new RequestClient({ baseURL: apiURL });
+baseRequestClient.addResponseInterceptor({
+  rejected: (error) => {
+    recordHttpRequestError(error);
+    return Promise.reject(error);
+  },
+});

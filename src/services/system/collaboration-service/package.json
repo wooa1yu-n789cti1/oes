@@ -15,7 +15,7 @@
     "dev": "concurrently -k -n build,run \"pnpm run dev:build\" \"pnpm run dev:start\"",
     "start": "node dist/main.js",
     "seed:p1": "node scripts/seed-task-p1.mjs",
-    "prisma:generate": "npx prisma generate --schema=./prisma/schema.prisma",
+    "prisma:generate": "pnpm exec prisma generate --schema=./prisma/schema.prisma",
     "clear:build": "rimraf dist && rimraf tsconfig.tsbuildinfo",
     "clear:nm": "rimraf node_modules",
     "prisma:migrate:deploy": "prisma migrate deploy --schema=./prisma/schema.prisma",

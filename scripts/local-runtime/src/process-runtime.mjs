@@ -6,9 +6,14 @@ import { spawn } from 'node:child_process'
 import { resolveCredentialReference } from './credentials.mjs'
 import { cleanProcessEnvironment } from './bootstrap.mjs'
 import { environmentForOwner, publishManifest, reopenManifest } from './manifest.mjs'
-import { cleanupDockerResource, exactResourceToken, runtimeLabels } from './docker-driver.mjs'
+import {
+  cleanupDockerResource,
+  exactResourceToken,
+  observeDockerResourceResidue,
+  runtimeLabels
+} from './docker-driver.mjs'
 import { canonicalJson, sha256, writeAtomic } from './canonical.mjs'
-import { runChecked } from './process.mjs'
+import { runChecked, runCheckedVisible } from './process.mjs'
 import { trustedProcessEnvironment } from './trusted-runtime-config.mjs'
 import { auditDevelopmentProcessEnvironmentInputs, auditDevelopmentProcessEnvironments } from './development-process-config.mjs'
 import { withExclusiveLock } from './locks.mjs'
@@ -230,6 +235,18 @@ export function developmentProcessStartupBatches(owners) {
   return owners.includes('auth-service') ? [['auth-service'], ...(remaining.length ? [remaining] : [])] : [[...owners]]
 }
 
+/** Compiles every selected owner once so a stale dist file cannot release the runtime watcher early. */
+export function prebuildDevelopmentOwners(root, owners, run = runCheckedVisible) {
+  if (!owners.length) return null
+  const args = [...owners.flatMap((owner) => ['--filter', owner]), 'run', 'build']
+  process.stdout.write(`[local-runtime] stage=HOST_PREBUILD owners=${owners.join(',')}\n`)
+  return run('pnpm', args, {
+    cwd: root,
+    env: cleanProcessEnvironment(),
+    timeout: 900000
+  })
+}
+
 /** Hashes the exact signer source tree used to build the isolated runtime image. */
 export function signerSourceHash(root) {
   const source = path.join(root, 'docker/grpc-trust/execution-token-signer')
@@ -368,13 +385,18 @@ export function cleanupRuntimeDirectory(resource) {
 }
 
 /** Starts selected host-process business services and republishes their ready endpoints atomically. */
-export async function startDevelopmentProcesses(manifestPath, { root, selectorPath, signal } = {}) {
+export async function startDevelopmentProcesses(
+  manifestPath,
+  { root, selectorPath, signal, publishProcessManifest = true } = {}
+) {
   const manifest = reopenManifest(manifestPath)
   if (manifest.profile !== 'DEV') throw new Error('DEVELOPMENT_PROCESS_PROFILE_REQUIRED')
   const declarations = JSON.parse(fs.readFileSync(path.join(root, 'scripts/local-runtime/relationships.json'), 'utf8'))
   const children = []
   let signer = null
   try {
+    if (signal?.aborted) throw signal.reason
+    prebuildDevelopmentOwners(root, manifest.owners)
     if (signal?.aborted) throw signal.reason
     const started = await withExclusiveLock(path.join(manifest.stateRoot, 'locks', 'process-port-allocation.lock'), async () => {
       let lastError
@@ -426,7 +448,11 @@ export async function startDevelopmentProcesses(manifestPath, { root, selectorPa
             const batchChildren = []
             for (const owner of batch) {
               await ownerReservations[owner].release()
-              const child = spawn('pnpm', ['--filter', owner, 'dev'], { cwd: root, env: environments[owner], stdio: 'inherit' })
+              const child = spawn(
+                process.execPath,
+                [path.join(root, 'scripts/local-runtime/src/service-development.mjs'), owner],
+                { cwd: root, env: environments[owner], stdio: 'inherit' }
+              )
               const record = { owner, kind: 'service', port: ports[owner], child }
               attemptChildren.push(record)
               batchChildren.push(record)
@@ -455,8 +481,29 @@ export async function startDevelopmentProcesses(manifestPath, { root, selectorPa
     children.push(...started.attemptChildren)
     const processEndpoints = started.attemptChildren.filter(({ kind }) => kind === 'service').map(({ owner, port, child }) => ({ provider: 'host-process', authority: `pid:${child.pid}:tcp:${port}`, host: `${owner}.localhost`, port, ready: true, owners: manifest.owners.filter((candidate) => candidate === owner || declarations.owners[candidate].downstreams?.includes(owner)), environment: endpointEnvironment(owner, port), credentialReference: null }))
     const issuerEndpoints = started.authHttpPort ? [{ provider: 'host-issuer', authority: `pid:${started.attemptChildren.find(({ owner }) => owner === 'local-issuer').child.pid}:https:${started.issuerPort}`, host: 'issuer.local.oes.internal', port: started.issuerPort, ready: true, owners: manifest.owners, environment: { AUTH_EXECUTION_ISSUER: `https://issuer.local.oes.internal:${started.issuerPort}` }, credentialReference: null }] : []
-    const published = publishDevelopmentProcessManifest(manifestPath, { signer, issuerEndpoints, processEndpoints })
-    return { children, manifest: published.manifest, manifestPath: published.file, liveness: signer?.monitor.failure || null, stopLiveness: () => signer?.monitor.stop() }
+    let published = { manifest, file: manifestPath }
+    if (publishProcessManifest) {
+      published = publishDevelopmentProcessManifest(manifestPath, {
+        signer,
+        issuerEndpoints,
+        processEndpoints
+      })
+    } else {
+      const sharedSignerResources = (signer?.resources || []).filter(
+        (resource) => resource.scope === 'SHARED'
+      )
+      if (sharedSignerResources.length) publishStackState(manifest, sharedSignerResources)
+    }
+    return {
+      children,
+      manifest: published.manifest,
+      manifestPath: published.file,
+      processEndpoints,
+      issuerEndpoints,
+      resources: (signer?.resources || []).filter((resource) => resource.scope !== 'SHARED'),
+      liveness: signer?.monitor.failure || null,
+      stopLiveness: () => signer?.monitor.stop()
+    }
   } catch (error) {
     signer?.monitor.stop()
     await stopDevelopmentProcesses(children)
@@ -468,6 +515,40 @@ export async function startDevelopmentProcesses(manifestPath, { root, selectorPa
     }
     throw error
   }
+}
+
+/** Cleans exact run-owned signer resources after a backend attached to persistent DEV infrastructure stops. */
+export function cleanupDevelopmentProcessResources(resources, manifest) {
+  const results = []
+  let dependentFailure = false
+  for (const resource of [...resources].reverse()) {
+    if (resource.scope !== 'RUN') continue
+    const alreadyAbsent =
+      (resource.kind === 'directory' && !lstatIfPresent(resource.path)) ||
+      (resource.kind === 'container' && !observeDockerResourceResidue(resource).present)
+    if (alreadyAbsent) {
+      results.push({ resource, disposition: 'ALREADY_ABSENT', exitStatus: 0 })
+      continue
+    }
+    if (resource.kind === 'directory' && dependentFailure) {
+      results.push({
+        resource,
+        disposition: 'PRESERVED_DEPENDENT_CLEANUP_FAILURE',
+        exitStatus: 1
+      })
+      continue
+    }
+    const result =
+      resource.kind === 'directory'
+        ? cleanupRuntimeDirectory(resource)
+        : cleanupDockerResource(resource, manifest)
+    results.push(result)
+    if (result.exitStatus !== 0) dependentFailure = true
+  }
+  const failures = results.filter((result) => result.exitStatus !== 0)
+  if (failures.length)
+    throw new Error(`DEVELOPMENT_PROCESS_RESOURCE_CLEANUP_FAILED count=${failures.length}`)
+  return results
 }
 
 /** Stops every selected host process child-first with a bounded force fallback. */

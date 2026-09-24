@@ -12,7 +12,7 @@ import { writeCredentialBundle } from '../credentials.mjs'
 import { exactResourceToken, exactRunIdentity, isPublishedPortCollision, runtimeLabels } from '../docker-driver.mjs'
 import { publishManifest, publishStackManifest, reopenCurrentStackManifest } from '../manifest.mjs'
 import { classifyRuntimeObject, reopenOperatorAuthority } from '../operator-status.mjs'
-import { cleanupRuntimeDirectory, developmentProcessStartupBatches, downstreamEnvironment, endpointEnvironment, gatewayReadinessEnvironment, inspectProtectedSignerContainer, monitorProtectedSigner, probeProtectedSigner, publishDevelopmentProcessManifest, reservePort, signerSourceHash, signerWorkDirectory, waitForProtectedSignerReadiness } from '../process-runtime.mjs'
+import { cleanupRuntimeDirectory, developmentProcessStartupBatches, downstreamEnvironment, endpointEnvironment, gatewayReadinessEnvironment, inspectProtectedSignerContainer, monitorProtectedSigner, prebuildDevelopmentOwners, probeProtectedSigner, publishDevelopmentProcessManifest, reservePort, signerSourceHash, signerWorkDirectory, waitForProtectedSignerReadiness } from '../process-runtime.mjs'
 import { bindHumanOboPolicies, loadMachineSelectors, loadWorkloadPolicies, selectorEnvironment, trustedProcessEnvironment } from '../trusted-runtime-config.mjs'
 import { startUdsDockerProxy } from '../uds-docker-proxy.mjs'
 
@@ -65,6 +65,27 @@ test('Auth starts alone before concurrent DEV owners while non-Auth subsets reta
   ])
 })
 
+test('selected DEV owners complete one fresh build before any watcher process can start', () => {
+  const calls = []
+  const result = prebuildDevelopmentOwners('/repo', ['auth-service', 'api-gateway'], (...args) => {
+    calls.push(args)
+    return { status: 0 }
+  })
+  assert.deepEqual(result, { status: 0 })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0][0], 'pnpm')
+  assert.deepEqual(calls[0][1], [
+    '--filter',
+    'auth-service',
+    '--filter',
+    'api-gateway',
+    'run',
+    'build'
+  ])
+  assert.equal(calls[0][2].cwd, '/repo')
+  assert.equal(calls[0][2].timeout, 900000)
+})
+
 function manifestFixture(directory, owners = ['auth-service', 'api-gateway', 'permission-service']) {
   const reference = writeCredentialBundle(directory, 'mtls', Object.fromEntries(owners.map((owner) => [owner, {
     OES_GRPC_TLS_CA_PATH: path.join(directory, 'ca.pem'),
@@ -102,11 +123,21 @@ test('versioned policies bind Human-OBO only to exact provisioned selector facts
   const selector = (owner) => ({ inventoryEntryKey: owner, machinePrincipalId: `${owner}-principal`, machineWorkloadBindingId: `${owner}-binding`, machineWorkloadBindingVersion: '1' })
   fs.writeFileSync(selectorsPath, JSON.stringify({ selectors: ['api-gateway', 'auth-service', 'collaboration-service', 'public-entry-service'].map(selector) }))
   const selectors = loadMachineSelectors(selectorsPath)
-  const { auth } = loadWorkloadPolicies(root)
+  const { auth, permission } = loadWorkloadPolicies(root)
   const bound = bindHumanOboPolicies(auth, selectors)
   const gateway = bound.find((entry) => entry.spiffeId.endsWith('/api-gateway'))
   assert.equal(gateway.humanObo.actorMachinePrincipalId, 'api-gateway-principal')
   assert.equal(gateway.audiences.includes('urn:oes:service:tenant-org-service'), true)
+  assert.equal(gateway.audiences.includes('urn:oes:service:asset-service'), true)
+  assert.equal(gateway.audiences.includes('urn:oes:service:party-service'), true)
+  assert.deepEqual(
+    permission.find(
+      (entry) =>
+        entry.originalWorkloadSpiffeId === gateway.spiffeId &&
+        entry.targetAudience === 'urn:oes:service:party-service'
+    )?.permissionCodes,
+    ['party.internal.get_tenant_party_by_id']
+  )
   assert.deepEqual(selectorEnvironment('auth-service', selectors), {
     AUTH_FOUNDATION_MACHINE_PRINCIPAL_ID: 'auth-service-principal',
     AUTH_FOUNDATION_MACHINE_WORKLOAD_BINDING_ID: 'auth-service-binding',

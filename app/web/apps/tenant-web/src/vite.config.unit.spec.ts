@@ -77,4 +77,16 @@ describe('tenant-web vite config', () => {
       })
     )
   })
+
+  it('installs the browser diagnostic receiver only for the development server', async () => {
+    const config = await loadTenantViteConfig()
+    const plugins = config.vite.plugins ?? []
+
+    expect(plugins).toContainEqual(
+      expect.objectContaining({
+        apply: 'serve',
+        name: 'oes-browser-diagnostic-log'
+      })
+    )
+  })
 })

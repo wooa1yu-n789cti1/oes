@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common'
 import { CqrsModule } from '@nestjs/cqrs'
 import { ValidatingQueryBus } from '@oes/common/cqrs'
-import { CheckLeadDuplicateHandler } from '../application/queries/check-lead-duplicate.handler'
 import { GetCrmAccountHandler } from '../application/queries/get-crm-account.handler'
 import { ListCrmAccountsHandler } from '../application/queries/list-crm-accounts.handler'
 import { ListSourceRecordsHandler } from '../application/queries/list-source-records.handler'
@@ -15,7 +14,6 @@ import { CrmTrustedExecutionModule } from './crm-trusted-execution.module'
   imports: [CqrsModule, CrmTrustedExecutionModule],
   providers: [
     ValidatingQueryBus,
-    CheckLeadDuplicateHandler,
     GetCrmAccountHandler,
     ListCrmAccountsHandler,
     ListSourceRecordsHandler,

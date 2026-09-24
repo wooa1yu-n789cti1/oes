@@ -2,7 +2,10 @@ import { initPreferences } from '@vben/preferences';
 import { unmountGlobalLoading } from '@vben/utils';
 
 import { resolveTenantWebNamespace } from './app-namespace';
+import { installBrowserDiagnostics } from './diagnostics/browser-diagnostics';
 import { overridesPreferences } from './preferences';
+
+installBrowserDiagnostics();
 
 /**
  * 应用初始化完成之后再进行页面加载渲染

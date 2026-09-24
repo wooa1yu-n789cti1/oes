@@ -15,7 +15,7 @@
     "dev:start": "wait-on dist/main.js ../../../common/dist/index.js && ACCESS_TOKEN_VALIDITY_SEC=${ACCESS_TOKEN_VALIDITY_SEC:-900} REFRESH_TOKEN_VALIDITY_SEC=${REFRESH_TOKEN_VALIDITY_SEC:-604800} nodemon --watch dist --watch ../../../common/dist --ext js,json --signal SIGTERM dist/main.js",
     "dev": "concurrently -k -n build,run \"pnpm run dev:build\" \"pnpm run dev:start\"",
     "start": "node dist/main.js",
-    "prisma:generate": "npx prisma generate --schema=./prisma/schema.prisma",
+    "prisma:generate": "pnpm exec prisma generate --schema=./prisma/schema.prisma",
     "identifier:scan": "node -r ts-node/register ./src/scripts/identifier-backfill-scan.ts",
     "clear:build": "rimraf dist && rimraf tsconfig.tsbuildinfo",
     "clear:nm": "rimraf node_modules",

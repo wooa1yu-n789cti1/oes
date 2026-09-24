@@ -70,6 +70,8 @@ import {
   getSessionTerminalColor,
   getSessionTerminalLabel,
   isMfaEnableActionDisabled,
+  type LoginHistoryTableRow,
+  mergeLoginHistoryTableRows,
   resolveCurrentUserDisplayIdentifier,
   resolveMfaEnableFlow,
 } from './security-center.helpers';
@@ -126,7 +128,7 @@ const trustedDevicesLoading = ref(false);
 const trustedDeviceMutationLoading = ref(false);
 const sessions = ref<SelfSecurityApi.Session[]>([]);
 const trustedDevices = ref<SelfSecurityApi.TrustedDevice[]>([]);
-const loginHistoryItems = ref<SelfSecurityApi.LoginHistoryItem[]>([]);
+const loginHistoryItems = ref<LoginHistoryTableRow[]>([]);
 const loginHistoryNextCursor = ref<null | string>(null);
 const loginMethods = ref<SelfSecurityApi.LoginMethod[]>([]);
 const passwordSetupRequired = ref(false);
@@ -668,9 +670,11 @@ async function loadLoginHistory(options?: { append?: boolean }) {
       pageSize: loginHistoryFilters.pageSize,
     });
 
-    loginHistoryItems.value = append
-      ? [...loginHistoryItems.value, ...(result.items ?? [])]
-      : (result.items ?? []);
+    loginHistoryItems.value = mergeLoginHistoryTableRows(
+      loginHistoryItems.value,
+      result.items ?? [],
+      append,
+    );
     loginHistoryNextCursor.value = result.nextCursor ?? null;
   } finally {
     loginHistoryLoading.value = false;
@@ -1854,7 +1858,7 @@ watch(activeTab, (tab) => {
               :pagination="false"
               :scroll="{ x: loginHistoryTableScrollX }"
               class="security-table"
-              :row-key="(record, index) => `${record.occurredAt}-${record.traceId || index}`"
+              row-key="rowKey"
               size="middle"
             >
               <template #emptyText>
